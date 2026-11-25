@@ -466,6 +466,77 @@ int main() {
     HIP_CHECK(hipFree(dv)); HIP_CHECK(hipFree(dr));
   }
 
+  // KDA delta-rule step against the ggml algorithm on the host.
+  {
+    const int heads = 2, dim = 8;
+    std::vector<float> q(heads * dim), k(heads * dim), v(heads * dim),
+        g(heads * dim), beta(heads), state(heads * dim * dim);
+    for (auto& value : q) value = dist(rng);
+    for (auto& value : k) value = dist(rng);
+    for (auto& value : v) value = dist(rng);
+    for (auto& value : g) value = -0.5f + 0.5f * dist(rng);
+    for (auto& value : beta) value = 0.5f + 0.5f * std::fabs(dist(rng));
+    for (auto& value : state) value = 0.1f * dist(rng);
+
+    std::vector<float> expected_state(state), expected_out(heads * dim);
+    for (int h = 0; h < heads; ++h) {
+      float* m = expected_state.data() + h * dim * dim;
+      const float* qh = q.data() + h * dim;
+      const float* kh = k.data() + h * dim;
+      const float* vh = v.data() + h * dim;
+      const float* gh = g.data() + h * dim;
+      for (int j = 0; j < dim; ++j) {
+        for (int i = 0; i < dim; ++i) m[j * dim + i] *= std::exp(gh[i]);
+      }
+      std::vector<float> delta(dim);
+      for (int j = 0; j < dim; ++j) {
+        double dot = 0.0;
+        for (int i = 0; i < dim; ++i) dot += m[j * dim + i] * kh[i];
+        delta[j] = static_cast<float>((vh[j] - dot) * beta[h]);
+      }
+      for (int j = 0; j < dim; ++j) {
+        for (int i = 0; i < dim; ++i) m[j * dim + i] += kh[i] * delta[j];
+      }
+      for (int j = 0; j < dim; ++j) {
+        double sum = 0.0;
+        for (int i = 0; i < dim; ++i) sum += m[j * dim + i] * qh[i];
+        expected_out[h * dim + j] = static_cast<float>(sum / std::sqrt(static_cast<double>(dim)));
+      }
+    }
+
+    float *dq, *dk, *dv, *dg, *db, *ds, *dy;
+    HIP_CHECK(hipMalloc(&dq, q.size() * sizeof(float)));
+    HIP_CHECK(hipMalloc(&dk, k.size() * sizeof(float)));
+    HIP_CHECK(hipMalloc(&dv, v.size() * sizeof(float)));
+    HIP_CHECK(hipMalloc(&dg, g.size() * sizeof(float)));
+    HIP_CHECK(hipMalloc(&db, beta.size() * sizeof(float)));
+    HIP_CHECK(hipMalloc(&ds, state.size() * sizeof(float)));
+    HIP_CHECK(hipMalloc(&dy, expected_out.size() * sizeof(float)));
+    HIP_CHECK(hipMemcpy(dq, q.data(), q.size() * sizeof(float), hipMemcpyHostToDevice));
+    HIP_CHECK(hipMemcpy(dk, k.data(), k.size() * sizeof(float), hipMemcpyHostToDevice));
+    HIP_CHECK(hipMemcpy(dv, v.data(), v.size() * sizeof(float), hipMemcpyHostToDevice));
+    HIP_CHECK(hipMemcpy(dg, g.data(), g.size() * sizeof(float), hipMemcpyHostToDevice));
+    HIP_CHECK(hipMemcpy(db, beta.data(), beta.size() * sizeof(float), hipMemcpyHostToDevice));
+    HIP_CHECK(hipMemcpy(ds, state.data(), state.size() * sizeof(float), hipMemcpyHostToDevice));
+    hipk::LaunchDeltaRuleStep(dq, dk, dv, dg, db, ds, dy, heads, dim, 0);
+    HIP_CHECK(hipDeviceSynchronize());
+    std::vector<float> got_out(heads * dim), got_state(state.size());
+    HIP_CHECK(hipMemcpy(got_out.data(), dy, got_out.size() * sizeof(float), hipMemcpyDeviceToHost));
+    HIP_CHECK(hipMemcpy(got_state.data(), ds, state.size() * sizeof(float), hipMemcpyDeviceToHost));
+    double worst_out = 0.0, worst_state = 0.0;
+    for (std::size_t i = 0; i < got_out.size(); ++i) {
+      worst_out = std::max(worst_out, std::fabs(static_cast<double>(got_out[i]) - expected_out[i]));
+    }
+    for (std::size_t i = 0; i < got_state.size(); ++i) {
+      worst_state = std::max(worst_state, std::fabs(static_cast<double>(got_state[i]) - expected_state[i]));
+    }
+    Check(worst_out <= 1e-5, "delta rule out max abs error", worst_out, 1e-5);
+    Check(worst_state <= 1e-5, "delta rule state max abs error", worst_state, 1e-5);
+    HIP_CHECK(hipFree(dq)); HIP_CHECK(hipFree(dk)); HIP_CHECK(hipFree(dv));
+    HIP_CHECK(hipFree(dg)); HIP_CHECK(hipFree(db)); HIP_CHECK(hipFree(ds));
+    HIP_CHECK(hipFree(dy));
+  }
+
   std::printf("operators: %d failures\n", Failures);
   return Failures == 0 ? 0 : 1;
 }
