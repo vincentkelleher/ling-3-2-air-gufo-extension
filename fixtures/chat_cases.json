@@ -1,0 +1,621 @@
+{
+ "cases": [
+  {
+   "name": "single user",
+   "turns": [
+    {
+     "role": "user",
+     "parts": [
+      {
+       "text": "What is 2+2?"
+      }
+     ],
+     "thought": "",
+     "tool_calls": []
+    }
+   ],
+   "tools": [],
+   "enable_thinking": true,
+   "preserve_thinking": true,
+   "add_vision_id": false,
+   "expected": "<role>SYSTEM</role>detailed thinking on<|role_end|><role>HUMAN</role>What is 2+2?<|role_end|><role>ASSISTANT</role>\n<think>"
+  },
+  {
+   "name": "system and user",
+   "turns": [
+    {
+     "role": "system",
+     "parts": [
+      {
+       "text": "You are terse."
+      }
+     ],
+     "thought": "",
+     "tool_calls": []
+    },
+    {
+     "role": "user",
+     "parts": [
+      {
+       "text": "Hi"
+      }
+     ],
+     "thought": "",
+     "tool_calls": []
+    }
+   ],
+   "tools": [],
+   "enable_thinking": true,
+   "preserve_thinking": true,
+   "add_vision_id": false,
+   "expected": "<role>SYSTEM</role>You are terse.\ndetailed thinking on<|role_end|><role>HUMAN</role>Hi<|role_end|><role>ASSISTANT</role>\n<think>"
+  },
+  {
+   "name": "system empty",
+   "turns": [
+    {
+     "role": "system",
+     "parts": [
+      {
+       "text": ""
+      }
+     ],
+     "thought": "",
+     "tool_calls": []
+    },
+    {
+     "role": "user",
+     "parts": [
+      {
+       "text": "Hi"
+      }
+     ],
+     "thought": "",
+     "tool_calls": []
+    }
+   ],
+   "tools": [],
+   "enable_thinking": true,
+   "preserve_thinking": true,
+   "add_vision_id": false,
+   "expected": "<role>SYSTEM</role>detailed thinking on<|role_end|><role>HUMAN</role>Hi<|role_end|><role>ASSISTANT</role>\n<think>"
+  },
+  {
+   "name": "thinking off",
+   "turns": [
+    {
+     "role": "user",
+     "parts": [
+      {
+       "text": "Hi"
+      }
+     ],
+     "thought": "",
+     "tool_calls": []
+    }
+   ],
+   "tools": [],
+   "enable_thinking": false,
+   "preserve_thinking": true,
+   "add_vision_id": false,
+   "expected": "<role>SYSTEM</role>detailed thinking off<|role_end|><role>HUMAN</role>Hi<|role_end|><role>ASSISTANT</role>\n<think></think>"
+  },
+  {
+   "name": "system with thinking instruction",
+   "turns": [
+    {
+     "role": "system",
+     "parts": [
+      {
+       "text": "detailed thinking off"
+      }
+     ],
+     "thought": "",
+     "tool_calls": []
+    },
+    {
+     "role": "user",
+     "parts": [
+      {
+       "text": "Hi"
+      }
+     ],
+     "thought": "",
+     "tool_calls": []
+    }
+   ],
+   "tools": [],
+   "enable_thinking": true,
+   "preserve_thinking": true,
+   "add_vision_id": false,
+   "expected": "<role>SYSTEM</role>detailed thinking off<|role_end|><role>HUMAN</role>Hi<|role_end|><role>ASSISTANT</role>\n<think>"
+  },
+  {
+   "name": "tools",
+   "turns": [
+    {
+     "role": "user",
+     "parts": [
+      {
+       "text": "Price of AAPL?"
+      }
+     ],
+     "thought": "",
+     "tool_calls": []
+    }
+   ],
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "get_stock_price",
+      "description": "Get the stock price",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "symbol": {
+         "type": "string",
+         "description": "Ticker"
+        }
+       },
+       "required": [
+        "symbol"
+       ]
+      }
+     }
+    }
+   ],
+   "enable_thinking": true,
+   "preserve_thinking": true,
+   "add_vision_id": false,
+   "expected": "<role>SYSTEM</role># Tools\n\nYou may call one or more functions to assist with the user query.\n\nYou are provided with function signatures within <tools></tools> XML tags:\n<tools>\n{\"type\": \"function\", \"function\": {\"name\": \"get_stock_price\", \"description\": \"Get the stock price\", \"parameters\": {\"type\": \"object\", \"properties\": {\"symbol\": {\"type\": \"string\", \"description\": \"Ticker\"}}, \"required\": [\"symbol\"]}}}\n</tools>\n\nIf none of the functions can be used, point it out. If the given question lacks the parameters required by the function, also point it out.\nIf you need to use a function, for each function call, output the function name and arguments within the following XML format:\n<tool_call>{function-name}\n<arg_key>{arg-key-1}</arg_key>\n<arg_value>{arg-value-1}</arg_value>\n<arg_key>{arg-key-2}</arg_key>\n<arg_value>{arg-value-2}</arg_value>\n...\n</tool_call>\ndetailed thinking on<|role_end|><role>HUMAN</role>Price of AAPL?<|role_end|><role>ASSISTANT</role>\n<think>"
+  },
+  {
+   "name": "tools with system",
+   "turns": [
+    {
+     "role": "system",
+     "parts": [
+      {
+       "text": "Be brief."
+      }
+     ],
+     "thought": "",
+     "tool_calls": []
+    },
+    {
+     "role": "user",
+     "parts": [
+      {
+       "text": "Price of AAPL?"
+      }
+     ],
+     "thought": "",
+     "tool_calls": []
+    }
+   ],
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "get_stock_price",
+      "description": "Get the stock price",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "symbol": {
+         "type": "string",
+         "description": "Ticker"
+        }
+       },
+       "required": [
+        "symbol"
+       ]
+      }
+     }
+    }
+   ],
+   "enable_thinking": true,
+   "preserve_thinking": true,
+   "add_vision_id": false,
+   "expected": "<role>SYSTEM</role>Be brief.\n# Tools\n\nYou may call one or more functions to assist with the user query.\n\nYou are provided with function signatures within <tools></tools> XML tags:\n<tools>\n{\"type\": \"function\", \"function\": {\"name\": \"get_stock_price\", \"description\": \"Get the stock price\", \"parameters\": {\"type\": \"object\", \"properties\": {\"symbol\": {\"type\": \"string\", \"description\": \"Ticker\"}}, \"required\": [\"symbol\"]}}}\n</tools>\n\nIf none of the functions can be used, point it out. If the given question lacks the parameters required by the function, also point it out.\nIf you need to use a function, for each function call, output the function name and arguments within the following XML format:\n<tool_call>{function-name}\n<arg_key>{arg-key-1}</arg_key>\n<arg_value>{arg-value-1}</arg_value>\n<arg_key>{arg-key-2}</arg_key>\n<arg_value>{arg-value-2}</arg_value>\n...\n</tool_call>\ndetailed thinking on<|role_end|><role>HUMAN</role>Price of AAPL?<|role_end|><role>ASSISTANT</role>\n<think>"
+  },
+  {
+   "name": "assistant thought",
+   "turns": [
+    {
+     "role": "user",
+     "parts": [
+      {
+       "text": "Hi"
+      }
+     ],
+     "thought": "",
+     "tool_calls": []
+    },
+    {
+     "role": "assistant",
+     "parts": [
+      {
+       "text": "Hello!"
+      }
+     ],
+     "thought": "The user greeted me.",
+     "tool_calls": []
+    }
+   ],
+   "tools": [],
+   "enable_thinking": true,
+   "preserve_thinking": true,
+   "add_vision_id": false,
+   "expected": "<role>SYSTEM</role>detailed thinking on<|role_end|><role>HUMAN</role>Hi<|role_end|><role>ASSISTANT</role>\n<think>The user greeted me.</think>Hello!<|role_end|><role>ASSISTANT</role>\n<think>"
+  },
+  {
+   "name": "assistant empty thought",
+   "turns": [
+    {
+     "role": "user",
+     "parts": [
+      {
+       "text": "Hi"
+      }
+     ],
+     "thought": "",
+     "tool_calls": []
+    },
+    {
+     "role": "assistant",
+     "parts": [
+      {
+       "text": "Hello!"
+      }
+     ],
+     "thought": "",
+     "tool_calls": []
+    }
+   ],
+   "tools": [],
+   "enable_thinking": true,
+   "preserve_thinking": true,
+   "add_vision_id": false,
+   "expected": "<role>SYSTEM</role>detailed thinking on<|role_end|><role>HUMAN</role>Hi<|role_end|><role>ASSISTANT</role>\n<think></think>Hello!<|role_end|><role>ASSISTANT</role>\n<think>"
+  },
+  {
+   "name": "assistant inline think",
+   "turns": [
+    {
+     "role": "user",
+     "parts": [
+      {
+       "text": "Hi"
+      }
+     ],
+     "thought": "",
+     "tool_calls": []
+    },
+    {
+     "role": "assistant",
+     "parts": [
+      {
+       "text": "Thinking</think>Hello!"
+      }
+     ],
+     "thought": "",
+     "tool_calls": []
+    }
+   ],
+   "tools": [],
+   "enable_thinking": true,
+   "preserve_thinking": true,
+   "add_vision_id": false,
+   "expected": "<role>SYSTEM</role>detailed thinking on<|role_end|><role>HUMAN</role>Hi<|role_end|><role>ASSISTANT</role>\n<think>Thinking</think>Hello!<|role_end|><role>ASSISTANT</role>\n<think>"
+  },
+  {
+   "name": "preserve thinking off",
+   "turns": [
+    {
+     "role": "user",
+     "parts": [
+      {
+       "text": "Hi"
+      }
+     ],
+     "thought": "",
+     "tool_calls": []
+    },
+    {
+     "role": "assistant",
+     "parts": [
+      {
+       "text": "Hello!"
+      }
+     ],
+     "thought": "Because.",
+     "tool_calls": []
+    },
+    {
+     "role": "user",
+     "parts": [
+      {
+       "text": "Again"
+      }
+     ],
+     "thought": "",
+     "tool_calls": []
+    }
+   ],
+   "tools": [],
+   "enable_thinking": true,
+   "preserve_thinking": false,
+   "add_vision_id": false,
+   "expected": "<role>SYSTEM</role>detailed thinking on<|role_end|><role>HUMAN</role>Hi<|role_end|><role>ASSISTANT</role>\n<think></think>Hello!<|role_end|><role>HUMAN</role>Again<|role_end|><role>ASSISTANT</role>\n<think>"
+  },
+  {
+   "name": "tool call",
+   "turns": [
+    {
+     "role": "user",
+     "parts": [
+      {
+       "text": "Price?"
+      }
+     ],
+     "thought": "",
+     "tool_calls": []
+    },
+    {
+     "role": "assistant",
+     "parts": [
+      {
+       "text": ""
+      }
+     ],
+     "thought": "",
+     "tool_calls": [
+      {
+       "name": "get_stock_price",
+       "arguments_obj": {
+        "symbol": "AAPL"
+       },
+       "arguments": [
+        [
+         "symbol",
+         "AAPL",
+         true
+        ]
+       ]
+      }
+     ]
+    }
+   ],
+   "tools": [],
+   "enable_thinking": true,
+   "preserve_thinking": true,
+   "add_vision_id": false,
+   "expected": "<role>SYSTEM</role>detailed thinking on<|role_end|><role>HUMAN</role>Price?<|role_end|><role>ASSISTANT</role>\n<think></think><tool_call>get_stock_price\n<arg_key>symbol</arg_key>\n<arg_value>AAPL</arg_value>\n</tool_call><|role_end|><role>ASSISTANT</role>\n<think>"
+  },
+  {
+   "name": "tool response",
+   "turns": [
+    {
+     "role": "user",
+     "parts": [
+      {
+       "text": "Price?"
+      }
+     ],
+     "thought": "",
+     "tool_calls": []
+    },
+    {
+     "role": "assistant",
+     "parts": [
+      {
+       "text": ""
+      }
+     ],
+     "thought": "",
+     "tool_calls": [
+      {
+       "name": "get_stock_price",
+       "arguments_obj": {
+        "symbol": "AAPL"
+       },
+       "arguments": [
+        [
+         "symbol",
+         "AAPL",
+         true
+        ]
+       ]
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "parts": [
+      {
+       "text": "{\"price\": 101.2}"
+      }
+     ],
+     "thought": "",
+     "tool_calls": []
+    }
+   ],
+   "tools": [],
+   "enable_thinking": true,
+   "preserve_thinking": true,
+   "add_vision_id": false,
+   "expected": "<role>SYSTEM</role>detailed thinking on<|role_end|><role>HUMAN</role>Price?<|role_end|><role>ASSISTANT</role>\n<think></think><tool_call>get_stock_price\n<arg_key>symbol</arg_key>\n<arg_value>AAPL</arg_value>\n</tool_call><|role_end|><role>OBSERVATION</role>\n<tool_response>\n{\"price\": 101.2}\n</tool_response><|role_end|><role>ASSISTANT</role>\n<think>"
+  },
+  {
+   "name": "multi tool responses",
+   "turns": [
+    {
+     "role": "user",
+     "parts": [
+      {
+       "text": "Price?"
+      }
+     ],
+     "thought": "",
+     "tool_calls": []
+    },
+    {
+     "role": "assistant",
+     "parts": [
+      {
+       "text": ""
+      }
+     ],
+     "thought": "",
+     "tool_calls": [
+      {
+       "name": "get_stock_price",
+       "arguments_obj": {
+        "symbol": "AAPL"
+       },
+       "arguments": [
+        [
+         "symbol",
+         "AAPL",
+         true
+        ]
+       ]
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "parts": [
+      {
+       "text": "a"
+      }
+     ],
+     "thought": "",
+     "tool_calls": []
+    },
+    {
+     "role": "tool",
+     "parts": [
+      {
+       "text": "b"
+      }
+     ],
+     "thought": "",
+     "tool_calls": []
+    }
+   ],
+   "tools": [],
+   "enable_thinking": true,
+   "preserve_thinking": true,
+   "add_vision_id": false,
+   "expected": "<role>SYSTEM</role>detailed thinking on<|role_end|><role>HUMAN</role>Price?<|role_end|><role>ASSISTANT</role>\n<think></think><tool_call>get_stock_price\n<arg_key>symbol</arg_key>\n<arg_value>AAPL</arg_value>\n</tool_call><|role_end|><role>OBSERVATION</role>\n<tool_response>\na\n</tool_response>\n<tool_response>\nb\n</tool_response><|role_end|><role>ASSISTANT</role>\n<think>"
+  },
+  {
+   "name": "image",
+   "turns": [
+    {
+     "role": "user",
+     "parts": [
+      {
+       "text": "What is this? "
+      },
+      {
+       "image": true
+      }
+     ],
+     "thought": "",
+     "tool_calls": []
+    }
+   ],
+   "tools": [],
+   "enable_thinking": true,
+   "preserve_thinking": true,
+   "add_vision_id": false,
+   "expected": "<role>SYSTEM</role>detailed thinking on<|role_end|><role>HUMAN</role>What is this? <|vision_start|><|image_pad|><|vision_end|><|role_end|><role>ASSISTANT</role>\n<think>"
+  },
+  {
+   "name": "image with id",
+   "turns": [
+    {
+     "role": "user",
+     "parts": [
+      {
+       "text": ""
+      },
+      {
+       "image": true
+      },
+      {
+       "text": " describe"
+      }
+     ],
+     "thought": "",
+     "tool_calls": []
+    }
+   ],
+   "tools": [],
+   "enable_thinking": true,
+   "preserve_thinking": true,
+   "add_vision_id": true,
+   "expected": "<role>SYSTEM</role>detailed thinking on<|role_end|><role>HUMAN</role>Picture 1: <|vision_start|><|image_pad|><|vision_end|> describe<|role_end|><role>ASSISTANT</role>\n<think>"
+  },
+  {
+   "name": "two images",
+   "turns": [
+    {
+     "role": "user",
+     "parts": [
+      {
+       "image": true
+      },
+      {
+       "text": " and "
+      },
+      {
+       "image": true
+      }
+     ],
+     "thought": "",
+     "tool_calls": []
+    }
+   ],
+   "tools": [],
+   "enable_thinking": true,
+   "preserve_thinking": true,
+   "add_vision_id": false,
+   "expected": "<role>SYSTEM</role>detailed thinking on<|role_end|><role>HUMAN</role><|vision_start|><|image_pad|><|vision_end|> and <|vision_start|><|image_pad|><|vision_end|><|role_end|><role>ASSISTANT</role>\n<think>"
+  },
+  {
+   "name": "other role",
+   "turns": [
+    {
+     "role": "developer",
+     "parts": [
+      {
+       "text": "note"
+      }
+     ],
+     "thought": "",
+     "tool_calls": []
+    },
+    {
+     "role": "user",
+     "parts": [
+      {
+       "text": "Hi"
+      }
+     ],
+     "thought": "",
+     "tool_calls": []
+    }
+   ],
+   "tools": [],
+   "enable_thinking": true,
+   "preserve_thinking": true,
+   "add_vision_id": false,
+   "expected": "<role>SYSTEM</role>detailed thinking on<|role_end|><role>developer</role>note<|role_end|><role>HUMAN</role>Hi<|role_end|><role>ASSISTANT</role>\n<think>"
+  }
+ ]
+}
