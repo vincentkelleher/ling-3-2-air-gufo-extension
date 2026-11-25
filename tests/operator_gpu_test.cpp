@@ -15,10 +15,12 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <algorithm>
 #include <random>
 #include <vector>
 
 #include "src/hip/kernels.hpp"
+#include "src/hip/layers.hpp"
 
 namespace {
 
@@ -344,6 +346,124 @@ int main() {
     HIP_CHECK(hipFree(device_values));
     HIP_CHECK(hipFree(device_weights));
     HIP_CHECK(hipFree(device_out));
+  }
+
+  // Causal conv1d step: output, then the shifted state.
+  {
+    const int channels = 16;
+    std::vector<float> x(channels), weight(4 * channels), state(3 * channels);
+    for (auto& v : x) v = dist(rng);
+    for (auto& v : weight) v = dist(rng);
+    for (auto& v : state) v = dist(rng);
+    std::vector<float> expected_out(channels);
+    std::vector<float> expected_state(state);
+    for (int c = 0; c < channels; ++c) {
+      const float window[4] = {state[c], state[channels + c], state[2 * channels + c], x[c]};
+      float sum = 0.0f;
+      for (int k = 0; k < 4; ++k) sum += weight[k * channels + c] * window[k];
+      expected_out[c] = sum;
+      expected_state[c] = window[1];
+      expected_state[channels + c] = window[2];
+      expected_state[2 * channels + c] = window[3];
+    }
+    float *dx, *dw, *ds, *dy;
+    HIP_CHECK(hipMalloc(&dx, channels * sizeof(float)));
+    HIP_CHECK(hipMalloc(&dw, weight.size() * sizeof(float)));
+    HIP_CHECK(hipMalloc(&ds, state.size() * sizeof(float)));
+    HIP_CHECK(hipMalloc(&dy, channels * sizeof(float)));
+    HIP_CHECK(hipMemcpy(dx, x.data(), channels * sizeof(float), hipMemcpyHostToDevice));
+    HIP_CHECK(hipMemcpy(dw, weight.data(), weight.size() * sizeof(float), hipMemcpyHostToDevice));
+    HIP_CHECK(hipMemcpy(ds, state.data(), state.size() * sizeof(float), hipMemcpyHostToDevice));
+    hipk::LaunchConv1dStep(dx, dw, ds, dy, channels, 0);
+    HIP_CHECK(hipDeviceSynchronize());
+    std::vector<float> out(channels), got_state(state.size());
+    HIP_CHECK(hipMemcpy(out.data(), dy, channels * sizeof(float), hipMemcpyDeviceToHost));
+    HIP_CHECK(hipMemcpy(got_state.data(), ds, state.size() * sizeof(float), hipMemcpyDeviceToHost));
+    double worst = 0.0, worst_state = 0.0;
+    for (int c = 0; c < channels; ++c) {
+      worst = std::max(worst, std::fabs(static_cast<double>(out[c]) - expected_out[c]));
+    }
+    for (std::size_t i = 0; i < state.size(); ++i) {
+      worst_state = std::max(worst_state, std::fabs(static_cast<double>(got_state[i]) - expected_state[i]));
+    }
+    Check(worst <= 1e-5, "conv1d step max abs error", worst, 1e-5);
+    Check(worst_state <= 1e-5, "conv1d state max abs error", worst_state, 1e-5);
+    HIP_CHECK(hipFree(dx)); HIP_CHECK(hipFree(dw)); HIP_CHECK(hipFree(ds)); HIP_CHECK(hipFree(dy));
+  }
+
+  // L2 normalisation per head.
+  {
+    const int heads = 4, dim = 32;
+    std::vector<float> values(heads * dim);
+    for (auto& v : values) v = dist(rng);
+    std::vector<float> expected(values.size());
+    for (int h = 0; h < heads; ++h) {
+      double sum = 0.0;
+      for (int i = 0; i < dim; ++i) sum += values[h * dim + i] * values[h * dim + i];
+      const double norm = std::sqrt(sum);
+      const double scale = 1.0 / (norm < 1e-6 ? 1e-6 : norm);
+      for (int i = 0; i < dim; ++i) expected[h * dim + i] = static_cast<float>(values[h * dim + i] * scale);
+    }
+    float *dv, *dy;
+    HIP_CHECK(hipMalloc(&dv, values.size() * sizeof(float)));
+    HIP_CHECK(hipMalloc(&dy, values.size() * sizeof(float)));
+    HIP_CHECK(hipMemcpy(dv, values.data(), values.size() * sizeof(float), hipMemcpyHostToDevice));
+    hipk::LaunchL2Norm(dv, dy, heads, dim, 1e-6f, 0);
+    HIP_CHECK(hipDeviceSynchronize());
+    std::vector<float> actual(values.size());
+    HIP_CHECK(hipMemcpy(actual.data(), dy, values.size() * sizeof(float), hipMemcpyDeviceToHost));
+    double worst = 0.0;
+    for (std::size_t i = 0; i < actual.size(); ++i) worst = std::max(worst, std::fabs(static_cast<double>(actual[i]) - expected[i]));
+    Check(worst <= 1e-5, "l2norm max abs error", worst, 1e-5);
+    HIP_CHECK(hipFree(dv)); HIP_CHECK(hipFree(dy));
+  }
+
+  // RoPE (neox pairing) on the first 64 dims of a 192-wide head.
+  {
+    const int heads = 1, dim = 192, n_rot = 64;
+    const int position = 7;
+    const float base = 6000000.0f;
+    std::vector<float> values(dim);
+    for (auto& v : values) v = dist(rng);
+    std::vector<float> expected(values);
+    for (int pair = 0; pair < n_rot / 2; ++pair) {
+      const float inv = std::pow(base, -2.0f * static_cast<float>(pair) / static_cast<float>(n_rot));
+      const float angle = static_cast<float>(position) * inv;
+      const float c = std::cos(angle), s = std::sin(angle);
+      const float a = expected[pair], b = expected[pair + n_rot / 2];
+      expected[pair] = a * c - b * s;
+      expected[pair + n_rot / 2] = a * s + b * c;
+    }
+    float* dv;
+    HIP_CHECK(hipMalloc(&dv, dim * sizeof(float)));
+    HIP_CHECK(hipMemcpy(dv, values.data(), dim * sizeof(float), hipMemcpyHostToDevice));
+    hipk::LaunchRope(dv, heads, dim, n_rot, position, base, true, 0);
+    HIP_CHECK(hipDeviceSynchronize());
+    std::vector<float> actual(dim);
+    HIP_CHECK(hipMemcpy(actual.data(), dv, dim * sizeof(float), hipMemcpyDeviceToHost));
+    double worst = 0.0;
+    for (int i = 0; i < dim; ++i) worst = std::max(worst, std::fabs(static_cast<double>(actual[i]) - expected[i]));
+    Check(worst <= 2e-5, "rope max abs error", worst, 2e-5);
+    HIP_CHECK(hipFree(dv));
+  }
+
+  // Argmax.
+  {
+    const int count = 1000;
+    std::vector<float> values(count);
+    for (auto& v : values) v = dist(rng);
+    const int expected = static_cast<int>(std::max_element(values.begin(), values.end()) - values.begin());
+    float* dv;
+    std::int32_t* dr;
+    HIP_CHECK(hipMalloc(&dv, count * sizeof(float)));
+    HIP_CHECK(hipMalloc(&dr, sizeof(std::int32_t)));
+    HIP_CHECK(hipMemcpy(dv, values.data(), count * sizeof(float), hipMemcpyHostToDevice));
+    hipk::LaunchArgmax(dv, count, dr, 0);
+    HIP_CHECK(hipDeviceSynchronize());
+    std::int32_t actual = -1;
+    HIP_CHECK(hipMemcpy(&actual, dr, sizeof(std::int32_t), hipMemcpyDeviceToHost));
+    Check(actual == expected, "argmax index", actual, expected);
+    HIP_CHECK(hipFree(dv)); HIP_CHECK(hipFree(dr));
   }
 
   std::printf("operators: %d failures\n", Failures);

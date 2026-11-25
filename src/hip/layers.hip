@@ -1,0 +1,153 @@
+#include "src/hip/layers.hpp"
+
+#include <hip/hip_runtime.h>
+
+#include <cstddef>
+#include <cstdint>
+
+namespace gufo::ext::ling3_air::hip {
+namespace {
+
+constexpr int kThreads = 256;
+
+__global__ void Conv1dStepKernel(const float* x, const float* weight,
+                                float* state, float* out, int channels) {
+  const int c = blockIdx.x * blockDim.x + threadIdx.x;
+  if (c >= channels) {
+    return;
+  }
+  const float window[4] = {state[c], state[channels + c], state[2 * channels + c],
+                           x[c]};
+  float sum = 0.0f;
+  for (int k = 0; k < 4; ++k) {
+    sum += weight[k * channels + c] * window[k];
+  }
+  out[c] = sum;
+  state[c] = window[1];
+  state[channels + c] = window[2];
+  state[2 * channels + c] = window[3];
+}
+
+__global__ void L2NormKernel(const float* x, float* y, int heads, int head_dim,
+                             float eps) {
+  const int head = blockIdx.x;
+  if (head >= heads) {
+    return;
+  }
+  const float* source = x + static_cast<std::size_t>(head) * head_dim;
+  float* target = y + static_cast<std::size_t>(head) * head_dim;
+  float sum = 0.0f;
+  for (int i = threadIdx.x; i < head_dim; i += blockDim.x) {
+    sum += source[i] * source[i];
+  }
+  for (int offset = 16; offset > 0; offset >>= 1) {
+    sum += __shfl_down(sum, offset);
+  }
+  __shared__ float shared;
+  if (threadIdx.x == 0) {
+    shared = 0.0f;
+  }
+  __syncthreads();
+  if ((threadIdx.x & 31) == 0) {
+    atomicAdd(&shared, sum);
+  }
+  __syncthreads();
+  const float norm = sqrtf(shared);
+  const float scale = 1.0f / (norm < eps ? eps : norm);
+  for (int i = threadIdx.x; i < head_dim; i += blockDim.x) {
+    target[i] = source[i] * scale;
+  }
+}
+
+/// Rotates one pair of dimensions of one head.
+__device__ __forceinline__ void RotatePair(float* base, int i, int j, float angle) {
+  const float cosine = cosf(angle);
+  const float sine = sinf(angle);
+  const float a = base[i];
+  const float b = base[j];
+  base[i] = a * cosine - b * sine;
+  base[j] = a * sine + b * cosine;
+}
+
+__global__ void RopeKernel(float* x, int heads, int head_dim, int n_rot,
+                           int position, float freq_base, int neox) {
+  const int head = blockIdx.x;
+  const int pair = threadIdx.x;
+  const int pairs = n_rot / 2;
+  if (head >= heads || pair >= pairs) {
+    return;
+  }
+  float* base = x + static_cast<std::size_t>(head) * head_dim;
+  // Same frequency layout as llama.cpp: inverse frequency over the rotary
+  // dimensions, then multiplied by the position.
+  const float inv_freq = powf(freq_base, -2.0f * static_cast<float>(pair) /
+                                               static_cast<float>(n_rot));
+  const float angle = static_cast<float>(position) * inv_freq;
+  if (neox != 0) {
+    RotatePair(base, pair, pair + pairs, angle);
+  } else {
+    RotatePair(base, 2 * pair, 2 * pair + 1, angle);
+  }
+}
+
+__global__ void ArgmaxKernel(const float* x, int count, std::int32_t* result) {
+  // Sequential on one thread: 157k reads are microseconds next to a block's
+  // GEMVs, and it makes the tie rule (lowest index wins) trivially exact.
+  if (threadIdx.x != 0 || blockIdx.x != 0) {
+    return;
+  }
+  int best_index = 0;
+  float best_value = x[0];
+  for (int i = 1; i < count; ++i) {
+    if (x[i] > best_value) {
+      best_value = x[i];
+      best_index = i;
+    }
+  }
+  *result = best_index;
+}
+
+__global__ void AxpyKernel(float* y, const float* z, float scale, std::size_t count) {
+  const std::size_t i = static_cast<std::size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  if (i < count) {
+    y[i] += scale * z[i];
+  }
+}
+
+}  // namespace
+
+void LaunchConv1dStep(const float* x, const float* weight, float* state,
+                      float* out, std::size_t channels, hipStream_t stream) {
+  const int blocks = static_cast<int>((channels + kThreads - 1) / kThreads);
+  Conv1dStepKernel<<<blocks, kThreads, 0, stream>>>(x, weight, state, out,
+                                                   static_cast<int>(channels));
+}
+
+void LaunchL2Norm(const float* x, float* y, std::size_t heads,
+                  std::size_t head_dim, float eps, hipStream_t stream) {
+  L2NormKernel<<<static_cast<int>(heads), 128, 0, stream>>>(
+      x, y, static_cast<int>(heads), static_cast<int>(head_dim), eps);
+}
+
+void LaunchRope(float* x, std::size_t heads, std::size_t head_dim,
+                std::size_t n_rot, std::size_t position, float freq_base,
+                bool neox, hipStream_t stream) {
+  const int pairs = static_cast<int>(n_rot / 2);
+  RopeKernel<<<static_cast<int>(heads), pairs, 0, stream>>>(
+      x, static_cast<int>(heads), static_cast<int>(head_dim),
+      static_cast<int>(n_rot), static_cast<int>(position), freq_base,
+      neox ? 1 : 0);
+}
+
+void LaunchArgmax(const float* x, std::size_t count, std::int32_t* result,
+                  hipStream_t stream) {
+  ArgmaxKernel<<<1, kThreads, 0, stream>>>(x, static_cast<int>(count), result);
+}
+
+void LaunchAxpy(float* y, const float* z, float scale, std::size_t count,
+                hipStream_t stream) {
+  const int blocks = static_cast<int>((count + kThreads - 1) / kThreads);
+  AxpyKernel<<<blocks, kThreads, 0, stream>>>(y, z, scale, count);
+}
+
+}  // namespace gufo::ext::ling3_air::hip
