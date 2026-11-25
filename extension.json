@@ -1,0 +1,86 @@
+{
+  "schema": 1,
+  "name": "ling3_air",
+  "version": "0.1.0",
+  "api_version": ">= 0.3.0",
+  "entry": "ling3_air_register",
+  "registration_target": "gufo_ling3_air",
+  "depends": [],
+  "platforms": [
+    "linux"
+  ],
+  "providers": [
+    {
+      "id": "ling3-air",
+      "capability": "text_generation",
+      "keys": [
+        "gguf:bailingmoe3"
+      ],
+      "model_ids": [
+        "ling-3.2-air"
+      ],
+      "target": "gufo_ling3_air",
+      "entry": "ling3_air_provider_register"
+    }
+  ],
+  "models": [
+    {
+      "id": "ling-3.2-air",
+      "provider": "ling3-air",
+      "license": "other",
+      "description": "Ling 3.2 Air, Q4_K_M GGUF (three shards) with the BF16 multimodal projector",
+      "components": [
+        {
+          "role": "weights",
+          "option": "--model",
+          "install": "required",
+          "source": {
+            "hf": "bartowski/Ling-3.2-air-GGUF",
+            "revision": "2073edb5da4296cb37b334584b858aa6141e352f"
+          },
+          "include": [
+            "Ling-3.2-air-Q4_K_M/*"
+          ],
+          "entry": "Ling-3.2-air-Q4_K_M/Ling-3.2-air-Q4_K_M-00001-of-00003.gguf"
+        },
+        {
+          "role": "mmproj",
+          "option": "--mmproj",
+          "install": "default",
+          "source": {
+            "hf": "bartowski/Ling-3.2-air-GGUF",
+            "revision": "2073edb5da4296cb37b334584b858aa6141e352f"
+          },
+          "include": [
+            "mmproj-Ling-3.2-air-bf16.gguf"
+          ]
+        }
+      ]
+    }
+  ],
+  "options": [],
+  "targets": {
+    "gufo_ling3_air": {
+      "requires": []
+    }
+  },
+  "licenses": [
+    "LICENSE",
+    "THIRD_PARTY.md"
+  ],
+  "production_paths": {
+    "include": [
+      "**/*.cpp",
+      "**/*.hpp",
+      "**/*.hip",
+      "extension.*",
+      "models.lock.json"
+    ],
+    "exclude": [
+      "tests/",
+      "tools/",
+      "notes/",
+      "fixtures/"
+    ]
+  }
+}
