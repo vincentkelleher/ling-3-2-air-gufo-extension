@@ -71,6 +71,20 @@ if(TARGET ling3_air_forward_test)
   set_tests_properties(ling3_air.forward PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 3600)
 endif()
 
+# Dequantization agreement with Gufo's reference on real weight rows.
+gufo_extension_target(
+  NAME ling3_air_dot_test
+  SOURCES
+    tests/dot_vs_gufo_test.cpp
+  LINK_LIBRARIES
+    gufo_ext_runtime
+    gufo_ext_core
+)
+if(TARGET ling3_air_dot_test)
+  add_test(NAME ling3_air.dot COMMAND ling3_air_dot_test)
+  set_tests_properties(ling3_air.dot PROPERTIES SKIP_RETURN_CODE 77)
+endif()
+
 # Probe behaviour: claims the pinned file, refuses everything else.
 gufo_extension_target(
   NAME ling3_air_probe_test

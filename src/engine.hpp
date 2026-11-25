@@ -37,6 +37,9 @@ class Engine {
   [[nodiscard]] bool ForwardToken(std::int32_t token, std::uint32_t position,
                                   std::string* error);
 
+  /// Copies the embedding row the first step would compute (debug/test hook).
+  void DebugEmbedding(std::int32_t token, float* host_row);
+
   /// Copies the last step's logits to the host (large: `VocabSize()` floats).
   void ReadLogits(float* host_logits);
   /// Greedy token of the last step, computed on the device.

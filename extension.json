@@ -98,6 +98,12 @@
         "testing"
       ],
       "role": "test"
+    },
+    "ling3_air_dot_test": {
+      "requires": [
+        "testing"
+      ],
+      "role": "test"
     }
   },
   "licenses": [

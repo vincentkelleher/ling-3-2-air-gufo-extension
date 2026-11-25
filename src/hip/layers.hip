@@ -18,9 +18,12 @@ __global__ void Conv1dStepKernel(const float* x, const float* weight,
   }
   const float window[4] = {state[c], state[channels + c], state[2 * channels + c],
                            x[c]};
+  // The GGUF stores ssm_conv1d_*.weight as [kernel, 1, channels]: the kernel
+  // index is the fastest-varying one, so channel c owns the four consecutive
+  // weights weight[c * 4 + k].
   float sum = 0.0f;
   for (int k = 0; k < 4; ++k) {
-    sum += weight[k * channels + c] * window[k];
+    sum += weight[c * 4 + k] * window[k];
   }
   out[c] = sum;
   state[c] = window[1];

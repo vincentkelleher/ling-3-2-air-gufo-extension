@@ -138,3 +138,32 @@ worth keeping:
    and the MLA score scale. The decisive test is the llama.cpp comparison:
    `~/ling32-work/llama-cpu/bin/llama-completion` reads the same GGUF and shares
    the page cache, so it can run beside this without another 80 GiB.
+
+## What is proven and what is still wrong (2026-11-26 late)
+
+Proven, with tests that pass:
+
+- Dequantization matches Gufo's reference on real rows of every storage type,
+  including `blk.31.ffn_down_exps` (Q5_K): `tests/dot_vs_gufo_test.cpp`, 14/14.
+- The embedding-row kernel is bit-exact against the same reference.
+- 23 GPU operator checks (GEMV F32/Q8_0/Q4_K/Q5_K/Q6_K, RMSNorm, conv1d step,
+  L2 norm, RoPE, argmax, KDA delta rule, MLA pipeline, router, expert gather).
+
+Two real bugs found and fixed on the way: the Q5_K-in-place-of-float read (all
+NaN) and the conv1d weight layout (`ssm_conv1d_*.weight` is `[kernel, 1,
+channels]`, so channel `c` owns `weight[c*4 + k]`; reading it transposed gives
+finite garbage).
+
+Still wrong: end-to-end text is not coherent (llama.cpp answers the same prompt
+with "The user is asking"). Logits are finite and plausible in range, so the
+remaining error is semantic, not numeric. Untested suspects, in the order worth
+checking:
+
+1. KDA state *ordering across tokens*: the conv window and the delta state are
+   updated per step; a mismatch only shows after several tokens.
+2. RoPE: `LING3_ROPE=interleaved` switches the pairing; both were garbage before
+   the conv fix, so re-test both now.
+3. Router semantics versus llama.cpp's `build_moe_ffn` (normalisation order,
+   whether the shared expert is scaled).
+4. MLA: whether `attn_v_b` applies to the latent output per head (current) or
+   after concatenation.

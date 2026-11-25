@@ -562,6 +562,16 @@ bool Engine::ForwardToken(std::int32_t token, std::uint32_t position,
   return true;
 }
 
+void Engine::DebugEmbedding(std::int32_t token, float* host_row) {
+  Impl& m = *impl_;
+  const std::size_t n_embd = m.config.n_embd;
+  hip::LaunchEmbeddingRow(m.Dev(m.weights.token_embd),
+                          RawType(m.weights.token_embd.type), m.config.n_vocab,
+                          n_embd, token, m.x, nullptr);
+  hipStreamSynchronize(nullptr);
+  hipMemcpy(host_row, m.x, n_embd * sizeof(float), hipMemcpyDeviceToHost);
+}
+
 void Engine::ReadLogits(float* host_logits) {
   hipMemcpy(host_logits, impl_->logits, impl_->config.n_vocab * sizeof(float),
             hipMemcpyDeviceToHost);

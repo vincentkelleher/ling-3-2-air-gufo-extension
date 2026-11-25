@@ -362,7 +362,7 @@ int main() {
     for (int c = 0; c < channels; ++c) {
       const float window[4] = {state[c], state[channels + c], state[2 * channels + c], x[c]};
       float sum = 0.0f;
-      for (int k = 0; k < 4; ++k) sum += weight[k * channels + c] * window[k];
+      for (int k = 0; k < 4; ++k) sum += weight[c * 4 + k] * window[k];
       expected_out[c] = sum;
       expected_state[c] = window[1];
       expected_state[channels + c] = window[2];

@@ -13,6 +13,11 @@
 
 #include <gufo/ext/gguf_reader.hpp>
 
+#include <cmath>
+#include <cstring>
+
+#include <gufo/ext/experimental/ggml_dequant.hpp>
+
 #include "src/config.hpp"
 #include "src/engine.hpp"
 #include "src/text/tokenizer.hpp"
@@ -80,6 +85,41 @@ int main(int argc, char** argv) {
                                       /*parse_special=*/true);
     std::printf("prompt: %zu tokens\n", prompt_tokens.size());
   }
+  // The embedding row is the engine's only custom dequantization path.
+  {
+    std::vector<float> device_row(weights.token_embd.Cols() == 0 ? config.n_embd
+                                                                 : config.n_embd);
+    const std::int32_t probe_token = 1000;
+    engine->DebugEmbedding(probe_token, device_row.data());
+    std::vector<float> reference(config.n_embd, 0.0f);
+    const std::size_t row_bytes =
+        weights.token_embd.bytes / static_cast<std::size_t>(config.n_vocab);
+    const auto* base = static_cast<const std::uint8_t*>(weights.token_embd.data) +
+                       static_cast<std::size_t>(probe_token) * row_bytes;
+    std::printf("embedding row %d: %zu bytes/row\n", probe_token, row_bytes);
+    double worst = 0.0;
+    double magnitude = 0.0;
+    if (weights.token_embd.type == gufo::core::GgmlType::kQ8_0) {
+      for (std::size_t b = 0; b < config.n_embd / 32; ++b) {
+        const auto* block = base + b * 34;
+        std::uint16_t bits;
+        std::memcpy(&bits, block, sizeof(bits));
+        const float d = gufo::quant::Fp16ToFloat(bits);
+        for (int j = 0; j < 32; ++j) {
+          const float value =
+              d * static_cast<float>(static_cast<std::int8_t>(block[2 + j]));
+          const std::size_t index = b * 32 + j;
+          worst = std::fabs(static_cast<double>(device_row[index]) - value) > worst
+                      ? std::fabs(static_cast<double>(device_row[index]) - value)
+                      : worst;
+          magnitude = std::fabs(value) > magnitude ? std::fabs(value) : magnitude;
+        }
+      }
+    }
+    std::printf("embedding check: worst abs error %.3g (values up to %.3g)\n", worst,
+                magnitude);
+  }
+
   std::int32_t token = use_prompt ? prompt_tokens.front() : 156891;
   std::vector<ling::text::TokenId> produced;
   std::size_t position = 0;
