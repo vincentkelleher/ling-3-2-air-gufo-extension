@@ -20,6 +20,7 @@
 #include <vector>
 
 #include "src/hip/kernels.hpp"
+#include "src/hip/attention.hpp"
 #include "src/hip/layers.hpp"
 
 namespace {
@@ -535,6 +536,101 @@ int main() {
     HIP_CHECK(hipFree(dq)); HIP_CHECK(hipFree(dk)); HIP_CHECK(hipFree(dv));
     HIP_CHECK(hipFree(dg)); HIP_CHECK(hipFree(db)); HIP_CHECK(hipFree(ds));
     HIP_CHECK(hipFree(dy));
+  }
+
+  // MLA: absorb, scores, softmax, latent sum, value absorb and gate.
+  {
+    const int heads = 2;
+    const int len = 3;
+    const std::size_t latent = hipk::kMlaLatent, rope = hipk::kMlaRope,
+                      nope = hipk::kMlaNope, vdim = hipk::kMlaV;
+    std::vector<float> q_nope(heads * nope), q_pe(heads * rope),
+        wk_b(heads * latent * nope), wv_b(heads * vdim * latent),
+        gate(heads), cache(len * hipk::kMlaCacheStride);
+    for (auto& x : q_nope) x = dist(rng);
+    for (auto& x : q_pe) x = dist(rng);
+    for (auto& x : wk_b) x = 0.1f * dist(rng);
+    for (auto& x : wv_b) x = 0.1f * dist(rng);
+    for (auto& x : gate) x = dist(rng);
+    for (auto& x : cache) x = dist(rng);
+
+    std::vector<float> q_abs(heads * latent), scores(heads * len),
+        latent_out(heads * latent), expected(heads * vdim);
+    for (int h = 0; h < heads; ++h) {
+      for (std::size_t i = 0; i < latent; ++i) {
+        double sum = 0.0;
+        for (std::size_t d = 0; d < nope; ++d) {
+          sum += q_nope[h * nope + d] * wk_b[(h * latent + i) * nope + d];
+        }
+        q_abs[h * latent + i] = static_cast<float>(sum);
+      }
+      for (int p = 0; p < len; ++p) {
+        double sum = 0.0;
+        for (std::size_t i = 0; i < latent; ++i) {
+          sum += q_abs[h * latent + i] * cache[p * hipk::kMlaCacheStride + i];
+        }
+        for (std::size_t j = 0; j < rope; ++j) {
+          sum += q_pe[h * rope + j] * cache[p * hipk::kMlaCacheStride + latent + j];
+        }
+        scores[h * len + p] = static_cast<float>(sum * hipk::kMlaScoreScale);
+      }
+      double max_score = scores[h * len];
+      for (int p = 1; p < len; ++p) max_score = std::max(max_score, static_cast<double>(scores[h * len + p]));
+      double total = 0.0;
+      for (int p = 0; p < len; ++p) {
+        scores[h * len + p] = static_cast<float>(std::exp(scores[h * len + p] - max_score));
+        total += scores[h * len + p];
+      }
+      for (int p = 0; p < len; ++p) scores[h * len + p] = static_cast<float>(scores[h * len + p] / total);
+      for (std::size_t i = 0; i < latent; ++i) {
+        double sum = 0.0;
+        for (int p = 0; p < len; ++p) sum += scores[h * len + p] * cache[p * hipk::kMlaCacheStride + i];
+        latent_out[h * latent + i] = static_cast<float>(sum);
+      }
+      const double g = 1.0 / (1.0 + std::exp(-static_cast<double>(gate[h])));
+      for (std::size_t o = 0; o < vdim; ++o) {
+        double sum = 0.0;
+        for (std::size_t i = 0; i < latent; ++i) {
+          sum += latent_out[h * latent + i] * wv_b[(h * vdim + o) * latent + i];
+        }
+        expected[h * vdim + o] = static_cast<float>(sum * g);
+      }
+    }
+
+    float *dq, *dqr, *dwk, *dwv, *dg, *dcache, *dqa, *dsc, *dlat, *dout;
+    HIP_CHECK(hipMalloc(&dq, q_nope.size() * sizeof(float)));
+    HIP_CHECK(hipMalloc(&dqr, q_pe.size() * sizeof(float)));
+    HIP_CHECK(hipMalloc(&dwk, wk_b.size() * sizeof(float)));
+    HIP_CHECK(hipMalloc(&dwv, wv_b.size() * sizeof(float)));
+    HIP_CHECK(hipMalloc(&dg, gate.size() * sizeof(float)));
+    HIP_CHECK(hipMalloc(&dcache, cache.size() * sizeof(float)));
+    HIP_CHECK(hipMalloc(&dqa, q_abs.size() * sizeof(float)));
+    HIP_CHECK(hipMalloc(&dsc, scores.size() * sizeof(float)));
+    HIP_CHECK(hipMalloc(&dlat, latent_out.size() * sizeof(float)));
+    HIP_CHECK(hipMalloc(&dout, expected.size() * sizeof(float)));
+    HIP_CHECK(hipMemcpy(dq, q_nope.data(), q_nope.size() * sizeof(float), hipMemcpyHostToDevice));
+    HIP_CHECK(hipMemcpy(dqr, q_pe.data(), q_pe.size() * sizeof(float), hipMemcpyHostToDevice));
+    HIP_CHECK(hipMemcpy(dwk, wk_b.data(), wk_b.size() * sizeof(float), hipMemcpyHostToDevice));
+    HIP_CHECK(hipMemcpy(dwv, wv_b.data(), wv_b.size() * sizeof(float), hipMemcpyHostToDevice));
+    HIP_CHECK(hipMemcpy(dg, gate.data(), gate.size() * sizeof(float), hipMemcpyHostToDevice));
+    HIP_CHECK(hipMemcpy(dcache, cache.data(), cache.size() * sizeof(float), hipMemcpyHostToDevice));
+    hipk::LaunchMlaAbsorbQ(dq, dwk, dqa, heads, 0);
+    hipk::LaunchMlaScores(dqa, dqr, dcache, heads, len, dsc, 0);
+    hipk::LaunchMlaSoftmax(dsc, heads, len, 0);
+    hipk::LaunchMlaLatentSum(dsc, dcache, heads, len, dlat, 0);
+    hipk::LaunchMlaValueAbsorb(dlat, dwv, dg, dout, heads, 0);
+    HIP_CHECK(hipDeviceSynchronize());
+    std::vector<float> actual(expected.size());
+    HIP_CHECK(hipMemcpy(actual.data(), dout, expected.size() * sizeof(float), hipMemcpyDeviceToHost));
+    double worst = 0.0;
+    for (std::size_t i = 0; i < actual.size(); ++i) {
+      worst = std::max(worst, std::fabs(static_cast<double>(actual[i]) - expected[i]));
+    }
+    Check(worst <= 1e-4, "mla step max abs error", worst, 1e-4);
+    HIP_CHECK(hipFree(dq)); HIP_CHECK(hipFree(dqr)); HIP_CHECK(hipFree(dwk));
+    HIP_CHECK(hipFree(dwv)); HIP_CHECK(hipFree(dg)); HIP_CHECK(hipFree(dcache));
+    HIP_CHECK(hipFree(dqa)); HIP_CHECK(hipFree(dsc)); HIP_CHECK(hipFree(dlat));
+    HIP_CHECK(hipFree(dout));
   }
 
   std::printf("operators: %d failures\n", Failures);
