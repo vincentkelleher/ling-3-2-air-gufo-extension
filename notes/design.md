@@ -73,21 +73,32 @@ of the verified token plus the candidate token embedding.
   ~576 floats/token/block on MLA blocks only (7 of 42 blocks), so long context
   is cheap; the weights dominate.
 
-## Where the time goes (hypothesis, to be measured)
+## Where the time goes (measured 2026-11-25)
 
-Decode reads, per token: the 8 selected routed experts of every MoE block
-(≈ 8 × 3 × 768 × 2560 × 4.5 bit ≈ 26 MiB per block at Q4_K_M, 40 blocks
-≈ 1.05 GiB), the shared expert (≈ 33 MiB over 40 blocks), and the block
-weights of the always-read projections (attention, norms, router, ~0.15 GiB).
-So a decode step touches roughly 1.2–1.3 GiB of weights. At the machine's
-measured ~200–230 GiB/s of LPDDR5X bandwidth that is an upper bound near
-160–190 tok/s *if* the gather is perfectly streamed; a realistic first target
-is 60 % of that, and the harness must measure both the bandwidth and the
-routing so the percentage is meaningful.
+`tools/bandwidth_probe.hip` on this box (8 GiB, 3 runs, GPU visible in the
+devshell): **read 237.0 GB/s, copy 204.3 GB/s, write 198.4 GB/s**. That read
+number is the ceiling a decode step can reach.
 
-Prefill reads every routed expert it touches and has real arithmetic, so its
-roofline is the same bytes/token *plus* a compute bound that only shows up at
-large batch; the harness reports both.
+`tools/roofline.py`, from the GGUF tensor table with 8 of 512 experts per
+block, one decode step reads **4,753 MB**:
+
+| component | MB/token | share |
+| --- | --- | --- |
+| attention projections (KDA+MLA) | 2,598 | 54.7 % |
+| routed experts (8/512) | 1,266 | 26.6 % |
+| LM head (Q8_0, 157k vocab) | 428 | 9.0 % |
+| shared expert | 251 | 5.3 % |
+| router (`ffn_gate_inp` F32, 5 MB × 40) | 210 | 4.4 % |
+| norms | 1 | 0.0 % |
+
+So the decode roofline is **≈ 50 tok/s** and the 60 % gate is ≈ 30 tok/s;
+prefill's memory roofline at 2,048 tokens (every expert touched once) is
+≈ 6,300 tok/s. Two entries are worth attacking beyond raw bandwidth use:
+
+- the router is stored F32 (210 MB/token, 4.4 %): keeping it in bf16 at load
+  removes half of that;
+- the LM head is 9 % of every token: nothing to do at the same quant, but it
+  means a 157k-vocab matvec is a first-order part of the design.
 
 ## Milestones
 
