@@ -1,0 +1,157 @@
+// End-to-end forward: load the model on the GPU, decode a few tokens and
+// report the token ids and the decode rate.
+//
+// Usage: forward_test [model.gguf] [steps] [start-token]
+//   (defaults: $LING3_GGUF, 8 steps, 156891 = <|startoftext|>)
+
+#include <chrono>
+#include <cstdio>
+#include <cstdlib>
+#include <string>
+#include <algorithm>
+#include <vector>
+
+#include <gufo/ext/gguf_reader.hpp>
+
+#include "src/config.hpp"
+#include "src/engine.hpp"
+#include "src/text/tokenizer.hpp"
+#include "src/weights.hpp"
+
+int main(int argc, char** argv) {
+  namespace ling = gufo::ext::ling3_air;
+
+  std::string model_path;
+  if (argc > 1) {
+    model_path = argv[1];
+  } else if (const char* env = std::getenv("LING3_GGUF")) {
+    model_path = env;
+  }
+  if (model_path.empty()) {
+    std::printf("SKIP: set LING3_GGUF or pass the model .gguf path\n");
+    return 77;
+  }
+  const int steps = argc > 2 ? std::atoi(argv[2]) : 8;
+  const std::string prompt = argc > 3 ? argv[3] : std::string();
+  const bool use_prompt = !prompt.empty();
+
+  std::string error;
+  const auto reader = gufo::core::GgufReader::OpenFile(model_path, &error);
+  if (!reader) {
+    std::fprintf(stderr, "cannot open %s: %s\n", model_path.c_str(), error.c_str());
+    return 2;
+  }
+  ling::Ling3Config config;
+  if (!ling::ParseConfig(*reader, &config, &error)) {
+    std::fprintf(stderr, "%s\n", error.c_str());
+    return 1;
+  }
+  ling::Ling3Weights weights;
+  if (!ling::LoadWeights(*reader, config, &weights, &error)) {
+    std::fprintf(stderr, "%s\n", error.c_str());
+    return 1;
+  }
+
+  ling::EngineOptions options;
+  options.max_context = 64;
+  const auto create_start = std::chrono::steady_clock::now();
+  auto engine = ling::Engine::Create(*reader, config, weights, options, &error);
+  if (!engine) {
+    std::fprintf(stderr, "%s\n", error.c_str());
+    return 1;
+  }
+  const double load_seconds =
+      std::chrono::duration<double>(std::chrono::steady_clock::now() - create_start)
+          .count();
+  std::printf("loaded %.2f GiB of weights in %.1f s (vocab %u)\n",
+              engine->DeviceBytes() / 1073741824.0, load_seconds,
+              engine->VocabSize());
+
+  std::vector<ling::text::TokenId> prompt_tokens;
+  auto tokenizer = ling::text::Tokenizer::CreateFromGguf(*reader, &error);
+  if (use_prompt) {
+    if (tokenizer == nullptr) {
+      std::fprintf(stderr, "tokenizer: %s\n", error.c_str());
+      return 1;
+    }
+    prompt_tokens = tokenizer->Encode("<role>SYSTEM</role>detailed thinking off<|role_end|>"
+                                      "<role>HUMAN</role>" + prompt +
+                                      "<|role_end|><role>ASSISTANT</role>\n<think>",
+                                      /*parse_special=*/true);
+    std::printf("prompt: %zu tokens\n", prompt_tokens.size());
+  }
+  std::int32_t token = use_prompt ? prompt_tokens.front() : 156891;
+  std::vector<ling::text::TokenId> produced;
+  std::size_t position = 0;
+  const auto start_time = std::chrono::steady_clock::now();
+  if (use_prompt) {
+    for (std::size_t i = 0; i + 1 < prompt_tokens.size(); ++i) {
+      if (!engine->ForwardToken(static_cast<std::int32_t>(prompt_tokens[i]),
+                                static_cast<std::uint32_t>(position++),
+                                &error)) {
+        std::fprintf(stderr, "prefill: %s\n", error.c_str());
+        return 1;
+      }
+    }
+    token = static_cast<std::int32_t>(prompt_tokens.back());
+  }
+  const auto decode_start = std::chrono::steady_clock::now();
+  for (int step = 0; step < steps; ++step) {
+    const auto step_start = std::chrono::steady_clock::now();
+    if (!engine->ForwardToken(token, static_cast<std::uint32_t>(position++), &error)) {
+      std::fprintf(stderr, "step %d: %s\n", step, error.c_str());
+      return 1;
+    }
+    token = engine->Argmax();
+    produced.push_back(static_cast<ling::text::TokenId>(token));
+    const double ms = std::chrono::duration<double, std::milli>(
+                          std::chrono::steady_clock::now() - step_start)
+                          .count();
+    std::printf("step %d: token %d in %.1f ms\n", step, static_cast<int>(token), ms);
+  }
+  const double seconds =
+      std::chrono::duration<double>(std::chrono::steady_clock::now() - decode_start)
+          .count();
+  const double total_seconds =
+      std::chrono::duration<double>(std::chrono::steady_clock::now() - start_time)
+          .count();
+  (void)total_seconds;
+
+  std::printf("tokens:");
+  for (const auto id : produced) {
+    std::printf(" %d", static_cast<int>(id));
+  }
+  std::printf("\n%.2f tok/s over %d steps (%.3f s)\n", steps / seconds, steps,
+              seconds);
+  if (use_prompt && tokenizer != nullptr) {
+    std::printf("text: %s\n", tokenizer->Decode(produced, false).c_str());
+  }
+  {
+    std::vector<float> logits(engine->VocabSize());
+    engine->ReadLogits(logits.data());
+    std::size_t nan_count = 0;
+    float minimum = logits[0];
+    float maximum = logits[0];
+    for (const float value : logits) {
+      if (!(value == value)) {
+        ++nan_count;
+        continue;
+      }
+      minimum = value < minimum ? value : minimum;
+      maximum = value > maximum ? value : maximum;
+    }
+    std::vector<std::size_t> order(logits.size());
+    for (std::size_t i = 0; i < order.size(); ++i) order[i] = i;
+    std::partial_sort(order.begin(), order.begin() + 5, order.end(),
+                      [&logits](std::size_t a, std::size_t b) {
+                        return logits[a] > logits[b];
+                      });
+    std::printf("logits: nan %zu, min %.3f, max %.3f; top5:", nan_count, minimum,
+                maximum);
+    for (int i = 0; i < 5; ++i) {
+      std::printf(" %zu=%.3f", order[i], logits[order[i]]);
+    }
+    std::printf("\n");
+  }
+  return 0;
+}

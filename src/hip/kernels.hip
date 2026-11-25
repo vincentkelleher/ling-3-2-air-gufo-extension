@@ -26,6 +26,13 @@ struct BlockQ4K {
   std::uint8_t scales[12];
   std::uint8_t qs[128];
 };
+struct BlockQ5K {
+  std::uint16_t d;
+  std::uint16_t dmin;
+  std::uint8_t scales[12];
+  std::uint8_t qh[32];
+  std::uint8_t qs[128];
+};
 struct BlockQ6K {
   std::uint8_t ql[128];
   std::uint8_t qh[64];
@@ -37,6 +44,7 @@ struct BlockQ6K {
 static_assert(sizeof(BlockQ8_0) == 34, "Q8_0 block layout");
 static_assert(sizeof(BlockQ4K) == 144, "Q4_K block layout");
 static_assert(sizeof(BlockQ6K) == 210, "Q6_K block layout");
+static_assert(sizeof(BlockQ5K) == 176, "Q5_K block layout");
 
 __device__ __forceinline__ float HalfToFloat(std::uint16_t bits) {
   const __half value = *reinterpret_cast<const __half*>(&bits);
@@ -67,6 +75,24 @@ __device__ __forceinline__ float Q4Value(const BlockQ4K& block, int index) {
   float scale = 0.0f;
   float minimum = 0.0f;
   Q4ScaleMin(group, block.scales, scale, minimum);
+  return HalfToFloat(block.d) * scale * quant - HalfToFloat(block.dmin) * minimum;
+}
+
+__device__ __forceinline__ float Q5Value(const BlockQ5K& block, int index) {
+  const int group = index / 64;
+  const int within = index % 64;
+  const int lane = within % 32;
+  const bool low_half = within < 32;
+  const std::uint8_t packed = block.qs[group * 32 + lane];
+  const std::uint8_t quant4 = low_half ? (packed & 0x0FU) : (packed >> 4U);
+  const std::uint8_t high = block.qh[lane];
+  const int bit = 2 * group + (low_half ? 0 : 1);
+  const float quant =
+      static_cast<float>(quant4) + (((high >> bit) & 1U) ? 16.0f : 0.0f);
+  const int scale_index = 2 * group + (low_half ? 0 : 1);
+  float scale = 0.0f;
+  float minimum = 0.0f;
+  Q4ScaleMin(scale_index, block.scales, scale, minimum);
   return HalfToFloat(block.d) * scale * quant - HalfToFloat(block.dmin) * minimum;
 }
 
@@ -140,6 +166,18 @@ __device__ __forceinline__ float DotRow(const std::uint8_t* row, const float* x,
       float inner = 0.0f;
       for (int j = 0; j < 256; ++j) {
         inner += Q4Value(blocks[b], j) * x[b * 256 + j];
+      }
+      sum += inner;
+    }
+    return WarpSum(sum);
+  } else if constexpr (TYPE == kQ5K) {
+    const auto* blocks = reinterpret_cast<const BlockQ5K*>(row);
+    const int count = cols / 256;
+    float sum = 0.0f;
+    for (int b = threadIdx.x % 32; b < count; b += 32) {
+      float inner = 0.0f;
+      for (int j = 0; j < 256; ++j) {
+        inner += Q5Value(blocks[b], j) * x[b * 256 + j];
       }
       sum += inner;
     }
@@ -247,6 +285,8 @@ std::size_t RowBytes(StorageType type, std::size_t cols) {
       return cols / 32 * sizeof(BlockQ8_0);
     case kQ4K:
       return cols / 256 * sizeof(BlockQ4K);
+    case kQ5K:
+      return cols / 256 * sizeof(BlockQ5K);
     case kQ6K:
       return cols / 256 * sizeof(BlockQ6K);
   }
@@ -271,6 +311,10 @@ void LaunchGemv(const void* weights, StorageType type, std::size_t rows,
       break;
     case kQ4K:
       GemvKernel<kQ4K><<<blocks, kThreads, 0, stream>>>(
+          data, x, y, static_cast<int>(rows), static_cast<int>(cols), row_bytes);
+      break;
+    case kQ5K:
+      GemvKernel<kQ5K><<<blocks, kThreads, 0, stream>>>(
           data, x, y, static_cast<int>(rows), static_cast<int>(cols), row_bytes);
       break;
     case kQ6K:
@@ -298,6 +342,10 @@ void LaunchGemvAdd(const void* weights, StorageType type, std::size_t rows,
       break;
     case kQ4K:
       GemvAddKernel<kQ4K><<<blocks, kThreads, 0, stream>>>(
+          data, x, bias, y, static_cast<int>(rows), static_cast<int>(cols), row_bytes);
+      break;
+    case kQ5K:
+      GemvAddKernel<kQ5K><<<blocks, kThreads, 0, stream>>>(
           data, x, bias, y, static_cast<int>(rows), static_cast<int>(cols), row_bytes);
       break;
     case kQ6K:

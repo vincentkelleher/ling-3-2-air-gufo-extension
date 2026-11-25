@@ -33,6 +33,44 @@ if(TARGET gufo_ling3_air)
   endif()
 endif()
 
+# The runner: engine orchestration plus the HIP kernels.
+gufo_extension_target(
+  NAME gufo_ling3_air_hip
+  SOURCES
+    src/engine.cpp
+  LINK_LIBRARIES
+    gufo_ling3_air
+    gufo_ext_runtime
+    gufo_ext_core
+    gufo_ext_hip
+)
+if(TARGET gufo_ling3_air_hip)
+  target_include_directories(gufo_ling3_air_hip PUBLIC ${GUFO_EXTENSION_BUILD_ROOT})
+  gufo_extension_hip_sources(gufo_ling3_air_hip SOURCES
+    src/hip/kernels.hip
+    src/hip/layers.hip
+    src/hip/attention.hip
+    src/hip/moe.hip
+    src/hip/ops.hip)
+endif()
+
+# End-to-end forward: load, decode, report tokens and rate.
+gufo_extension_target(
+  NAME ling3_air_forward_test
+  SOURCES
+    tests/forward_test.cpp
+  LINK_LIBRARIES
+    gufo_ling3_air_hip
+    gufo_ling3_air
+    gufo_ext_runtime
+    gufo_ext_core
+    gufo_ext_hip
+)
+if(TARGET ling3_air_forward_test)
+  add_test(NAME ling3_air.forward COMMAND ling3_air_forward_test)
+  set_tests_properties(ling3_air.forward PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 3600)
+endif()
+
 # Probe behaviour: claims the pinned file, refuses everything else.
 gufo_extension_target(
   NAME ling3_air_probe_test

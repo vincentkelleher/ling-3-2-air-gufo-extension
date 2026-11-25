@@ -115,3 +115,26 @@ sum, v absorb); router (sigmoid, group top-k, normalise); expert gather GEMV
 `run-tests.sh` (ctest with `LING3_GGUF`). Standalone operator test:
 `hipcc -O3 --offload-arch=gfx1151 -I/work/ext-build tests/operator_gpu_test.cpp
 src/hip/kernels.hip -o /work/operator_gpu_test`.
+
+## Status 2026-11-26 (engine runs, output not yet correct)
+
+`tests/forward_test.cpp` loads the model and decodes on the GPU. Three findings
+worth keeping:
+
+1. **Zero-copy weights.** Copying 80 GiB into GTT doubles the footprint and
+   thrashes (the first run never finished). `hipHostRegister` accepts the
+   reader's read-only mmap and `hipHostGetDevicePointer` returns the same
+   address; `tools/zerocopy_probe.hip` measures 238 GB/s warm through it versus
+   223 GB/s through a device copy, so registering the three shards is both
+   correct and as fast. Load time is now ~2 s warm, 36 s cold.
+2. **This quantization varies per tensor and per layer.** `blk.31.ffn_down_exps`
+   is Q5_K while its neighbours are Q4_K; reading an unimplemented type as
+   floats produced all-NaN logits. The engine now refuses unknown storage types
+   at load, and Q5_K has a kernel.
+3. **Not yet correct.** Logits are finite (nan 0, range -11.9..8.6) but the text
+   is gibberish, so some semantics are still wrong. Next suspects, in order:
+   the RoPE convention (neox pairing vs interleaved — `LING3_ROPE=interleaved`
+   switches it), the thinking marker in the prompt, the KDA conv/state layout,
+   and the MLA score scale. The decisive test is the llama.cpp comparison:
+   `~/ling32-work/llama-cpu/bin/llama-completion` reads the same GGUF and shares
+   the page cache, so it can run beside this without another 80 GiB.

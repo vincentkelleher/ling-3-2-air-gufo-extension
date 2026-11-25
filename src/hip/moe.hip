@@ -141,6 +141,7 @@ void LaunchMoeGather(const void* gate_exps, StorageType gate_type,
                      std::size_t n_selected, float* out, float* expert_gate,
                      float* expert_up, float* expert_down, hipStream_t stream) {
   const std::size_t gate_row = RowBytes(gate_type, n_embd);
+  const std::size_t up_row = RowBytes(up_type, n_embd);
   const std::size_t down_row = RowBytes(down_type, n_ff);
   // Expert ids live on the device; copy them once per step.
   std::int32_t host_ids[64];
@@ -154,7 +155,7 @@ void LaunchMoeGather(const void* gate_exps, StorageType gate_type,
   for (std::size_t i = 0; i < count; ++i) {
     const std::size_t expert = static_cast<std::size_t>(host_ids[i]);
     LaunchFfn(static_cast<const char*>(gate_exps) + expert * n_ff * gate_row,
-              gate_type, static_cast<const char*>(up_exps) + expert * n_ff * gate_row,
+              gate_type, static_cast<const char*>(up_exps) + expert * n_ff * up_row,
               up_type, static_cast<const char*>(down_exps) + expert * n_embd * down_row,
               down_type, n_embd, n_ff, x, host_weights[i], out, expert_gate,
               expert_up, expert_down, stream);
