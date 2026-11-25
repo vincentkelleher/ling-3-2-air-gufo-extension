@@ -62,6 +62,24 @@
   "targets": {
     "gufo_ling3_air": {
       "requires": []
+    },
+    "ling3_air_tokenizer_test": {
+      "requires": [
+        "testing"
+      ],
+      "role": "test"
+    },
+    "ling3_air_config_test": {
+      "requires": [
+        "testing"
+      ],
+      "role": "test"
+    },
+    "ling3_air_probe_test": {
+      "requires": [
+        "testing"
+      ],
+      "role": "test"
     }
   },
   "licenses": [

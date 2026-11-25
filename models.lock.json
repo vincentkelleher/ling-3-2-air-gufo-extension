@@ -1,0 +1,51 @@
+{
+  "schema": 1,
+  "models": {
+    "ling-3.2-air": {
+      "weights": {
+        "source": {
+          "hf": "bartowski/Ling-3.2-air-GGUF",
+          "revision": "2073edb5da4296cb37b334584b858aa6141e352f"
+        },
+        "include": [
+          "Ling-3.2-air-Q4_K_M/*"
+        ],
+        "exclude": [],
+        "files": [
+          {
+            "path": "Ling-3.2-air-Q4_K_M/Ling-3.2-air-Q4_K_M-00001-of-00003.gguf",
+            "size": 39487785152,
+            "sha256": "ff8db6ab125f99429e8b71b2deea8e7f874665bc0ac1d2f433bae0e26d645106"
+          },
+          {
+            "path": "Ling-3.2-air-Q4_K_M/Ling-3.2-air-Q4_K_M-00002-of-00003.gguf",
+            "size": 39759067840,
+            "sha256": "eb9d2589ed048177effddf9e81e8cdd396626f826871c269e610692b094bf1f5"
+          },
+          {
+            "path": "Ling-3.2-air-Q4_K_M/Ling-3.2-air-Q4_K_M-00003-of-00003.gguf",
+            "size": 1147331328,
+            "sha256": "a23be9904fc1186cd025801a6ac3877e5a478a93b2d743b4b5040308c6b7774f"
+          }
+        ]
+      },
+      "mmproj": {
+        "source": {
+          "hf": "bartowski/Ling-3.2-air-GGUF",
+          "revision": "2073edb5da4296cb37b334584b858aa6141e352f"
+        },
+        "include": [
+          "mmproj-Ling-3.2-air-bf16.gguf"
+        ],
+        "exclude": [],
+        "files": [
+          {
+            "path": "mmproj-Ling-3.2-air-bf16.gguf",
+            "size": 878174208,
+            "sha256": "4a62c78357d8fc29cad39fa74b731a0ec245bd49de843a7c45c4254f507a9e47"
+          }
+        ]
+      }
+    }
+  }
+}

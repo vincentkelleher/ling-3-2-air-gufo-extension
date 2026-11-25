@@ -13,10 +13,10 @@ namespace {
 constexpr std::string_view kArchitectureSuffix = ".block_count";
 constexpr std::string_view kExpertCountSuffix = ".expert_count";
 
-// The 128B Air checkpoint: 42 blocks with 512 routed experts. Its sibling
-// Ling 3.0/3.2 "mini" shapes share the architecture name and are not what this
-// extension implements, so both keys must match.
-constexpr std::uint32_t kBlockCount = 42;
+// The 128B Air checkpoint: 42 trunk blocks plus one MTP block (43 in the GGUF)
+// with 512 routed experts. The other shapes that share the architecture name
+// are not what this extension implements, so both keys must match.
+constexpr std::uint32_t kBlockCount = 43;
 constexpr std::uint32_t kExpertCount = 512;
 
 std::string Key(std::string_view architecture, std::string_view suffix) {
