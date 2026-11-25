@@ -22,6 +22,7 @@
 #include "src/hip/kernels.hpp"
 #include "src/hip/attention.hpp"
 #include "src/hip/layers.hpp"
+#include "src/hip/moe.hpp"
 
 namespace {
 
@@ -631,6 +632,131 @@ int main() {
     HIP_CHECK(hipFree(dwv)); HIP_CHECK(hipFree(dg)); HIP_CHECK(hipFree(dcache));
     HIP_CHECK(hipFree(dqa)); HIP_CHECK(hipFree(dsc)); HIP_CHECK(hipFree(dlat));
     HIP_CHECK(hipFree(dout));
+  }
+
+  // Router: group-limited top-k on the model's real shape.
+  {
+    const int n_expert = 512, n_group = 8, group_used = 4, top_k = 8, per_group = 64;
+    const float scale = 2.5f;
+    std::vector<float> logits(n_expert), bias(n_expert);
+    for (auto& v : logits) v = 2.0f * dist(rng);
+    for (auto& v : bias) v = 0.5f * dist(rng);
+    std::vector<float> scores(n_expert);
+    for (int e = 0; e < n_expert; ++e) scores[e] = 1.0f / (1.0f + std::exp(-(logits[e] + bias[e])));
+    std::vector<float> group_score(n_group);
+    for (int g = 0; g < n_group; ++g) {
+      float first = -1.0f, second = -1.0f;
+      for (int k = 0; k < per_group; ++k) {
+        const float value = scores[g * per_group + k];
+        if (value > first) { second = first; first = value; }
+        else if (value > second) { second = value; }
+      }
+      group_score[g] = first + second;
+    }
+    std::vector<int> kept, expected_ids;
+    for (int picked = 0; picked < group_used; ++picked) {
+      int best = -1; float best_value = -1.0f;
+      for (int g = 0; g < n_group; ++g) {
+        if (std::find(kept.begin(), kept.end(), g) != kept.end()) continue;
+        if (group_score[g] > best_value) { best_value = group_score[g]; best = g; }
+      }
+      kept.push_back(best);
+    }
+    for (int picked = 0; picked < top_k; ++picked) {
+      int best = -1; float best_value = -1.0f;
+      for (int e = 0; e < n_expert; ++e) {
+        if (std::find(expected_ids.begin(), expected_ids.end(), e) != expected_ids.end()) continue;
+        if (std::find(kept.begin(), kept.end(), e / per_group) == kept.end()) continue;
+        if (scores[e] > best_value) { best_value = scores[e]; best = e; }
+      }
+      expected_ids.push_back(best);
+    }
+    float sum = 0.0f;
+    for (int id : expected_ids) sum += scores[id];
+    std::vector<float> expected_weights(top_k);
+    for (int i = 0; i < top_k; ++i) expected_weights[i] = scores[expected_ids[i]] / sum * scale;
+
+    float *dl, *db;
+    std::int32_t* di;
+    float* dw;
+    HIP_CHECK(hipMalloc(&dl, n_expert * sizeof(float)));
+    HIP_CHECK(hipMalloc(&db, n_expert * sizeof(float)));
+    HIP_CHECK(hipMalloc(&di, top_k * sizeof(std::int32_t)));
+    HIP_CHECK(hipMalloc(&dw, top_k * sizeof(float)));
+    HIP_CHECK(hipMemcpy(dl, logits.data(), n_expert * sizeof(float), hipMemcpyHostToDevice));
+    HIP_CHECK(hipMemcpy(db, bias.data(), n_expert * sizeof(float), hipMemcpyHostToDevice));
+    hipk::LaunchRouterSelect(dl, db, n_expert, n_group, group_used, top_k, scale, di, dw, 0);
+    HIP_CHECK(hipDeviceSynchronize());
+    std::vector<std::int32_t> got_ids(top_k);
+    std::vector<float> got_weights(top_k);
+    HIP_CHECK(hipMemcpy(got_ids.data(), di, top_k * sizeof(std::int32_t), hipMemcpyDeviceToHost));
+    HIP_CHECK(hipMemcpy(got_weights.data(), dw, top_k * sizeof(float), hipMemcpyDeviceToHost));
+    bool same = true;
+    for (int i = 0; i < top_k; ++i) same = same && got_ids[i] == expected_ids[i];
+    double worst = 0.0;
+    for (int i = 0; i < top_k; ++i) worst = std::max(worst, std::fabs(static_cast<double>(got_weights[i]) - expected_weights[i]));
+    Check(same, "router expert ids", same ? 0.0 : 1.0, 0.0);
+    Check(worst <= 1e-5, "router weight max abs error", worst, 1e-5);
+    HIP_CHECK(hipFree(dl)); HIP_CHECK(hipFree(db)); HIP_CHECK(hipFree(di)); HIP_CHECK(hipFree(dw));
+  }
+
+  // Expert gather: two F32 experts, n_embd = 8, n_ff = 4.
+  {
+    const int n_embd = 8, n_ff = 4, experts = 2;
+    std::vector<float> gate(experts * n_ff * n_embd), up(experts * n_ff * n_embd),
+        down(experts * n_embd * n_ff), x(n_embd);
+    for (auto& v : gate) v = 0.5f * dist(rng);
+    for (auto& v : up) v = 0.5f * dist(rng);
+    for (auto& v : down) v = 0.5f * dist(rng);
+    for (auto& v : x) v = dist(rng);
+    std::vector<std::int32_t> ids{1, 0};
+    std::vector<float> weights{0.6f, 0.4f};
+    std::vector<float> expected(n_embd, 0.0f);
+    for (int i = 0; i < 2; ++i) {
+      const int e = ids[i];
+      for (int o = 0; o < n_embd; ++o) {
+        float acc = 0.0f;
+        for (int j = 0; j < n_ff; ++j) {
+          double g = 0.0, u = 0.0;
+          for (int d = 0; d < n_embd; ++d) {
+            g += gate[(e * n_ff + j) * n_embd + d] * x[d];
+            u += up[(e * n_ff + j) * n_embd + d] * x[d];
+          }
+          acc += static_cast<float>((g / (1.0 + std::exp(-g))) * u) * down[(e * n_embd + o) * n_ff + j];
+        }
+        expected[o] += weights[i] * acc;
+      }
+    }
+    float *dg, *du, *dd, *dx, *dout, *scratch;
+    std::int32_t* di;
+    float* dw;
+    HIP_CHECK(hipMalloc(&dg, gate.size() * sizeof(float)));
+    HIP_CHECK(hipMalloc(&du, up.size() * sizeof(float)));
+    HIP_CHECK(hipMalloc(&dd, down.size() * sizeof(float)));
+    HIP_CHECK(hipMalloc(&dx, n_embd * sizeof(float)));
+    HIP_CHECK(hipMalloc(&dout, n_embd * sizeof(float)));
+    HIP_CHECK(hipMalloc(&scratch, (2 * n_ff + n_embd) * sizeof(float)));
+    HIP_CHECK(hipMalloc(&di, 2 * sizeof(std::int32_t)));
+    HIP_CHECK(hipMalloc(&dw, 2 * sizeof(float)));
+    HIP_CHECK(hipMemcpy(dg, gate.data(), gate.size() * sizeof(float), hipMemcpyHostToDevice));
+    HIP_CHECK(hipMemcpy(du, up.data(), up.size() * sizeof(float), hipMemcpyHostToDevice));
+    HIP_CHECK(hipMemcpy(dd, down.data(), down.size() * sizeof(float), hipMemcpyHostToDevice));
+    HIP_CHECK(hipMemcpy(dx, x.data(), n_embd * sizeof(float), hipMemcpyHostToDevice));
+    HIP_CHECK(hipMemcpy(di, ids.data(), 2 * sizeof(std::int32_t), hipMemcpyHostToDevice));
+    HIP_CHECK(hipMemcpy(dw, weights.data(), 2 * sizeof(float), hipMemcpyHostToDevice));
+    HIP_CHECK(hipMemset(dout, 0, n_embd * sizeof(float)));
+    hipk::LaunchMoeGather(dg, hipk::kF32, du, hipk::kF32, dd, hipk::kF32, n_embd, n_ff,
+                          dx, di, dw, 2, dout, scratch, scratch + n_ff,
+                          scratch + 2 * n_ff, 0);
+    HIP_CHECK(hipDeviceSynchronize());
+    std::vector<float> actual(n_embd);
+    HIP_CHECK(hipMemcpy(actual.data(), dout, n_embd * sizeof(float), hipMemcpyDeviceToHost));
+    double worst = 0.0;
+    for (int o = 0; o < n_embd; ++o) worst = std::max(worst, std::fabs(static_cast<double>(actual[o]) - expected[o]));
+    Check(worst <= 1e-4, "moe gather max abs error", worst, 1e-4);
+    HIP_CHECK(hipFree(dg)); HIP_CHECK(hipFree(du)); HIP_CHECK(hipFree(dd));
+    HIP_CHECK(hipFree(dx)); HIP_CHECK(hipFree(dout)); HIP_CHECK(hipFree(scratch));
+    HIP_CHECK(hipFree(di)); HIP_CHECK(hipFree(dw));
   }
 
   std::printf("operators: %d failures\n", Failures);
