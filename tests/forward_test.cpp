@@ -165,6 +165,12 @@ int main(int argc, char** argv) {
               seconds);
   if (use_prompt && tokenizer != nullptr) {
     std::printf("text: %s\n", tokenizer->Decode(produced, false).c_str());
+    std::printf("tokens with control:");
+    for (const auto id : produced) {
+      const std::string piece = tokenizer->Decode({id}, true);
+      std::printf(" [%u]%s", static_cast<unsigned>(id), piece.c_str());
+    }
+    std::printf("\n");
   }
   {
     std::vector<float> logits(engine->VocabSize());
