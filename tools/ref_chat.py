@@ -126,9 +126,13 @@ def main():
 
     out_cases = []
     for c in CASES:
+        # Definitions travel as JSON text (what the template prints); the
+        # reference renders them from the parsed objects.
+        definitions = [tojson(tool) for tool in c["tools"]]
         expected = render(env, [to_jinja(t) for t in c["turns"]],
-                          c["tools"], c["enable_thinking"], c["preserve_thinking"], c["add_vision_id"])
-        out_cases.append({"name": c["name"], "turns": c["turns"], "tools": c["tools"],
+                          [json.loads(d) for d in definitions],
+                          c["enable_thinking"], c["preserve_thinking"], c["add_vision_id"])
+        out_cases.append({"name": c["name"], "turns": c["turns"], "tools": definitions,
                           "enable_thinking": c["enable_thinking"],
                           "preserve_thinking": c["preserve_thinking"],
                           "add_vision_id": c["add_vision_id"], "expected": expected})

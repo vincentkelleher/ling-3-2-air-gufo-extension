@@ -80,6 +80,12 @@
         "testing"
       ],
       "role": "test"
+    },
+    "ling3_air_chat_test": {
+      "requires": [
+        "testing"
+      ],
+      "role": "test"
     }
   },
   "licenses": [

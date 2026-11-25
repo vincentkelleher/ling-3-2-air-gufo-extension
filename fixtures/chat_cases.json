@@ -145,25 +145,7 @@
     }
    ],
    "tools": [
-    {
-     "type": "function",
-     "function": {
-      "name": "get_stock_price",
-      "description": "Get the stock price",
-      "parameters": {
-       "type": "object",
-       "properties": {
-        "symbol": {
-         "type": "string",
-         "description": "Ticker"
-        }
-       },
-       "required": [
-        "symbol"
-       ]
-      }
-     }
-    }
+    "{\"type\": \"function\", \"function\": {\"name\": \"get_stock_price\", \"description\": \"Get the stock price\", \"parameters\": {\"type\": \"object\", \"properties\": {\"symbol\": {\"type\": \"string\", \"description\": \"Ticker\"}}, \"required\": [\"symbol\"]}}}"
    ],
    "enable_thinking": true,
    "preserve_thinking": true,
@@ -195,25 +177,7 @@
     }
    ],
    "tools": [
-    {
-     "type": "function",
-     "function": {
-      "name": "get_stock_price",
-      "description": "Get the stock price",
-      "parameters": {
-       "type": "object",
-       "properties": {
-        "symbol": {
-         "type": "string",
-         "description": "Ticker"
-        }
-       },
-       "required": [
-        "symbol"
-       ]
-      }
-     }
-    }
+    "{\"type\": \"function\", \"function\": {\"name\": \"get_stock_price\", \"description\": \"Get the stock price\", \"parameters\": {\"type\": \"object\", \"properties\": {\"symbol\": {\"type\": \"string\", \"description\": \"Ticker\"}}, \"required\": [\"symbol\"]}}}"
    ],
    "enable_thinking": true,
    "preserve_thinking": true,

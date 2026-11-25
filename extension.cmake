@@ -12,6 +12,7 @@ gufo_extension_target(
     src/text/unicode_tables.cpp
     src/text/pretokenizer.cpp
     src/text/tokenizer.cpp
+    src/text/chat_template.cpp
     src/config.cpp
     src/weights.cpp
   LINK_LIBRARIES
@@ -45,6 +46,22 @@ gufo_extension_target(
 if(TARGET ling3_air_probe_test)
   add_test(NAME ling3_air.probe COMMAND ling3_air_probe_test)
   set_tests_properties(ling3_air.probe PROPERTIES SKIP_RETURN_CODE 77)
+endif()
+
+# Chat framing against fixtures rendered by the model's own jinja template.
+gufo_extension_target(
+  NAME ling3_air_chat_test
+  SOURCES
+    tests/chat_template_test.cpp
+  LINK_LIBRARIES
+    gufo_ling3_air
+    gufo_ext_runtime
+    gufo_ext_core
+)
+if(TARGET ling3_air_chat_test)
+  target_compile_definitions(ling3_air_chat_test PRIVATE
+    LING3_FIXTURES_DIR="${GUFO_EXTENSION_BUILD_ROOT}/fixtures")
+  add_test(NAME ling3_air.chat COMMAND ling3_air_chat_test)
 endif()
 
 # Config and weight-map validation against a real GGUF.
