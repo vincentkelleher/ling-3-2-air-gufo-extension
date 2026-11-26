@@ -126,7 +126,10 @@ int main(int argc, char** argv) {
 
   // Round-trip check first: the same greedy run after a restore must reproduce the plain
   // stream exactly. If it does not, the snapshot is not exact and no speculation can be.
-  engine->RestoreState();
+  // Self-contained: snapshot here, decode, restore, decode again. Earlier blocks overwrite
+  // the engine's single snapshot buffer, so a restore that relied on theirs would compare
+  // against a state taken at a different point -- which is what made this report INEXACT.
+  engine->SnapshotState();
   if (std::getenv("LING3_ZERO_SCRATCH") != nullptr) {
     engine->DebugZeroScratch();
   }

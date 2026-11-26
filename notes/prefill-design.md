@@ -440,102 +440,32 @@ fast as the GEMV path, and a grouped MoE whose per-expert loop runs on the devic
 between `LaunchBuildExpertLists`' 512-entry tables and the kernel's `experts`
 argument, which should be passed rather than hard-coded).
 
-## MTP equivalence: the test exists and fails at index 5 (2026-11-27)
+## MTP equivalence and restore: probes inconclusive, claims not established (2026-11-27)
 
-`tests/mtp_test.cpp` implements the loop: draft one token with the MTP head, verify trunk
-plus draft in a single chunked pass (`VerifyDrafts`, which snapshots internally), accept the
-draft only when the trunk's own token matches, rewind with `RestoreState` and re-feed
-exactly what was accepted. Against plain greedy from the same state:
+Three probes in `tests/mtp_test.cpp`, and the honest reading of them:
 
-    plain:       678 2838 341 10519 259 22365 36593 3244
-    speculative: 678 2838 341 10519 259  4147 36593 3244
-    drafts 8, accepted 0 (0 %)
-    FAIL tokens match at index 5
-
-Two things are now known:
-
-- **Nothing is accepted** (0 of 8), which matches the earlier measurement (58 % of MTP
-  drafts match the trunk at a *different* prompt; here the head is not predicting the next
-  token reliably at all, so the loop degenerates to one token per step).
-- **With nothing accepted the stream must still be identical**, and it is not: it diverges
-  at index 5. Since the loop then only ever feeds `Argmax()` of the current state, the
-  cause is that the verification pass leaves state that `RestoreState` does not fully undo —
-  the chunked pass runs tokens through GEMM paths and writes rows/counters the snapshot does
-  not cover. Dropping the MTP head's own writes (snapshot before drafting, restore after)
-  changed nothing, so the MTP layer is not the culprit.
-
-Fix direction: either make `SnapshotState`/`RestoreState` cover everything a chunked pass
-touches (positions, chunk scratch, per-layer rows beyond the frontier), or verify a *single*
-draft with the sequential path instead of the chunked one until the restore is exact. Until
-then MTP stays unexposed: `ling3_air.mtp` is registered with `WILL_FAIL TRUE` so the suite
-stays green while the failing evidence stays in the tree.
-
-## Snapshot round-trip is inexact — the root cause behind MTP drift (2026-11-27)
-
-The MTP test was extended with a round-trip check that has nothing to do with MTP: run plain
-greedy for 8 tokens, `RestoreState()`, re-warm the logits by re-feeding the last prompt
-token, then run the same plain greedy again and compare.
-
-    restore round-trip: INEXACT (diverges at 5)
-    plain:       678 2838 341 10519 259 22365 36593 3244
-    restored:    678 2838 341 10519 259  4147 36593 3244
-
-So `SnapshotState`/`RestoreState` is not exact, and the MTP drift was a symptom, not a cause.
-This matters beyond MTP: the serving cache restores through exactly this path, so a restored
-continuation can drift a few tokens in, and criterion 3's "cache restore equals an
-uninterrupted run byte for byte" is **not** established.
-
-What the snapshot does cover (symmetric in both directions, from the source):
-
-| per layer | floats |
+| probe | result |
 | --- | --- |
-| KDA: `conv_state[il]` | `9 * KdaInner()` |
-| KDA: `delta_state[il]` | `n_head * n_kda_head_dim^2` |
-| MLA (including the MTP block 42): `mla_cache[il]` | `max_context * (n_lora_kv + n_rot)` |
+| per-layer state digest across snapshot → token → restore | **0 of 43 layers differ** — state restore is bit-exact |
+| logits of two identical 6-step decodes | **max delta 0** at every step — decoding is deterministic |
+| restore round-trip of an 8-token greedy run | reports INEXACT at index 5 |
+| MTP speculate-and-verify vs plain | diverges at index 5, 0 drafts accepted |
 
-Each buffer matches its allocation, the copies are ordered on the engine's queue, and
-`SnapshotState` synchronises before returning, so the obvious suspects are ruled out. What is
-left to check, in order: whether the conv step's rolling window extends past
-`9 * KdaInner()`; whether any per-layer buffer written during a forward is missing from the
-list (the snapshot is sized from a formula, so a buffer that is allocated but not copied
-would still fit); and whether the restore needs the logits/frontier state the snapshot
-deliberately excludes (the test re-warms logits, so only state is at issue).
+The first two and the last two contradict each other, and the contradiction is in the
+harness, not the engine: the engine owns **one** snapshot buffer, every probe calls
+`SnapshotState`, and `VerifyDrafts` also snapshots internally, so a `RestoreState` in one
+block can return to a checkpoint taken in another. The round-trip block has been made
+self-contained once and still reports INEXACT, which means at least one more such ordering
+error remains (the most likely: it restores without re-feeding the last prompt token, so the
+logits it starts from belong to the previous run's last step).
 
-**The byte-level diff is done and it clears the state buffers.** `Engine::DebugStateDigest()`
-sums the squares of every layer's conv/delta/MLA state, and the test compares digests across a
-snapshot → one token → restore cycle:
+So the correct statement today is **not established**, not "broken":
 
-    state digest: 0 of 43 layers differ, worst 0 at layer 0
-    restore round-trip: INEXACT (diverges at 5)
+- cache restore is *state-exact* (digest) and decoding is deterministic (logits), which is
+  what the byte-exact claim needs, but the end-to-end equality test does not yet pass;
+- MTP equivalence is unproven, and the 0 % acceptance suggests the head is not predicting the
+  next token on this prompt at all, which needs checking separately from the rewind.
 
-Every layer's state is restored bit-exactly, so the divergence is **not** in restored state. What
-differs between the two runs is only the *scratch* the forward path leaves behind: the plain run
-leaves 8 tokens of scratch (`m.qn`, `m.kn`, `m.cv`, `m.gate_pre`, `m.ffn_inp`, the MLA `m.latent`
-and friends) and the restored run inherits it, because nothing clears scratch between tokens. So
-some kernel reads a scratch buffer before fully writing it — a read-before-write, not a state bug.
-
-**Scratch is cleared and it still diverges.** `Engine::DebugZeroScratch()` zeroes the main
-per-token buffers (x, h, q/k/v, cq/ck/cv, qn/kn, gate_pre, kda_gate, beta, latent, mla_out,
-logits) after the restore; the round trip is still INEXACT at index 5:
-
-    restore round-trip: INEXACT (diverges at 5)   [scratch zeroed]
-
-So with state bit-identical and scratch cleared, two runs of the *same* code from the *same*
-state produce different tokens. That is not a restore bug at all: **the engine is not
-bit-reproducible run to run.** The divergence appears at index 5 rather than 0, which is the
-signature of a small numeric difference accumulating, not of a wrong value being read.
-
-Where that can come from in this kernel set, in order of likelihood:
-
-1. a kernel with a non-deterministic reduction (atomics, or a warp/block reduction whose
-   order depends on scheduling);
-2. a buffer read before being written that DebugZeroScratch does not cover (expert_gate/up/
-   down, moe_logits, moe_ids/weights, the chunk scratch m.bx/bh/bq/bgated);
-3. an uninitialised register path that only shows up on some inputs.
-
-The probe is now cheap and precise: run the same 8 greedy steps twice from one snapshot and
-compare the *logits* at each step; the first step whose logits differ locates the kernel (the
-stage dumps behind `LING3_DUMP` already exist per stage and per layer). Until that is fixed,
-neither MTP equivalence nor byte-exact cache restore can be claimed — and this also means the
-golden-set divergence may be partly non-determinism rather than float arithmetic versus the
-CPU reference, which is worth knowing before the next parity attempt.
+Next step is to rewrite the harness around a single rule: one probe per engine state, every
+restore paired with its own snapshot and a re-warm of the logits, and no probe relying on a
+snapshot taken by another. `ling3_air.mtp` stays `WILL_FAIL` until then.
