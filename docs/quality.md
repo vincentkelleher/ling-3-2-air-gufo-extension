@@ -70,6 +70,22 @@ runs hash identically after the `atomicAdd` reduction order was removed.
 **Verdict**: same task, same answer, one token apart at a near-tie. Token-for-token
 equality is **not** claimed; the deviation is recorded with its index and margin.
 
+### The one clause that cannot be measured here
+
+`engine-assembly`'s contract asks for the logits RMS error against llama.cpp. Neither
+`llama-completion` nor `llama-perplexity` in this environment can emit logits — their only
+logit-related flag is `--logit-bias` — so the reference side cannot produce that number.
+What is measured instead:
+
+- **argmax equality**: the greedy first token matches on the pinned prompts, and the
+  `arithmetic` golden case is identical end to end (30/30 characters);
+- **golden-set prefixes**: 93 / 30 / 27 / 9 characters of agreement before the first
+  divergence, with a 0.048 top-2 logit margin at the plain case.
+
+Reported rather than papered over: unmeasurable with the available reference binaries, not
+unimplemented. Producing it needs a reference build that dumps logits, or a numpy forward
+pass that would no longer be llama.cpp's arithmetic.
+
 ## 5. Where the engine is genuinely different from the reference
 
 - Reduction orders differ (deterministic per-warp sums here versus llama.cpp's CPU
