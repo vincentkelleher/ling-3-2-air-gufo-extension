@@ -61,3 +61,20 @@ silu/accumulate passes stop dominating.
   tokens.
 - Do not shrink the tolerance of the GEMV checks again: the quantized dots differ
   from an exact float reference by design (see the operator test's comment).
+
+## Batched GEMM kernel: implemented and tested (2026-11-27)
+
+`LaunchGemm` computes `out[m][row] = dot(W[row], X[m])` for up to 8 tokens with
+one block per row, so a weight block is read once and reused across the batch --
+the property that makes prefill pay. F32 and Q8_0 are implemented; K-quants are
+not yet (the dispatch deliberately falls through instead of running untested
+code).
+
+GPU unit test (in `tests/operator_gpu_test.cpp`): 6 rows x 64 cols x 4 tokens,
+F32 and Q8_0 against a host reference: **4.8e-07** and **1.4e-06**. The operator
+suite is now 26 checks, 0 failures.
+
+Next: wire it into the block forward for the dense projections (attention
+projections, dense FFN, shared expert) and validate that an M-token pass gives
+the same last-token logits as M single-token calls, per
+`notes/prefill-design.md`.

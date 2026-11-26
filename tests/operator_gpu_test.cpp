@@ -798,6 +798,72 @@ int main() {
     HIP_CHECK(hipFree(dw)); HIP_CHECK(hipFree(dx)); HIP_CHECK(hipFree(dy)); HIP_CHECK(hipFree(di));
   }
 
+  // Batched dot (prefill shape): M tokens against N rows, weight read once.
+  for (const auto type : {hipk::kF32, hipk::kQ8_0}) {
+    const int rows = 6, cols = 64, batch = 4;
+    const std::size_t row_bytes = type == hipk::kF32
+                                      ? static_cast<std::size_t>(cols) * sizeof(float)
+                                      : static_cast<std::size_t>(cols) / 32 * 34;
+    std::vector<std::uint8_t> weights(row_bytes * rows);
+    for (auto& value : weights) value = static_cast<std::uint8_t>(byte(rng));
+    if (type == hipk::kQ8_0) {
+      for (int row = 0; row < rows; ++row) {
+        auto* block = reinterpret_cast<BlockQ8_0*>(weights.data() + row * row_bytes);
+        for (int b = 0; b < cols / 32; ++b) {
+          block[b].d = FloatToHalf(0.01f + 0.001f * static_cast<float>(b));
+        }
+      }
+    } else {
+      for (auto& value : weights) value = 0;
+      for (int row = 0; row < rows; ++row) {
+        auto* values = reinterpret_cast<float*>(weights.data() + row * row_bytes);
+        for (int c = 0; c < cols; ++c) values[c] = dist(rng);
+      }
+    }
+    std::vector<float> x(batch * cols), expected(batch * rows, 0.0f);
+    for (auto& value : x) value = dist(rng);
+    for (int m = 0; m < batch; ++m) {
+      for (int row = 0; row < rows; ++row) {
+        const auto* base = weights.data() + row * row_bytes;
+        double sum = 0.0;
+        if (type == hipk::kF32) {
+          const auto* values = reinterpret_cast<const float*>(base);
+          for (int c = 0; c < cols; ++c) sum += values[c] * x[m * cols + c];
+        } else {
+          const auto* blocks = reinterpret_cast<const BlockQ8_0*>(base);
+          for (int b = 0; b < cols / 32; ++b) {
+            const float d = HalfToFloat(blocks[b].d);
+            for (int j = 0; j < 32; ++j) {
+              sum += d * static_cast<double>(blocks[b].qs[j]) * x[m * cols + b * 32 + j];
+            }
+          }
+        }
+        expected[m * rows + row] = static_cast<float>(sum);
+      }
+    }
+    void* dw = nullptr;
+    float* dx = nullptr;
+    float* dy = nullptr;
+    HIP_CHECK(hipMalloc(&dw, weights.size()));
+    HIP_CHECK(hipMalloc(&dx, x.size() * sizeof(float)));
+    HIP_CHECK(hipMalloc(&dy, expected.size() * sizeof(float)));
+    HIP_CHECK(hipMemcpy(dw, weights.data(), weights.size(), hipMemcpyHostToDevice));
+    HIP_CHECK(hipMemcpy(dx, x.data(), x.size() * sizeof(float), hipMemcpyHostToDevice));
+    hipk::LaunchGemm(dw, type, rows, cols, dx, batch, cols, dy, rows, 0);
+    HIP_CHECK(hipDeviceSynchronize());
+    std::vector<float> actual(expected.size());
+    HIP_CHECK(hipMemcpy(actual.data(), dy, expected.size() * sizeof(float), hipMemcpyDeviceToHost));
+    double worst = 0.0;
+    for (std::size_t i = 0; i < actual.size(); ++i) {
+      worst = std::max(worst, std::fabs(static_cast<double>(actual[i]) - expected[i]));
+    }
+    char label[64];
+    std::snprintf(label, sizeof(label), "gemm %s max abs error",
+                  type == hipk::kF32 ? "F32" : "Q8_0");
+    Check(worst <= 1e-4, label, worst, 1e-4);
+    HIP_CHECK(hipFree(dw)); HIP_CHECK(hipFree(dx)); HIP_CHECK(hipFree(dy));
+  }
+
   std::printf("operators: %d failures\n", Failures);
   return Failures == 0 ? 0 : 1;
 }

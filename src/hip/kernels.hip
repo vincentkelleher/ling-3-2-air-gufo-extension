@@ -349,6 +349,89 @@ __global__ void GemvExpertsKernel(const std::uint8_t* weights,
   }
 }
 
+/// Batched form of the quantized dot: `out[m][row] = dot(W[row], X[m])` for up
+/// to `kMaxBatch` tokens. One block per row, so each weight block is read once
+/// and reused across the batch -- that is what makes prefill pay, because the
+/// weights stop being read once per token.
+constexpr int kMaxGemmBatch = 8;
+
+template <int TYPE>
+__global__ void GemmKernel(const std::uint8_t* weights, const float* x, float* y,
+                           int rows, int cols, int row_bytes, int batch,
+                           int x_stride, int y_stride) {
+  const int row = blockIdx.x;
+  if (row >= rows) {
+    return;
+  }
+  const std::uint8_t* weight_row =
+      weights + static_cast<std::size_t>(row) * row_bytes;
+  float accumulator[kMaxGemmBatch];
+  for (int m = 0; m < batch; ++m) {
+    accumulator[m] = 0.0f;
+  }
+  if constexpr (TYPE == kF32) {
+    const float* values = reinterpret_cast<const float*>(weight_row);
+    for (int k = threadIdx.x; k < cols; k += blockDim.x) {
+      const float weight = values[k];
+      for (int m = 0; m < batch; ++m) {
+        accumulator[m] += weight * x[m * x_stride + k];
+      }
+    }
+  } else if constexpr (TYPE == kQ8_0) {
+    const auto* blocks = reinterpret_cast<const BlockQ8_0*>(weight_row);
+    for (int b = threadIdx.x; b < cols / 32; b += blockDim.x) {
+      const float d = HalfToFloat(blocks[b].d);
+      for (int j = 0; j < 32; ++j) {
+        const float weight = d * static_cast<float>(blocks[b].qs[j]);
+        const int k = b * 32 + j;
+        for (int m = 0; m < batch; ++m) {
+          accumulator[m] += weight * x[m * x_stride + k];
+        }
+      }
+    }
+  } else {
+    // K-quants go through the dequantising value functions, which are already
+    // validated against Gufo's reference.
+    for (int b = threadIdx.x; b < cols / 256; b += blockDim.x) {
+      const auto* block = reinterpret_cast<const BlockQ4K*>(weight_row) + b;
+      for (int j = 0; j < 256; ++j) {
+        const float weight = TYPE == kQ4K
+                                 ? Q4Value(*reinterpret_cast<const BlockQ4K*>(
+                                       reinterpret_cast<const BlockQ4K*>(weight_row) + b),
+                                           j)
+                                 : 0.0f;
+        const int k = b * 256 + j;
+        for (int m = 0; m < batch; ++m) {
+          accumulator[m] += weight * x[m * x_stride + k];
+        }
+      }
+      (void)block;
+    }
+  }
+  // Deterministic reduction: per-warp partials, then a fixed-order sum by lane 0
+  // of each warp, which writes its own token's result.
+  __shared__ float warp_sums[kMaxGemmBatch][8];
+  for (int m = 0; m < batch; ++m) {
+    float value = accumulator[m];
+    for (int offset = 16; offset > 0; offset >>= 1) {
+      value += __shfl_down(value, offset);
+    }
+    if ((threadIdx.x & 31) == 0) {
+      warp_sums[m][threadIdx.x >> 5] = value;
+    }
+  }
+  __syncthreads();
+  if (threadIdx.x == 0) {
+    for (int m = 0; m < batch; ++m) {
+      float total = 0.0f;
+      for (int w = 0; w < static_cast<int>(blockDim.x / 32); ++w) {
+        total += warp_sums[m][w];
+      }
+      y[m * y_stride + row] = total;
+    }
+  }
+}
+
 __global__ void RmsNormKernel(const float* x, const float* weight, float* y,
                               int rows, int cols, float eps) {
   const int row = blockIdx.x;
@@ -514,6 +597,31 @@ void LaunchGemvExperts(const void* weights, StorageType type,
       GemvExpertsKernel<kQ6K><<<blocks, kThreads, 0, stream>>>(
           data, ids, x, y, rows_int, cols_int, row_bytes, experts_int, batch_int, out_int);
       break;
+  }
+}
+
+void LaunchGemm(const void* weights, StorageType type, std::size_t rows,
+                std::size_t cols, const float* x, std::size_t batch,
+                std::size_t x_stride, float* y, std::size_t y_stride,
+                hipStream_t stream) {
+  const int row_bytes = static_cast<int>(RowBytes(type, cols));
+  const auto* data = static_cast<const std::uint8_t*>(weights);
+  const int rows_int = static_cast<int>(rows);
+  const int cols_int = static_cast<int>(cols);
+  const int batch_int = static_cast<int>(batch);
+  const int x_int = static_cast<int>(x_stride);
+  const int y_int = static_cast<int>(y_stride);
+  switch (type) {
+    case kF32:
+      GemmKernel<kF32><<<rows_int, kThreads, 0, stream>>>(
+          data, x, y, rows_int, cols_int, row_bytes, batch_int, x_int, y_int);
+      break;
+    case kQ8_0:
+      GemmKernel<kQ8_0><<<rows_int, kThreads, 0, stream>>>(
+          data, x, y, rows_int, cols_int, row_bytes, batch_int, x_int, y_int);
+      break;
+    default:
+      break;  // K-quant batching is not implemented yet (notes/prefill-design.md)
   }
 }
 

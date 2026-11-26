@@ -43,6 +43,13 @@ void LaunchGemvExperts(const void* weights, StorageType type,
                        const float* x, std::size_t batch_stride, float* y,
                        std::size_t out_stride, hipStream_t stream);
 
+/// Batched dot: `y[m][row] = dot(weights[row], x[m])` for up to 8 tokens.
+/// Supports F32, Q8_0 and Q4_K; the batch is the prefill dimension.
+void LaunchGemm(const void* weights, StorageType type, std::size_t rows,
+                std::size_t cols, const float* x, std::size_t batch,
+                std::size_t x_stride, float* y, std::size_t y_stride,
+                hipStream_t stream);
+
 /// y = x * rsqrt(mean(x^2) + eps) * weight, one block per row.
 void LaunchRmsNorm(const float* x, const float* weight, float* y,
                    std::size_t rows, std::size_t cols, float eps,
