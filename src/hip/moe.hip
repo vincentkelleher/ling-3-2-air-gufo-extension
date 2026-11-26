@@ -26,6 +26,7 @@ __global__ void RouterKernel(const float* logits, const float* bias, int n_exper
                             int n_group, int group_used, int top_k, float scale,
                             int* ids, float* weights) {
   __shared__ float scores[kMaxExperts];
+  __shared__ unsigned char used[kMaxExperts];
   if (blockIdx.x != 0) {
     return;
   }
@@ -73,9 +74,8 @@ __global__ void RouterKernel(const float* logits, const float* bias, int n_exper
     group_kept[best] = true;
   }
 
-  bool used[kMaxExperts];
   for (int e = 0; e < n_expert; ++e) {
-    used[e] = false;
+    used[e] = 0;
   }
   for (int picked = 0; picked < top_k; ++picked) {
     int best = -1;

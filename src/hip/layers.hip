@@ -157,20 +157,43 @@ __global__ void DeltaRuleKernel(const float* q, const float* k, const float* v,
 }
 
 __global__ void ArgmaxKernel(const float* x, int count, std::int32_t* result) {
-  // Sequential on one thread: 157k reads are microseconds next to a block's
-  // GEMVs, and it makes the tie rule (lowest index wins) trivially exact.
-  if (threadIdx.x != 0 || blockIdx.x != 0) {
-    return;
-  }
-  int best_index = 0;
-  float best_value = x[0];
-  for (int i = 1; i < count; ++i) {
-    if (x[i] > best_value) {
-      best_value = x[i];
-      best_index = i;
+  // Phase 1: each thread's best over its stride, reduced within the warp and
+  // then across warps. Ties resolve to the lower index (deterministic).
+  __shared__ float best_value[8];
+  __shared__ int best_index[8];
+  float local_value = -INFINITY;
+  int local_index = 0;
+  for (int i = threadIdx.x; i < count; i += blockDim.x) {
+    const float value = x[i];
+    if (value > local_value) {
+      local_value = value;
+      local_index = i;
     }
   }
-  *result = best_index;
+  for (int offset = 16; offset > 0; offset >>= 1) {
+    const float other = __shfl_down(local_value, offset);
+    const int other_index = __shfl_down(local_index, offset);
+    if (other > local_value) {
+      local_value = other;
+      local_index = other_index;
+    }
+  }
+  const int warp = threadIdx.x >> 5;
+  if ((threadIdx.x & 31) == 0) {
+    best_value[warp] = local_value;
+    best_index[warp] = local_index;
+  }
+  __syncthreads();
+  const int warps = static_cast<int>(blockDim.x) / 32;
+  if (threadIdx.x == 0) {
+    int winner = 0;
+    for (int w = 1; w < warps; ++w) {
+      if (best_value[w] > best_value[winner]) {
+        winner = w;
+      }
+    }
+    *result = best_index[winner];
+  }
 }
 
 __global__ void AxpyKernel(float* y, const float* z, float scale, std::size_t count) {
