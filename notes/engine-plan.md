@@ -883,3 +883,26 @@ matches and the deterministic reductions here are a different but equally valid
 order. Token-for-token equality across the whole golden set is therefore not
 reachable in practice -- the contract's documented-deviation clause is the honest
 route, and the deviation is one token at a measured margin.
+
+## MTP prerequisite discovered, 2026-11-27
+
+Scoping the MTP block for speculative decoding turned up a hard prerequisite:
+**every tensor in block 42 is Q4_0** (`attn_q`, `attn_kv_a_mqa`, `attn_k_b`,
+`attn_v_b`, `attn_gate`, `attn_output`, the expert and shared-expert matrices,
+`nextn.eh_proj`, `nextn.enorm`, `nextn.hnorm`, `layer_output_norm`). This engine
+has no Q4_0 kernel: `Storage()` maps `kQ4_0` to `kF32`, so the MTP block would be
+read as floats and produce garbage. The type guard added during the Q5_K fix
+allows `kQ4_0` through because the *loader* accepts it, so nothing fails loudly
+today -- it simply is not usable.
+
+Order of work for MTP, therefore:
+
+1. Implement a Q4_0 dot (18-byte blocks, fp16 scale + 32 nibbles) and add it to
+   `tests/dot_vs_gufo_test.cpp` against `quant::Dot` on real block-42 rows.
+2. Make `Storage()` refuse anything without a kernel (kQ4_0 and kF16 included)
+   so a missing kernel can never be silently mis-read again.
+3. Add `Engine::ForwardMtp`, which takes the base model's final hidden state
+   (it is in `m.h` after the last RMSNorm), runs block 42 with the token
+   embedding, and produces logits through the shared head.
+4. Validate: drafting must reproduce greedy output exactly; measure whether it
+   pays at 12.5 tok/s decode (it needs to beat the extra block's cost).
