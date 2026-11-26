@@ -197,10 +197,11 @@ __device__ __forceinline__ float DotRow(const std::uint8_t* row, const float* x,
     for (int b = threadIdx.x % 32; b < count; b += 32) {
       float scale = 1.0f;
       ActivationScale(x + b * 32, 32, scale);
+      const float inverse = 1.0f / scale;
       int total = 0;
       for (int j = 0; j < 32; ++j) {
-        const float raw = rintf(x[b * 32 + j] / scale);
-        const int a = static_cast<int>(raw > 127.0f ? 127.0f : (raw < -127.0f ? -127.0f : raw));
+        int a = __float2int_rn(x[b * 32 + j] * inverse);
+        a = a > 127 ? 127 : (a < -127 ? -127 : a);
         total += static_cast<int>(blocks[b].qs[j]) * a;
       }
       sum += HalfToFloat(blocks[b].d) * scale * static_cast<float>(total);
@@ -219,10 +220,11 @@ __device__ __forceinline__ float DotRow(const std::uint8_t* row, const float* x,
       for (int g = 0; g < 8; ++g) {
         int sum_qa = 0;
         int sum_a = 0;
+        const float inverse = 1.0f / scale;
         for (int i = 0; i < 32; ++i) {
           const int j = g * 32 + i;
-          const float raw = rintf(x[b * 256 + j] / scale);
-          const int a = static_cast<int>(raw > 127.0f ? 127.0f : (raw < -127.0f ? -127.0f : raw));
+          int a = __float2int_rn(x[b * 256 + j] * inverse);
+          a = a > 127 ? 127 : (a < -127 ? -127 : a);
           sum_qa += Q4Code(blocks[b], j) * a;
           sum_a += a;
         }
@@ -260,10 +262,11 @@ __device__ __forceinline__ float DotRow(const std::uint8_t* row, const float* x,
       float inner = 0.0f;
       for (int g = 0; g < 16; ++g) {
         int total = 0;
+        const float inverse = 1.0f / scale;
         for (int i = 0; i < 16; ++i) {
           const int j = g * 16 + i;
-          const float raw = rintf(x[b * 256 + j] / scale);
-          const int a = static_cast<int>(raw > 127.0f ? 127.0f : (raw < -127.0f ? -127.0f : raw));
+          int a = __float2int_rn(x[b * 256 + j] * inverse);
+          a = a > 127 ? 127 : (a < -127 ? -127 : a);
           total += Q6Code(blocks[b], j) * a;
         }
         inner += d * static_cast<float>(blocks[b].scales[g]) * scale * static_cast<float>(total);
