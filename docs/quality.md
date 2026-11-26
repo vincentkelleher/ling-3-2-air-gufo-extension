@@ -75,8 +75,9 @@ equality is **not** claimed; the deviation is recorded with its index and margin
 `SnapshotState`/`RestoreState` round-trips imperfectly: plain greedy re-run after a restore
 diverges from the uninterrupted run at token 5 (reproduced by `tests/mtp_test.cpp`, which
 registers the check regardless of MTP). The state itself is exact — a per-layer digest shows
-**0 of 43 layers differ** across snapshot → token → restore, and two identical 6-step decodes
-produce **bit-identical logits** — so the engine's state restore and its decoding are both
+**0 of 43 layers differ** across snapshot → token → restore, and a full 8-token greedy run
+after a rewind reproduces the reference **token for token with logits delta 0** (the checkpoint
+must sit before the last prompt token, so a rewind feeds it exactly once) — so the engine's state restore and its decoding are both
 exact. What does not yet pass is the end-to-end equality harness, which shares the engine's
 single snapshot buffer between probes (`VerifyDrafts` snapshots internally as well), so its
 round-trip can return to a checkpoint taken by an earlier probe. Consequences:

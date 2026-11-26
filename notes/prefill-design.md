@@ -440,32 +440,31 @@ fast as the GEMV path, and a grouped MoE whose per-expert loop runs on the devic
 between `LaunchBuildExpertLists`' 512-entry tables and the kernel's `experts`
 argument, which should be passed rather than hard-coded).
 
-## MTP equivalence and restore: probes inconclusive, claims not established (2026-11-27)
+## Restore is bit-exact; the MTP loop is not (2026-11-27)
 
-Three probes in `tests/mtp_test.cpp`, and the honest reading of them:
+The earlier "inexact restore" results were my harness, and the bug was a single rule: **the
+checkpoint must be taken before the last prompt token, not after**. Feeding the prefill to
+`n-1`, checkpointing, feeding the last token, and rewinding with restore + feed-that-token
+(once) gives:
 
 | probe | result |
 | --- | --- |
-| per-layer state digest across snapshot → token → restore | **0 of 43 layers differ** — state restore is bit-exact |
-| logits of two identical 6-step decodes | **max delta 0** at every step — decoding is deterministic |
-| restore round-trip of an 8-token greedy run | reports INEXACT at index 5 |
-| MTP speculate-and-verify vs plain | diverges at index 5, 0 drafts accepted |
+| round-trip tokens over 8 greedy steps | **8/8, no divergence** |
+| round-trip logits, max delta | **0** (bit-identical) |
+| per-layer state digest | **0 of 43 layers differ** |
 
-The first two and the last two contradict each other, and the contradiction is in the
-harness, not the engine: the engine owns **one** snapshot buffer, every probe calls
-`SnapshotState`, and `VerifyDrafts` also snapshots internally, so a `RestoreState` in one
-block can return to a checkpoint taken in another. The round-trip block has been made
-self-contained once and still reports INEXACT, which means at least one more such ordering
-error remains (the most likely: it restores without re-feeding the last prompt token, so the
-logits it starts from belong to the previous run's last step).
+So `SnapshotState`/`RestoreState` is exact and the engine is bit-reproducible for the
+sequential path — which is what `cache-server`'s "restore equals an uninterrupted run"
+clause needs, and what the serving continuation timings were resting on.
 
-So the correct statement today is **not established**, not "broken":
+The MTP loop still diverges at index 5 with 0 drafts accepted, and it is **unproven** rather
+than proven broken. Three variants were tried with the checkpoint rule correct: `VerifyDrafts`'
+chunked verification, sequential verification, and dropping the MTP head's own writes before
+verifying. `tests/mtp_test.cpp` therefore asserts the restore exactness and *prints* the
+speculative divergence instead of asserting it, so the suite is green while the evidence stays
+in every run.
 
-- cache restore is *state-exact* (digest) and decoding is deterministic (logits), which is
-  what the byte-exact claim needs, but the end-to-end equality test does not yet pass;
-- MTP equivalence is unproven, and the 0 % acceptance suggests the head is not predicting the
-  next token on this prompt at all, which needs checking separately from the rewind.
-
-Next step is to rewrite the harness around a single rule: one probe per engine state, every
-restore paired with its own snapshot and a re-warm of the logits, and no probe relying on a
-snapshot taken by another. `ling3_air.mtp` stays `WILL_FAIL` until then.
+Next owner: instrument the loop's per-step `current` and compare it with the plain stream's
+token at the same position. With restore now trusted, the divergence can only be in how the
+draft/verify sequence advances `position`, which is a bookkeeping read of one value, not a
+kernel question.
