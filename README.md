@@ -29,7 +29,14 @@ at the bottom.
   are registered zero-copy from the reader's mapping, so an 80 GiB model loads in
   ~2 s warm.
 - **Coherent output**: `The capital of France is` continues with the same
-  sentence as llama.cpp, identical for the first eight tokens.
+  sentence as llama.cpp; the two agree for 53 characters before a near-tie
+  (0.048 logit margin) sends them apart, and 1 of 4 pinned cases is
+  token-identical end to end.
+- **MTP block runs**: block 42 is readable (its Q4_0 storage now has a dot,
+  validated against real rows), and `Engine::ForwardMtp` drafts the next token
+  from the base model's final hidden state — 7 of 9 drafts match what the trunk
+  then produces on the pinned prompt. Drafting does not yet speed anything up:
+  verification is one token per pass, so see the note below.
 
 ## Measured performance (2026-11-27)
 
@@ -53,7 +60,10 @@ path on the same machine. Depth rows: 12.54 / 12.41 / 12.04 tok/s at depth
   component cache, continuation and streaming are therefore absent.
 - **No batched prefill**: prompt tokens are fed one at a time, which is why
   prefill equals decode speed (12.5 tok/s, against a 6,277 tok/s roofline at
-  2,048 tokens). `notes/prefill-design.md` is the plan for fixing that.
+  2,048 tokens). `notes/prefill-design.md` quantifies why: with top-8 of 512 experts a batch of M
+tokens gives M/64 tokens per expert, so prefill must be **chunked** (M around
+256-512) for the expert weights to amortise; batching only the dense stages would
+buy about 1.3x.
 - **Not token-for-token with llama.cpp except on simple arithmetic.** Measured
   with `tools/golden_set.py` (24 greedy tokens per case, identical prompts): the
   arithmetic case matches end to end (30/30 characters), the others agree for
@@ -62,8 +72,10 @@ path on the same machine. Depth rows: 12.54 / 12.41 / 12.04 tok/s at depth
   task, same meaning, different wording. The integer per-group dots already match
   llama.cpp's dot products (`tests/dot_vs_gufo_test.cpp`), so the residual is
   elsewhere.
-- **No MTP speculative decoding** and **no image input**: the MTP block is
-  mapped but unused; the projector is downloaded but no vision path exists.
+- **MTP drafted but not accepted**: the block runs and its drafts are usually
+  right, but verifying K drafts one token at a time costs the same as decoding
+  them, so there is no speedup until verification is batched.
+- **No image input**: the projector is downloaded but no vision path exists.
 - **No sampler beyond greedy**, no reasoning markers, no tool-call dialect.
 
 ## Layout
