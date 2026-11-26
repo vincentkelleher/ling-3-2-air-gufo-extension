@@ -715,3 +715,22 @@ The design is sound -- `LaunchGemvExperts` with a device id list, batched
 activation slices for the down projection, then a weighted accumulate -- but it
 needs its own GPU unit test first (as `tests/operator_gpu_test.cpp` has for the
 per-expert path) rather than being validated through the language model.
+
+## Fused expert GEMV: second attempt, still wrong (2026-11-27)
+
+Added `LaunchGemvExperts` (one warp per expert-row, device id list) plus a GPU
+unit test, and the test caught two problems at once:
+
+1. `DotRow` already reduces within the warp and is valid in lane 0 only; adding a
+   second `WarpSum` produced garbage. Fixed, but the kernel still returns values
+   of order 1e25, so there is a second defect (most likely the per-warp shared
+   reduction writing from the wrong lanes, or the row pointer arithmetic).
+2. The operator suite now also fails the Q8_0 and Q4_K GEMV tolerance checks
+   (0.034 and 0.0022 against 2e-3), which is the *intended* activation
+   quantization difference, not a bug: those checks still compare against the
+   exact float reference. Their tolerance needs to be stated in terms of the
+   quantization error.
+
+Reverted to the verified 12.48 tok/s tree. To continue: fix the shared reduction
+in `GemvExpertsKernel`, relax the operator tolerance with a comment explaining
+why, and only then rewire `LaunchMoeGather`.
