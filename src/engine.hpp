@@ -59,6 +59,18 @@ class Engine {
   /// Copies `rows` rows of the chunk activation buffer out (debug/bisect).
   void ReadChunkActivations(std::size_t rows, float* host_rows);
 
+  /// Speculative verification: runs `count` tokens from `start_position` in one
+  /// chunked pass and reports the greedy argmax at every position. The trunk
+  /// state is snapshotted first, so the caller can accept a prefix and rewind with
+  /// RestoreState if it rejects any draft.
+  [[nodiscard]] bool VerifyDrafts(const std::int32_t* tokens, std::size_t count,
+                                  std::uint32_t start_position,
+                                  std::int32_t* argmax_per_row, std::string* error);
+
+  /// Snapshots / restores the trunk state (KDA conv+delta, MLA caches).
+  void SnapshotState();
+  void RestoreState();
+
   /// MTP: predicts the token after `token` given the base model's final hidden
   /// state (the one produced by the last ForwardToken). Mirrors llama.cpp's
   /// graph_mtp: eh_proj(concat(token embedding, hidden)) -> block 42 -> head.

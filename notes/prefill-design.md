@@ -333,3 +333,30 @@ one or two tokens at this chunk size) and the naive K-quant GEMM is several time
 slower per launch than the tuned GEMV. To make it pay it needs (a) a K-quant GEMM
 with the GEMV's efficiency, and (b) chunk sizes where experts actually collect
 tokens (M in the hundreds). Until then the default stays per-token.
+
+### MTP accept loop: first attempt accepts nothing (2026-11-27)
+
+Added `Engine::SnapshotState`/`RestoreState` (device copies of every KDA conv +
+delta state and every MLA cache) and `VerifyDrafts` (chunked pass that returns the
+greedy argmax at each position, preceded by a snapshot so a rejected prefix can be
+rewound). Both compile; `VerifyDrafts` is **unverified** and currently unused.
+
+The speculative loop built on them in `tests/forward_test.cpp` measured 2.54 tok/s
+with **0 drafts accepted** and produced a sequence that is not the plain greedy one,
+so its position bookkeeping is wrong: the trunk consumes the current token inside
+the loop and then verifies drafts starting at the same position, which double-counts
+one position. The hook was removed; the engine primitives were kept.
+
+Correct shape for the next attempt:
+
+1. State positions **explicitly**: `position` is the index the next token will
+   occupy. Feeding `token` consumes `position` and advances it.
+2. Draft K tokens with block 42 *at* the advancing positions, chaining each draft's
+   hidden state (which `ForwardMtp` leaves in `m.h`).
+3. Verify with one chunked pass starting at the position of the first draft, so
+   `argmax[i]` is the trunk's prediction at draft slot `i`.
+4. Accept while `argmax[i] == draft[i]`; the token to emit next is
+   `argmax[accepted]`. Restore the snapshot, then commit exactly the accepted
+   prefix so the state matches the emitted sequence.
+5. Check the simplest invariant first: with K = 0, the loop must reproduce plain
+   greedy byte for byte. Only then raise K.

@@ -115,6 +115,9 @@ struct Engine::Impl {
   float* bgate{nullptr};
   float* bup{nullptr};
   float* bout{nullptr};
+  float* blogits{nullptr};
+  float* snapshot{nullptr};
+  std::size_t snapshot_floats{0};
   hipStream_t queue{nullptr};
   float* kernel_debug{nullptr};
 
@@ -345,7 +348,12 @@ std::unique_ptr<Engine> Engine::Create(const core::GgufReader& reader,
       alloc(&m.bgather, Impl::kMaxChunk * n_embd) &&
       alloc(&m.bgate, Impl::kMaxChunk * config.n_ff_exp) &&
       alloc(&m.bup, Impl::kMaxChunk * config.n_ff_exp) &&
-      alloc(&m.bout, Impl::kMaxChunk * n_embd);
+      alloc(&m.bout, Impl::kMaxChunk * n_embd) &&
+      alloc(&m.blogits, 8 * static_cast<std::size_t>(config.n_vocab)) &&
+      alloc(&m.snapshot, config.n_layer_total *
+                             (9 * kda_inner +
+                              static_cast<std::size_t>(heads) * kda_dim * kda_dim +
+                              options.max_context * kv_dim));
   if (!ok) {
     return fail("engine: device scratch allocation failed");
   }
@@ -756,6 +764,91 @@ bool Engine::ForwardToken(std::int32_t token, std::uint32_t position,
       *error = std::string("engine: forward failed: ") + hipGetErrorString(status);
     }
     return false;
+  }
+  return true;
+}
+
+void Engine::SnapshotState() {
+  Impl& m = *impl_;
+  if (m.snapshot == nullptr) {
+    return;
+  }
+  std::size_t offset = 0;
+  const auto copy_in = [&](const float* source, std::size_t count) {
+    hipMemcpyAsync(m.snapshot + offset, source, count * sizeof(float),
+                   hipMemcpyDeviceToDevice, m.queue);
+    offset += count;
+  };
+  for (std::uint32_t il = 0; il < m.config.n_layer_total; ++il) {
+    if (m.config.IsKda(il)) {
+      const std::size_t conv = 9 * m.config.KdaInner();
+      const std::size_t delta = static_cast<std::size_t>(m.config.n_head) *
+                                m.config.n_kda_head_dim * m.config.n_kda_head_dim;
+      copy_in(m.conv_state[il], conv);
+      copy_in(m.delta_state[il], delta);
+    } else {
+      copy_in(m.mla_cache[il], m.options.max_context * (m.config.n_lora_kv + m.config.n_rot));
+    }
+  }
+  m.snapshot_floats = offset;
+  hipStreamSynchronize(m.queue);
+}
+
+void Engine::RestoreState() {
+  Impl& m = *impl_;
+  if (m.snapshot == nullptr || m.snapshot_floats == 0) {
+    return;
+  }
+  std::size_t offset = 0;
+  const auto copy_out = [&](float* target, std::size_t count) {
+    hipMemcpyAsync(target, m.snapshot + offset, count * sizeof(float),
+                   hipMemcpyDeviceToDevice, m.queue);
+    offset += count;
+  };
+  for (std::uint32_t il = 0; il < m.config.n_layer_total; ++il) {
+    if (m.config.IsKda(il)) {
+      const std::size_t conv = 9 * m.config.KdaInner();
+      const std::size_t delta = static_cast<std::size_t>(m.config.n_head) *
+                                m.config.n_kda_head_dim * m.config.n_kda_head_dim;
+      copy_out(m.conv_state[il], conv);
+      copy_out(m.delta_state[il], delta);
+    } else {
+      copy_out(m.mla_cache[il], m.options.max_context * (m.config.n_lora_kv + m.config.n_rot));
+    }
+  }
+  hipStreamSynchronize(m.queue);
+}
+
+bool Engine::VerifyDrafts(const std::int32_t* tokens, std::size_t count,
+                          std::uint32_t start_position,
+                          std::int32_t* argmax_per_row, std::string* error) {
+  Impl& m = *impl_;
+  const std::size_t n_embd = m.config.n_embd;
+  if (count == 0 || count > 8) {
+    if (error != nullptr) *error = "engine: verification batch must be 1..8";
+    return false;
+  }
+  SnapshotState();
+  // Stop after the last trunk block: the chunk buffer then holds each row's final
+  // hidden state, which the head turns into per-row logits.
+  if (!PrefillChunk(tokens, count, start_position,
+                    static_cast<std::int32_t>(m.config.n_layer) - 1, error)) {
+    return false;
+  }
+  hip::LaunchGemm(m.Dev(m.weights.output), Storage(m.weights.output.type),
+                  m.config.n_vocab, n_embd, m.bx, count, n_embd, m.blogits,
+                  m.config.n_vocab, m.queue);
+  for (std::size_t row = 0; row < count; ++row) {
+    hip::LaunchRmsNorm(m.bx + row * n_embd,
+                       static_cast<const float*>(m.Dev(m.weights.output_norm)), m.h, 1,
+                       n_embd, m.config.rms_eps, m.queue);
+    hip::LaunchGemv(m.Dev(m.weights.output), Storage(m.weights.output.type),
+                    m.config.n_vocab, n_embd, m.h, m.logits, m.queue);
+    hip::LaunchArgmax(m.logits, m.config.n_vocab, m.argmax, m.queue);
+    hipStreamSynchronize(m.queue);
+    std::int32_t value = -1;
+    hipMemcpy(&value, m.argmax, sizeof(value), hipMemcpyDeviceToHost);
+    argmax_per_row[row] = value;
   }
   return true;
 }
