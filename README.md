@@ -35,11 +35,22 @@ at the bottom.
   sentence as llama.cpp; the two agree for 53 characters before a near-tie
   (0.048 logit margin) sends them apart, and 1 of 4 pinned cases is
   token-identical end to end.
-- **MTP block runs**: block 42 is readable (its Q4_0 storage now has a dot,
-  validated against real rows), and `Engine::ForwardMtp` drafts the next token
-  from the base model's final hidden state — 7 of 9 drafts match what the trunk
-  then produces on the pinned prompt. Drafting does not yet speed anything up:
-  verification is one token per pass, so see the note below.
+- **MTP block runs and is measured**: block 42 is readable (its Q4_0 storage has a
+  dot, validated against real rows), and `Engine::ForwardMtp` drafts from the base
+  model's final hidden state: **18 of 31 drafts (58 %)** match what the trunk then
+  produces. Speculative decoding is deliberately not wired into the serving path —
+  at 58 % acceptance and a batched verifier only 1.29x cheaper per token, the modeled
+  gain is ~1.15x, which does not justify the equality risk. See
+  [docs/quality.md](docs/quality.md).
+- **Image input works at the engine level**: the mmproj tower (27 ViT blocks, vision
+  M-RoPE, 2x2 merge, projector) encodes a 768x768 image into 576 rows of 2560, and
+  `Engine::ForwardEmbedding` feeds those rows into the trunk at the chat template's
+  image markers. Verified two ways: against a numpy reference from the same weights
+  (final embedding 3.2e-06) and against llama.cpp's own encoder (embedding sum agrees
+  to 0.04 %, block-0 stages to four decimals). On a test image it answers "there's a
+  large red circle, and inside it, centered, is a blue square. In the upper-left
+  corner, there's small text". The `gufo prompt --image` flag path is written but
+  **unverified** (see the quality report).
 
 ## Measured performance (2026-11-27)
 
@@ -86,7 +97,9 @@ buy about 1.3x.
   (`VerifyDrafts`, `SnapshotState`, `RestoreState`), but the accept loop's position
   bookkeeping is unfinished — the first attempt accepted nothing, and the correct
   discipline is written down in `notes/prefill-design.md`.
-- **No image input**: the projector is downloaded but no vision path exists.
+- **Images only through the engine, not yet through the CLI flag**: the tower and the
+  prompt substitution are verified, but `gufo prompt --image` did not reach them in
+  this environment and is reported as unverified rather than claimed.
 - **No sampler beyond greedy**, no reasoning markers, no tool-call dialect.
 
 ## Quality
@@ -94,7 +107,8 @@ buy about 1.3x.
 [docs/quality.md](docs/quality.md) is the quality report: what is proven against
 Gufo's reference and llama.cpp, the per-stage numerical differences, the golden-set
 result (1 of 4 cases token-identical, the rest one token apart at a 0.048 logit
-margin) and the known gaps — no HTTP serving, no vision, MTP not accepted.
+margin), the verified vision tower with its parity numbers, MTP acceptance, and the
+known gaps — no HTTP serving, no CLI image flag, MTP not wired.
 
 ## Layout
 
@@ -130,7 +144,7 @@ forward (`tests/forward_test.cpp`) run outside ctest because they need the GPU.
 The extension loads Ling 3.2 Air and generates coherent text on the GPU, with
 every operator checked against a reference and every stage of the forward checked
 against numpy. It is **not yet a serving extension**: no runner, no cache, no
-HTTP, no MTP, no vision — and it is slower than llama.cpp's CPU path on the same
+HTTP, no CLI image flag, MTP not wired — and it is slower than llama.cpp's CPU path on the same
 machine, at 14 % of the memory-bandwidth roofline. Those are the next pieces of
 work, in that order.
 
