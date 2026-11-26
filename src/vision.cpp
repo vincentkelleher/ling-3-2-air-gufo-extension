@@ -4,6 +4,7 @@
 
 #include <gufo/ext/gguf_reader.hpp>
 
+#include <cmath>
 #include <cstring>
 #include <string>
 #include <vector>
@@ -14,6 +15,8 @@ namespace gufo::ext::ling3_air {
 namespace {
 
 using hip::LaunchAddInto;
+using hip::LaunchAddPosEmb;
+using hip::LaunchMerge2x2;
 using hip::LaunchGelu;
 using hip::LaunchLayerNorm;
 using hip::LaunchMatvecInMajor;
@@ -80,6 +83,12 @@ struct BlockWeights {
 struct VisionEncoder::Impl {
   VisionConfig config;
   TensorRef patch0, patch1, patch_bias;
+  TensorRef pos_embd;
+  TensorRef input_norm_w, input_norm_b;
+  TensorRef mm0_w, mm0_b, mm2_w, mm2_b;
+  std::uint32_t text_dim{0};
+  std::uint32_t pos_grid{0};
+
   std::vector<BlockWeights> blocks;
   // Scratch, sized for the largest patch sequence we run.
   float* x{nullptr};
@@ -133,7 +142,9 @@ VisionEncoder::~VisionEncoder() {
       if (ref->device != nullptr) hipFree(ref->device);
     }
   }
-  for (const TensorRef* ref : {&m.patch0, &m.patch1, &m.patch_bias}) {
+  for (const TensorRef* ref : {&m.patch0, &m.patch1, &m.patch_bias, &m.pos_embd,
+                               &m.input_norm_w, &m.input_norm_b, &m.mm0_w, &m.mm0_b,
+                               &m.mm2_w, &m.mm2_b}) {
     if (ref->device != nullptr) hipFree(ref->device);
   }
 }
@@ -198,6 +209,29 @@ std::unique_ptr<VisionEncoder> VisionEncoder::Create(const core::GgufReader& mmp
                                  &w.down_w, &w.down_b}) {
       m.device_bytes += ref->count * sizeof(float);
     }
+  }
+  const bool projector_ok =
+      Upload(mmproj, "v.position_embd.weight", &m.pos_embd, &local) &&
+      Upload(mmproj, "mm.input_norm.weight", &m.input_norm_w, &local) &&
+      Upload(mmproj, "mm.input_norm.bias", &m.input_norm_b, &local) &&
+      Upload(mmproj, "mm.0.weight", &m.mm0_w, &local) &&
+      Upload(mmproj, "mm.0.bias", &m.mm0_b, &local) &&
+      Upload(mmproj, "mm.2.weight", &m.mm2_w, &local) &&
+      Upload(mmproj, "mm.2.bias", &m.mm2_b, &local);
+  if (!projector_ok) {
+    return fail(local);
+  }
+  for (const TensorRef* ref : {&m.pos_embd, &m.input_norm_w, &m.input_norm_b, &m.mm0_w,
+                               &m.mm0_b, &m.mm2_w, &m.mm2_b}) {
+    m.device_bytes += ref->count * sizeof(float);
+  }
+  // Position embeddings are a square grid: 1152 x (grid*grid).
+  m.pos_grid = static_cast<std::uint32_t>(
+      std::lround(std::sqrt(static_cast<double>(m.pos_embd.count) / m.config.dim)));
+  m.text_dim = static_cast<std::uint32_t>(m.mm2_b.count);
+  if (m.pos_grid * m.pos_grid * m.config.dim != m.pos_embd.count ||
+      m.mm0_b.count != m.text_dim) {
+    return fail("vision: projector shapes are inconsistent");
   }
   if (error != nullptr) error->clear();
   return encoder;
@@ -280,12 +314,128 @@ bool VisionEncoder::RunBlock(std::uint32_t block, float* x, std::size_t tokens,
   return true;
 }
 
-bool VisionEncoder::RunAll(std::size_t tokens, float* x, std::string* error) {
-  for (std::uint32_t b = 0; b < impl_->config.blocks; ++b) {
+bool VisionEncoder::RunAll(std::size_t tokens, float* x, std::string* error,
+                           int max_blocks) {
+  const std::uint32_t limit =
+      max_blocks < 0 || static_cast<std::uint32_t>(max_blocks) > impl_->config.blocks
+          ? impl_->config.blocks
+          : static_cast<std::uint32_t>(max_blocks);
+  for (std::uint32_t b = 0; b < limit; ++b) {
     if (!RunBlock(b, x, tokens, error)) {
       return false;
     }
   }
+  return true;
+}
+
+std::uint32_t VisionEncoder::text_dim() const { return impl_->text_dim; }
+
+bool VisionEncoder::EncodeImage(const float* chw, std::uint32_t grid_h,
+                                std::uint32_t grid_w, std::vector<float>* out,
+                                std::string* error, std::vector<float>* tower_out,
+                                int max_blocks) {
+  Impl& m = *impl_;
+  const std::uint32_t patch = m.config.patch;
+  const std::uint32_t dim = m.config.dim;
+  const std::size_t tokens = static_cast<std::size_t>(grid_h) * grid_w;
+  if (grid_h % 2 != 0 || grid_w % 2 != 0) {
+    if (error != nullptr) *error = "vision: patch grid must be even for the 2x2 merge";
+    return false;
+  }
+  const std::size_t pixels_h = static_cast<std::size_t>(grid_h) * patch;
+  const std::size_t pixels_w = static_cast<std::size_t>(grid_w) * patch;
+  const std::size_t patch_values = static_cast<std::size_t>(patch) * patch * 3;
+
+  // Patchify on the host. A still image feeds the same pixels to both temporal
+  // halves of the kernel (`v.patch_embd.weight` and `.weight.1`).
+  std::vector<float> patches(tokens * 2 * patch_values);
+  for (std::uint32_t gh = 0; gh < grid_h; ++gh) {
+    for (std::uint32_t gw = 0; gw < grid_w; ++gw) {
+      const std::size_t row = static_cast<std::size_t>(gh) * grid_w + gw;
+      for (std::uint32_t c = 0; c < 3; ++c) {
+        for (std::uint32_t y = 0; y < patch; ++y) {
+          for (std::uint32_t x = 0; x < patch; ++x) {
+            const std::size_t pixel = (static_cast<std::size_t>(gh) * patch + y) * pixels_w +
+                                      static_cast<std::size_t>(gw) * patch + x;
+            const float value = chw[static_cast<std::size_t>(c) * pixels_h * pixels_w + pixel];
+            // Both temporal halves must be contiguous blocks (`[rows][patch]` then
+            // `[rows][patch]` again), because they are fed to two batched matvecs.
+            const std::size_t target = row * patch_values + (c * patch + y) * patch + x;
+            patches[target] = value;
+            patches[target + tokens * patch_values] = value;
+          }
+        }
+      }
+    }
+  }
+
+  const std::size_t merged_rows = tokens / 4;
+  const std::size_t merged_dim = 4 * static_cast<std::size_t>(dim);
+  float* device_patches = nullptr;
+  float* hidden = nullptr;
+  float* second = nullptr;
+  float* merged = nullptr;
+  float* normed = nullptr;
+  float* projected = nullptr;
+  auto release = [&] {
+    for (float** pointer : {&device_patches, &hidden, &second, &merged, &normed, &projected}) {
+      if (*pointer != nullptr) {
+        hipFree(*pointer);
+        *pointer = nullptr;
+      }
+    }
+  };
+  const bool allocated =
+      hipMalloc(reinterpret_cast<void**>(&device_patches), patches.size() * sizeof(float)) == hipSuccess &&
+      hipMalloc(reinterpret_cast<void**>(&hidden), tokens * dim * sizeof(float)) == hipSuccess &&
+      hipMalloc(reinterpret_cast<void**>(&second), tokens * dim * sizeof(float)) == hipSuccess &&
+      hipMalloc(reinterpret_cast<void**>(&merged), merged_rows * merged_dim * sizeof(float)) == hipSuccess &&
+      hipMalloc(reinterpret_cast<void**>(&normed), merged_rows * merged_dim * sizeof(float)) == hipSuccess &&
+      hipMalloc(reinterpret_cast<void**>(&projected), merged_rows * m.text_dim * sizeof(float)) == hipSuccess;
+  if (!allocated) {
+    release();
+    if (error != nullptr) *error = "vision: image buffers failed";
+    return false;
+  }
+  hipMemcpy(device_patches, patches.data(), patches.size() * sizeof(float),
+            hipMemcpyHostToDevice);
+
+  // Patch embed: two halves of the temporal kernel, summed, plus bias.
+  LaunchMatvecInMajorBatch(device_patches, m.patch0.device, m.patch_bias.device, hidden,
+                           tokens, patch_values, dim, nullptr);
+  LaunchMatvecInMajorBatch(device_patches + tokens * patch_values, m.patch1.device,
+                           nullptr, second, tokens, patch_values, dim, nullptr);
+  LaunchAddInto(hidden, hidden, second, tokens * dim, nullptr);
+  LaunchAddPosEmb(hidden, m.pos_embd.device, tokens, grid_w, m.pos_grid, dim, nullptr);
+  if (!RunAll(tokens, hidden, error, max_blocks)) {
+    release();
+    return false;
+  }
+  if (tower_out != nullptr) {
+    tower_out->resize(tokens * dim);
+    hipMemcpy(tower_out->data(), hidden, tower_out->size() * sizeof(float),
+              hipMemcpyDeviceToHost);
+  }
+  // `mm.input_norm` is `dim`-wide: normalise every patch, then merge 2x2.
+  LaunchLayerNorm(hidden, m.input_norm_w.device, m.input_norm_b.device, hidden, tokens,
+                  dim, m.config.eps, nullptr);
+  LaunchMerge2x2(hidden, merged, grid_h, grid_w, dim, nullptr);
+  hipMemcpy(normed, merged, merged_rows * merged_dim * sizeof(float),
+            hipMemcpyDeviceToDevice);
+  LaunchMatvecInMajorBatch(normed, m.mm0_w.device, m.mm0_b.device, projected,
+                           merged_rows, merged_dim, m.text_dim, nullptr);
+  LaunchGelu(projected, projected, merged_rows * m.text_dim, nullptr);
+  LaunchMatvecInMajorBatch(projected, m.mm2_w.device, m.mm2_b.device, normed,
+                           merged_rows, m.text_dim, m.text_dim, nullptr);
+  if (hipStreamSynchronize(nullptr) != hipSuccess) {
+    release();
+    if (error != nullptr) *error = "vision: projector failed";
+    return false;
+  }
+  out->resize(merged_rows * m.text_dim);
+  hipMemcpy(out->data(), normed, out->size() * sizeof(float), hipMemcpyDeviceToHost);
+  release();
+  if (error != nullptr) error->clear();
   return true;
 }
 

@@ -106,3 +106,47 @@ Not yet done: position embeddings with dynamic-resolution interpolation, the
 spatial merge (2x2 → 576 tokens for a 768x768 image), `v.post_ln` and the `mm.*`
 projector, the image-preprocessing path, and wiring image embeddings into the text
 prompt. `PatchEmbed` and `RunBlock` are the validated primitives those build on.
+
+## Full image path now verified (2026-11-27)
+
+`VisionEncoder::EncodeImage` does the whole chain and matches the numpy reference
+from the real mmproj weights:
+
+| stage | max abs error | limit |
+| --- | --- | --- |
+| patch embed of image patch 0 | 1.7e-06 | 2e-3 |
+| patch embed + position embeddings (2x2 grid) | 1.4e-06 | 2e-3 |
+| trace after blocks 0 / 1 / 2 / 3 / 26 | 2.0e-05 … 9.2e-05 | 2e-3 |
+| tower output after all 27 blocks | 9.2e-05 | 5e-3 |
+| final embedding (768x768-equivalent projector) | 1.6e-06 | 5e-3 |
+
+The shape of the pipeline, settled from the mmproj rather than guessed:
+
+1. **Fixed 768x768 input.** `clip.vision.image_size` is 768, patch 16, so the patch
+   grid is 48x48 = 2304, exactly the number of stored position embeddings. There is
+   no dynamic resolution and no interpolation to implement — smaller grids (only
+   used by the test) take a row-major crop of the 48x48 grid.
+2. **Two temporal halves.** `v.patch_embd.weight` and `.weight.1` each map 768
+   pixels to 1152; a still image feeds the same pixels to both. The two halves must
+   be contiguous blocks in the patch buffer, because they go to two batched matvecs
+   — interleaving them per row silently produced a half-magnitude patch embed.
+3. **`mm.input_norm` is 1152-wide**, so it normalises each patch *before* the 2x2
+   merge (4608 = 4x1152), not the merged vector.
+4. Merge order is (row, row+1) x (col, col+1) → `dy*2+dx`, then `mm.0` (4608→2560),
+   tanh GELU, `mm.2` (2560→2560). `text_dim` is 2560, the text model's embedding
+   width.
+
+Three bugs this test caught, all of which produced plausible-looking numbers:
+
+- capturing the tower output *after* the in-place input norm, which made every
+  traced stage look wrong and hid the real one;
+- the strided second temporal half described above;
+- comparing a pre-norm value against a post-position-embed value (an invalid
+  reference in my own test).
+
+Not done yet: resize/normalise from a decoded image (PIL-equivalent resampling to
+768x768 with the mmproj's mean/std), the `<image>` token plumbing into the text
+prompt, and parity against the HF `BailingMoeV3VLForConditionalGeneration` tower
+(criterion 3) — that needs torch + transformers in the venv, which are not
+installed; the numpy reference from the same weights is what stands behind the
+numbers above.

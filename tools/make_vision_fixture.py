@@ -15,6 +15,10 @@ Layout (little endian):
     float32 embed[dim]              (patch-embed output for token 0)
     float32 x[tokens][dim]          (one encoder block's input)
     float32 block[tokens][dim]      (that block's output for all tokens)
+    int32 grid, grid                (small image, grid x grid patches)
+    float32 image[3][grid*16][grid*16]
+    float32 embedding[grid*grid/4][text_dim]
+    int32 trace_count, then trace_count x (int32 block, float32 h[grid*grid][dim])
 """
 
 import argparse
@@ -109,6 +113,63 @@ def main():
     h = layer_norm(x, ln2w, ln2b, eps)
     x = x + gelu(h @ up_w + up_b) @ down_w + down_b
 
+    # Full image path on a small grid (2x2 patches = a 32x32 image): patchify with a
+    # duplicated temporal frame, cropped position embeddings, every block, the 2x2
+    # merge, the input norm and both projector matrices.
+    grid = 2
+    side = grid * 16
+    image = rng.standard_normal((3, side, side)).astype(np.float32)
+    patch_dim = dim
+    rows = grid * grid
+    pos = tensor(reader, 'v.position_embd.weight').reshape(-1, dim)   # [2304][1152]
+    patches = np.zeros((rows, 2 * 768), dtype=np.float32)
+    for gh in range(grid):
+        for gw in range(grid):
+            row = gh * grid + gw
+            block_px = image[:, gh * 16:(gh + 1) * 16, gw * 16:(gw + 1) * 16].reshape(-1)
+            patches[row, :768] = block_px
+            patches[row, 768:] = block_px
+    w0 = tensor(reader, 'v.patch_embd.weight').reshape(-1, dim)
+    w1 = tensor(reader, 'v.patch_embd.weight.1').reshape(-1, dim)
+    h = patches[:, :768] @ w0 + patches[:, 768:] @ w1 + bias
+    embed_img0 = h[0].copy()
+    for t in range(rows):
+        h[t] += pos[(t // grid) * 48 + (t % grid)]
+    before_blocks = h.copy()
+    traces = []
+    nb = int(reader.fields['clip.vision.block_count'].contents())
+    for b in range(nb):
+        prefix = f'v.blk.{b}.'
+        ln1w, ln1b = tensor(reader, prefix + 'ln1.weight'), tensor(reader, prefix + 'ln1.bias')
+        ln2w, ln2b = tensor(reader, prefix + 'ln2.weight'), tensor(reader, prefix + 'ln2.bias')
+        qkv_w, qkv_b = tensor(reader, prefix + 'attn_qkv.weight'), tensor(reader, prefix + 'attn_qkv.bias')
+        out_w, out_b = tensor(reader, prefix + 'attn_out.weight'), tensor(reader, prefix + 'attn_out.bias')
+        up_w, up_b = tensor(reader, prefix + 'ffn_up.weight'), tensor(reader, prefix + 'ffn_up.bias')
+        down_w, down_b = tensor(reader, prefix + 'ffn_down.weight'), tensor(reader, prefix + 'ffn_down.bias')
+        hh = layer_norm(h, ln1w, ln1b, eps)
+        qkv = hh @ qkv_w + qkv_b
+        q, k, v = np.split(qkv, 3, axis=-1)
+        q = q.reshape(rows, heads, head_dim).transpose(1, 0, 2)
+        k = k.reshape(rows, heads, head_dim).transpose(1, 0, 2)
+        v = v.reshape(rows, heads, head_dim).transpose(1, 0, 2)
+        sc = (q @ k.transpose(0, 2, 1)) / np.sqrt(head_dim)
+        w = np.exp(sc - sc.max(axis=-1, keepdims=True))
+        w /= w.sum(axis=-1, keepdims=True)
+        attn = (w @ v).transpose(1, 0, 2).reshape(rows, dim)
+        h = h + attn @ out_w + out_b
+        hh = layer_norm(h, ln2w, ln2b, eps)
+        h = h + gelu(hh @ up_w + up_b) @ down_w + down_b
+        if b in (0, 1, 2, 3, nb - 1):
+            traces.append((b, h.copy()))
+    tower_out = h.copy()
+    norm_w, norm_b = tensor(reader, 'mm.input_norm.weight'), tensor(reader, 'mm.input_norm.bias')
+    # mm.input_norm is `dim`-wide: it normalises each patch before the 2x2 merge.
+    h = layer_norm(h, norm_w, norm_b, eps)
+    merged = np.concatenate([h[0], h[1], h[grid], h[grid + 1]]).astype(np.float32)
+    mm0w, mm0b = tensor(reader, 'mm.0.weight'), tensor(reader, 'mm.0.bias')
+    mm2w, mm2b = tensor(reader, 'mm.2.weight'), tensor(reader, 'mm.2.bias')
+    embedding = gelu(merged @ mm0w + mm0b) @ mm2w + mm2b
+
     with open(args.out, 'wb') as handle:
         handle.write(struct.pack('<iiiiii', tokens, dim, heads, head_dim, ffn, 1))
         handle.write(patch0.astype(np.float32).tobytes())
@@ -116,7 +177,21 @@ def main():
         handle.write(embed.astype(np.float32).tobytes())
         handle.write(x0.astype(np.float32).tobytes())
         handle.write(x.astype(np.float32).tobytes())
+        handle.write(struct.pack('<ii', grid, grid))
+        handle.write(image.astype(np.float32).tobytes())
+        handle.write(embed_img0.astype(np.float32).tobytes())
+        handle.write(before_blocks.astype(np.float32).tobytes())
+        handle.write(tower_out.astype(np.float32).tobytes())
+        handle.write(embedding.astype(np.float32).tobytes())
+        handle.write(struct.pack('<i', len(traces)))
+        for block_index, values in traces:
+            handle.write(struct.pack('<i', block_index))
+            handle.write(values.astype(np.float32).tobytes())
 
+    for block_index, values in traces:
+        print(f'  trace block {block_index}: rms {np.sqrt((values ** 2).mean()):.4f}')
+    print(f'image path: {grid}x{grid} patches, embedding dim {embedding.shape[0]}, '
+          f'rms {np.sqrt((embedding ** 2).mean()):.4f}')
     print(f'wrote {args.out}: {tokens} tokens, dim {dim}, {heads} heads x {head_dim}, '
           f'ffn {ffn}; block-0 output rms {np.sqrt((x ** 2).mean()):.4f}')
 

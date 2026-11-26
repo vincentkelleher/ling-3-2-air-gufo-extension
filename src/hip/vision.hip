@@ -187,7 +187,64 @@ __global__ void AttentionKernel(const float* qkv, float* out, int tokens, int he
   }
 }
 
+/// x[t][d] += pos[(t/grid)*grid + (t%grid)][d], i.e. the top-left rows x cols block of
+/// the square position grid. Production images are 768x768, whose 48x48 patch grid
+/// matches the stored grid exactly; smaller grids are a test-only crop.
+__global__ void AddPosEmbKernel(float* x, const float* pos, int tokens, int cols,
+                                int grid, int dim) {
+  const int t = blockIdx.x;
+  if (t >= tokens) {
+    return;
+  }
+  // Row-major crop: row t/cols, column t%cols of the stored square grid.
+  const int pos_index = (t / cols) * grid + (t % cols);
+  for (int d = threadIdx.x; d < dim; d += blockDim.x) {
+    x[static_cast<std::size_t>(t) * dim + d] +=
+        pos[static_cast<std::size_t>(pos_index) * dim + d];
+  }
+}
+
+/// Gathers 2x2 patch neighbourhoods into merged rows: out[(mh*gw/2 + mw)][4*dim] with
+/// the four patches in (row, row+1) x (col, col+1) order.
+__global__ void Merge2x2Kernel(const float* x, float* out, int rows, int cols, int dim) {
+  const int merged_cols = cols / 2;
+  const int merged_rows = rows / 2;
+  const int total = merged_rows * merged_cols;
+  const int m = blockIdx.x;
+  if (m >= total) {
+    return;
+  }
+  const int mh = m / merged_cols;
+  const int mw = m % merged_cols;
+  for (int d = threadIdx.x; d < dim; d += blockDim.x) {
+    for (int dy = 0; dy < 2; ++dy) {
+      for (int dx = 0; dx < 2; ++dx) {
+        const int source_row = mh * 2 + dy;
+        const int source_col = mw * 2 + dx;
+        const std::size_t source =
+            (static_cast<std::size_t>(source_row) * cols + source_col) * dim + d;
+        out[static_cast<std::size_t>(m) * 4 * dim + (dy * 2 + dx) * dim + d] = x[source];
+      }
+    }
+  }
+}
+
 }  // namespace
+
+void LaunchAddPosEmb(float* x, const float* pos, std::size_t tokens, std::size_t cols,
+                     std::size_t grid, std::size_t dim, hipStream_t stream) {
+  AddPosEmbKernel<<<static_cast<int>(tokens), 128, 0, stream>>>(
+      x, pos, static_cast<int>(tokens), static_cast<int>(cols),
+      static_cast<int>(grid), static_cast<int>(dim));
+}
+
+void LaunchMerge2x2(const float* x, float* out, std::size_t rows, std::size_t cols,
+                    std::size_t dim, hipStream_t stream) {
+  const int blocks = static_cast<int>((rows / 2) * (cols / 2));
+  Merge2x2Kernel<<<blocks, 128, 0, stream>>>(x, out, static_cast<int>(rows),
+                                             static_cast<int>(cols),
+                                             static_cast<int>(dim));
+}
 
 void LaunchMatvecInMajor(const float* x, const float* w, const float* bias, float* y,
                          std::size_t in, std::size_t out, hipStream_t stream) {

@@ -31,7 +31,15 @@ void LaunchGelu(const float* x, float* y, std::size_t count, hipStream_t stream)
 void LaunchAddInto(float* y, const float* a, const float* b, std::size_t count,
                    hipStream_t stream);
 
-/// Causal self-attention over `tokens` rows of a packed qkv buffer.
+/// x[t] += pos[t] for `tokens` rows (the caller decides the position mapping).
+void LaunchAddPosEmb(float* x, const float* pos, std::size_t tokens, std::size_t cols,
+                     std::size_t grid, std::size_t dim, hipStream_t stream);
+
+/// Gathers 2x2 patch neighbourhoods into merged rows of `4*dim`.
+void LaunchMerge2x2(const float* x, float* out, std::size_t rows, std::size_t cols,
+                    std::size_t dim, hipStream_t stream);
+
+/// Bidirectional self-attention over `tokens` rows of a packed qkv buffer.
 void LaunchVisionAttention(const float* qkv, float* out, std::size_t tokens,
                            std::size_t heads, std::size_t head_dim,
                            hipStream_t stream);

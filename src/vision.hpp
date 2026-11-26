@@ -50,8 +50,23 @@ class VisionEncoder {
   [[nodiscard]] bool RunBlock(std::uint32_t block, float* x, std::size_t tokens,
                               std::string* error);
 
-  /// Runs every block in sequence, in place.
-  [[nodiscard]] bool RunAll(std::size_t tokens, float* x, std::string* error);
+  /// Runs every block in sequence (or the first `max_blocks` when non-negative), in
+  /// place.
+  [[nodiscard]] bool RunAll(std::size_t tokens, float* x, std::string* error,
+                            int max_blocks = -1);
+
+  /// Full image path: `chw` is `grid_h*patch x grid_w*patch x 3` floats, planar RGB
+  /// and already normalised with the mmproj's mean/std. Writes one embedding row of
+  /// `text_dim` per 2x2 merged patch. Productions images are the mmproj's own
+  /// 768x768 (48x48 patches); smaller grids are a test-only crop.
+  [[nodiscard]] bool EncodeImage(const float* chw, std::uint32_t grid_h,
+                                 std::uint32_t grid_w, std::vector<float>* out,
+                                 std::string* error,
+                                 std::vector<float>* tower_out = nullptr,
+                                 int max_blocks = -1);
+
+  /// Output width of the projector (the text model's hidden size).
+  [[nodiscard]] std::uint32_t text_dim() const;
 
   [[nodiscard]] std::size_t DeviceBytes() const;
 
