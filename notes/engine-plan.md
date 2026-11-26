@@ -662,3 +662,22 @@ run), the Q4_K branch now sums integer products per 32-group like llama.cpp:
 
 Next: the same integer form for Q6_K (`-32` codes, 16-element groups, one float
 scale each), then Q8_0, each validated by the dot test before the engine.
+
+## One run in six diverged -- there is non-determinism (2026-11-27)
+
+After adding the integer Q6_K/Q8_0 dots, one 12-step run produced the reference
+continuation (`question: "The capital`), while three subsequent 12-step runs and
+a 32-step run produced `question about the capital`. Same binary, same prompt,
+same greedy settings.
+
+So the engine is occasionally non-deterministic. With top-2 margins of 0.01-0.02
+that is enough to flip a token, which means: (a) token-for-token equality cannot
+be claimed until runs are repeatable, and (b) there is a race or an uninitialized
+read to find. Candidates, in order: the host-side copy of router ids inside
+`LaunchMoeGather` (async copy + stream sync on the default stream), shared-memory
+arrays in `DeltaRuleKernel`/`SoftmaxKernel`, and any buffer read outside its
+written extent (scores beyond `cache_len`, `expert_down` when the shared expert
+runs, the conv state slots).
+
+Next: run the 12-step case ten times and count outcomes, then bisect by disabling
+paths (conv, MoE gather, MLA) one at a time until the outcome is stable.
