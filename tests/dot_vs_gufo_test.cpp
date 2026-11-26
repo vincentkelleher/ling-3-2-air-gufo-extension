@@ -190,6 +190,39 @@ std::size_t RowBytes(core::GgmlType type, std::size_t cols) {
   }
 }
 
+/// Integer per-group dot in llama.cpp's shape: q8 activations, integer products
+/// per 32-group, one float scale per group. Compared against quant::Dot to prove
+/// the unpacking before using it in a kernel.
+double IntegerQ4Dot(const BlockQ4K& block, const std::vector<float>& x) {
+  float amax = 0.0f;
+  for (int i = 0; i < 256; ++i) amax = std::fmax(amax, std::fabs(x[i]));
+  const float scale = amax > 0.0f ? amax / 127.0f : 1.0f;
+  const double d = Half(block.d);
+  const double dmin = Half(block.dmin);
+  double inner = 0.0;
+  for (int g = 0; g < 8; ++g) {
+    int sum_qa = 0;
+    int sum_a = 0;
+    for (int i = 0; i < 32; ++i) {
+      const int index = g * 32 + i;
+      const int code = index % 32;
+      const std::uint8_t packed = block.qs[(g / 2) * 32 + code];
+      const int q = (g & 1) ? (packed >> 4) : (packed & 0x0F);
+      const float raw = std::rint(x[index] / scale);
+      const int a = static_cast<int>(raw > 127.0f ? 127.0f : (raw < -127.0f ? -127.0f : raw));
+      sum_qa += q * a;
+      sum_a += a;
+    }
+    float sc = 0.0f;
+    float m = 0.0f;
+    ScaleMin(g, block.scales, sc, m);
+    inner += (d * static_cast<double>(sc) * static_cast<double>(sum_qa) -
+              dmin * static_cast<double>(m) * static_cast<double>(sum_a)) *
+             static_cast<double>(scale);
+  }
+  return inner;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -252,6 +285,35 @@ int main(int argc, char** argv) {
       }
     }
   }
+  {
+    const auto* info = reader->FindTensor("blk.2.ffn_gate_exps.weight");
+    if (info != nullptr) {
+      const std::size_t cols = static_cast<std::size_t>(info->dimensions[0]);
+      std::vector<float> x(cols);
+      for (std::size_t i = 0; i < cols; ++i) x[i] = std::sin(0.001 * static_cast<double>(i) + 1.0);
+      const std::size_t stride = RowBytes(info->type, cols) / 10;  // one 256-block
+      const auto* base = static_cast<const std::uint8_t*>(info->data);
+      for (int block = 0; block < 3; ++block) {
+        std::vector<float> block_x(x.begin() + block * 256, x.begin() + (block + 1) * 256);
+        const auto* block_data = base + block * stride;
+        const double integer = IntegerQ4Dot(*reinterpret_cast<const BlockQ4K*>(block_data), block_x);
+        std::vector<float> reference(256, 0.0f);
+        quant::Dequantize(core::GgmlType::kQ4_K, block_data, reference.data(), 256);
+        double dequant = 0.0;
+        for (int i = 0; i < 256; ++i) dequant += reference[i] * block_x[i];
+        const double relative = std::fabs(integer - dequant) / std::max(1.0, std::fabs(dequant));
+        ++checked;
+        if (relative > 0.02) {
+          ++failures;
+          std::printf("MISMATCH integer Q4_K block %d: integer %.6f dequant %.6f (rel %.3f)\n",
+                      block, integer, dequant, relative);
+        } else {
+          std::printf("integer Q4_K block %d: rel %.4f\n", block, relative);
+        }
+      }
+    }
+  }
+
   std::printf("dot vs gufo: %d rows checked, %d failures\n", checked, failures);
   return failures == 0 ? 0 : 1;
 }

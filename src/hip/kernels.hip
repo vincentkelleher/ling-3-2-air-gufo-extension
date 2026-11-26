@@ -78,6 +78,13 @@ __device__ __forceinline__ float Q4Value(const BlockQ4K& block, int index) {
   return HalfToFloat(block.d) * scale * quant - HalfToFloat(block.dmin) * minimum;
 }
 
+__device__ __forceinline__ int Q4Code(const BlockQ4K& block, int index) {
+  const int group = index / 32;
+  const int lane = index % 32;
+  const std::uint8_t packed = block.qs[(group / 2) * 32 + lane];
+  return (group & 1) ? (packed >> 4) : (packed & 0x0F);
+}
+
 __device__ __forceinline__ float Q5Value(const BlockQ5K& block, int index) {
   const int group = index / 64;
   const int within = index % 64;
@@ -185,10 +192,23 @@ __device__ __forceinline__ float DotRow(const std::uint8_t* row, const float* x,
     for (int b = threadIdx.x % 32; b < count; b += 32) {
       float scale = 1.0f;
       ActivationScale(x + b * 256, 256, scale);
+      const float d = HalfToFloat(blocks[b].d);
+      const float dmin = HalfToFloat(blocks[b].dmin);
       float inner = 0.0f;
-      for (int j = 0; j < 256; ++j) {
-        inner += Q4Value(blocks[b], j) *
-                 QuantizedActivation(x[b * 256 + j], scale);
+      for (int g = 0; g < 8; ++g) {
+        int sum_qa = 0;
+        int sum_a = 0;
+        for (int i = 0; i < 32; ++i) {
+          const int j = g * 32 + i;
+          const float raw = rintf(x[b * 256 + j] / scale);
+          const int a = static_cast<int>(raw > 127.0f ? 127.0f : (raw < -127.0f ? -127.0f : raw));
+          sum_qa += Q4Code(blocks[b], j) * a;
+          sum_a += a;
+        }
+        float sc = 0.0f;
+        float m = 0.0f;
+        Q4ScaleMin(g, blocks[b].scales, sc, m);
+        inner += (d * sc * static_cast<float>(sum_qa) - dmin * m * static_cast<float>(sum_a)) * scale;
       }
       sum += inner;
     }

@@ -647,3 +647,18 @@ own `get_scale_min_k4` on the 12 packed bytes). Reverted to the dequantizing
 dot, which is correct and coherent. If this is retried, port
 `get_scale_min_k4` exactly and unit-test the integer dot against
 `quant::Dot` per block before touching the engine.
+
+## Integer Q4_K dot in the kernel: correct, faster, same divergence (2026-11-27)
+
+With the activation scale included (the bug the new CPU unit test caught in one
+run), the Q4_K branch now sums integer products per 32-group like llama.cpp:
+
+- `ling3_air.dot` integer-vs-dequant check: rel 0.0019 / 0.0018 / 0.0002 on real
+  blocks (activation rounding only).
+- Engine: coherent text unchanged, throughput 6.4 -> 7.08 tok/s (+11%).
+- Prompt 1 still diverges at the same word, so the residual difference is in the
+  Q6_K (up/down experts, 14.6 GiB) and Q8_0 (attention, LM head) dots, which
+  still dequantize.
+
+Next: the same integer form for Q6_K (`-32` codes, 16-element groups, one float
+scale each), then Q8_0, each validated by the dot test before the engine.
