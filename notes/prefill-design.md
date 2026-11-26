@@ -100,3 +100,26 @@ still matches the host reference at 4.8e-07. The kernel is in the operator suite
 
 Next: wire it into the dense projections of the block forward and validate that
 an M-token pass reproduces the sequential last-token logits.
+
+## MTP pays only once verification is batched, 2026-11-27
+
+Drafting works (7 of 9 drafts match), but an accept loop cannot speed anything up
+in this engine today: verification means running the trunk over the drafted
+tokens, and the trunk is a one-token forward, so K drafts cost K trunk steps —
+exactly the unassisted decode cost — plus the draft block (~4 %). Speculative
+decoding needs the verifier to consume K tokens in **one** pass and produce K+1
+distributions, which is the same M dimension the prefill work needs.
+
+So the order is now unambiguous:
+
+1. **Batched forward** (M tokens per pass) — `LaunchGemm` is tested for F32/Q8_0
+   at 2.9x per token on a real 4096x2560 projection; KDA and MLA state stay
+   sequential and cheap (8 % and 17 % of the token respectively).
+2. **Prefill** uses it first: pp2048 becomes measurable at all, which is half of
+   the roofline report that is currently "not measured".
+3. **MTP accept loop** uses the same path: draft K, verify in one pass, accept the
+   matching prefix. Exactness is then structural (the verifier is the trunk
+   itself), and the speedup is (accepted tokens per trunk pass) / (pass cost).
+
+This also explains why the batched GEMM's per-token win (2.9x) matters twice: it is
+the prefill gain and the speculative-verify gain at the same time.
