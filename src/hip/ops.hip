@@ -58,11 +58,13 @@ __global__ void MlaAppendKernel(const float* latent, const float* k_pe,
                                 int latent_count, int rope) {
   const int i = blockIdx.x * blockDim.x + threadIdx.x;
   float* row = cache + position * static_cast<std::size_t>(latent_count + rope);
+  // llama.cpp keeps the KV cache in f16 by default; rounding on store matches
+  // that precision instead of keeping fp32 (notes/engine-plan.md).
   if (i < latent_count) {
-    row[i] = latent[i];
+    row[i] = __half2float(__float2half(latent[i]));
   }
   if (i < rope) {
-    row[latent_count + i] = k_pe[i];
+    row[latent_count + i] = __half2float(__float2half(k_pe[i]));
   }
 }
 
