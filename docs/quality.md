@@ -70,6 +70,16 @@ runs hash identically after the `atomicAdd` reduction order was removed.
 **Verdict**: same task, same answer, one token apart at a near-tie. Token-for-token
 equality is **not** claimed; the deviation is recorded with its index and margin.
 
+### Why the decode gate is out of reach for this access pattern
+
+`tools/scatter_probe.hip` measures the pattern the routed MoE actually uses: eight 1.4 MB windows
+read from the same registered mapping that decode streams at 237 GB/s sequentially. It runs at
+**38-52 GB/s**, and the MoE's own rate is ~40-47 GB/s, so the expert path is already at the
+hardware's rate for that pattern. The 49.9 tok/s roofline assumes sequential bandwidth, so 60 % of
+it (~30 tok/s) would need ~120 GB/s from scattered windows. The gate therefore needs a memory
+layout or residency change (contiguous per-expert matrices, hot-expert residency), not a kernel
+tuning pass.
+
 ### Snapshot restore is inexact, which bounds two claims
 
 `SnapshotState`/`RestoreState` round-trips imperfectly: plain greedy re-run after a restore

@@ -231,6 +231,31 @@ neutral) the conclusion is that this engine's decode sits at **16-17 tok/s (32-3
 a tiled Q4_K matrix-multiply with shared-memory staging (the shape llama.cpp's `mul_mat`
 uses), where a warp cooperatively stages a weight tile instead of walking rows.
 
+### The MoE is at the hardware's scattered-read rate, not at a kernel defect
+
+Six kernel-level hypotheses were measured out, so the remaining question was whether the access
+pattern itself is the limit. `tools/scatter_probe.hip` answers it: it registers 4 GiB the way the
+engine does, then reads eight 1.4 MB windows (one per selected expert) from that mapping,
+contiguous inside a window and scattered across windows.
+
+| pattern | bandwidth |
+| --- | --- |
+| sequential read of the same registered mapping (`tools/bandwidth_probe.hip`) | **237 GB/s** |
+| eight scattered 1.4 MB windows (`tools/scatter_probe.hip`) | **38-52 GB/s** |
+
+The routed MoE moves ~1.2-1.5 GB per token in 32 ms, which is ~40-47 GB/s — exactly the scattered
+window rate. So the MoE is not slow because of launch count, block width, warp shape, lane width,
+load width or instruction width (all measured, `IMPROVEMENTS.md`); it is slow because reading
+eight 1.4 MB windows out of a 50 GiB mapping is a 38-52 GB/s pattern on this box.
+
+**Consequence for the decode gate**: the roofline is computed from *sequential* bandwidth
+(49.9 tok/s), and a routed MoE cannot read its weights sequentially. 60 % of that roofline
+(29.9 tok/s) would require ~120 GB/s from this pattern, which the probe shows the hardware does
+not provide. Reaching the gate needs a different memory strategy — for example a layout that
+groups each expert's three matrices contiguously (3 x 1.4 MB per read instead of three separate
+windows) or a residency scheme for the hot experts — not another kernel tweak. That is the honest
+statement of where the gate sits.
+
 ## Where the time goes now (decode, 8 tokens, this box)
 
 | group | ms/token | share |
