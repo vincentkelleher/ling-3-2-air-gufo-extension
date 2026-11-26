@@ -28,9 +28,9 @@ latent cache):
 
 | depth | decode | vs depth 0 |
 | --- | --- | --- |
-| 0 | 6.56 tok/s | - |
-| 512 | 6.53 tok/s | -0.5 % |
-| 2048 | 6.38 tok/s | -2.7 % |
+| 0 | 12.54 tok/s | - |
+| 512 | 12.41 tok/s | -1.0 % |
+| 2048 | 12.04 tok/s | -4.0 % |
 
 Decode is almost depth-insensitive: the MLA cache is 576 floats/token on seven
 blocks (16.1 KiB/token), far smaller than the 4.75 GiB of weights read per step.
