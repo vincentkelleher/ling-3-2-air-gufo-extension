@@ -385,3 +385,21 @@ only for block 0 today, so:
 Do not repeat the position/stage dump arithmetic without an explicit
 "what buffer holds what" table first; three of the four anomalies so far were
 mismatched buffers, not mismatched math.
+
+### Better reference than a numpy port: llama.cpp's own per-op dumps
+
+`llama-eval-callback` (built at `~/ling32-work/llama-cpu/bin`) writes the tensors
+of every graph node for a prompt, which is the reference this extension should be
+compared against block by block — no hand-written numpy forward needed, and it
+removes the last chance of a reference-implementation mistake (three of the
+anomalies in this file were exactly that).
+
+Plan: run it on the pinned 25-token prompt, take llama.cpp's `l_out-<n>` (block
+output) and `result_norm`/`result_output`, and compare with the engine's
+`x_<layer>_<position>.bin` dumps (now written when `LING3_DUMP_BLOCKS` is set).
+The first layer where they diverge is the bug.
+
+Current evidence that the composition, not a stage, is at fault: every stage
+listed in the table above matches, yet the engine's top-8 logits for the pinned
+prompt (65522, 4279, 28057, 70, 12773, 14, 12, 39) do not contain `The` (678),
+which is what llama.cpp generates for that prompt.

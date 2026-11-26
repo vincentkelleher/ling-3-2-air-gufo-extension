@@ -386,6 +386,21 @@ bool Engine::ForwardToken(std::int32_t token, std::uint32_t position,
       std::fclose(file);
     }
   };
+  auto dump_lp = [&](const char* format, const float* device, std::size_t count,
+                     std::uint32_t layer, std::uint32_t position) {
+    if (std::getenv("LING3_DUMP_BLOCKS") == nullptr) {
+      return;
+    }
+    char path[128];
+    std::snprintf(path, sizeof(path), format, layer, position);
+    std::vector<float> host(count);
+    hipMemcpy(host.data(), device, count * sizeof(float), hipMemcpyDeviceToHost);
+    FILE* file = std::fopen(path, "wb");
+    if (file != nullptr) {
+      std::fwrite(host.data(), sizeof(float), count, file);
+      std::fclose(file);
+    }
+  };
   auto report_buf = [&](const char* label, const float* device, std::size_t count) {
     if (!stats) {
       return;
@@ -650,6 +665,7 @@ bool Engine::ForwardToken(std::int32_t token, std::uint32_t position,
         report_buf("x after shared", m.x, n_embd);
       }
     }
+    dump_lp("/work/x_%u_%u.bin", m.x, n_embd, il, position);
     if (il == 0) {
       dump_raw("/work/d0_xout.bin", m.x, n_embd);
       dump_raw("/work/d0_ffnh.bin", m.ffn_h, n_embd);
