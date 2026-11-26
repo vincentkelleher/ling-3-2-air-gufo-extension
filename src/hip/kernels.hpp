@@ -51,6 +51,19 @@ void LaunchGemvPre(const void* weights, StorageType type, std::size_t rows,
                    std::size_t cols, const float* x, const std::int8_t* q,
                    const float* scales, const int* sums, float* y, hipStream_t stream);
 
+/// As LaunchGemvPre, with the dot's items spread across the warp.
+void LaunchGemvPreWide(const void* weights, StorageType type, std::size_t rows,
+                       std::size_t cols, const float* x, const std::int8_t* q,
+                       const float* scales, const int* sums, float* y, hipStream_t stream);
+
+/// As LaunchGemvExpertsPreSlots, with the dot's items spread across the warp.
+void LaunchGemvExpertsPreSlotsWide(const void* weights, StorageType type,
+                                   const std::int32_t* ids, std::size_t experts,
+                                   std::size_t rows_per_expert, std::size_t cols,
+                                   const float* x, const std::int8_t* q,
+                                   const float* scales, const int* sums, float* y,
+                                   std::size_t out_stride, hipStream_t stream);
+
 /// Per-slot quantisation for matmuls whose activation differs per selected expert.
 void LaunchQuantizeActivationBatch(const float* x, std::size_t cols, std::size_t slots,
                                    std::int8_t* q, float* scales, int* sums,
@@ -64,6 +77,15 @@ void LaunchGemvExpertsPreSlots(const void* weights, StorageType type,
                                const float* x, const std::int8_t* q, const float* scales,
                                const int* sums, float* y, std::size_t out_stride,
                                hipStream_t stream);
+
+/// As LaunchGemvExpertsPre, but with the dot's (block, group) items spread across the
+/// warp instead of one block per lane.
+void LaunchGemvExpertsPreWide(const void* weights, StorageType type,
+                              const std::int32_t* ids, std::size_t experts,
+                              std::size_t rows_per_expert, std::size_t cols,
+                              const float* x, const std::int8_t* q, const float* scales,
+                              const int* sums, float* y, std::size_t out_stride,
+                              hipStream_t stream);
 
 /// Expert GEMV against a pre-quantised activation (Q4_K); other storages fall back to
 /// LaunchGemvExperts with the float activation.

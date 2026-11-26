@@ -124,14 +124,37 @@ experiments above showed. The **delta rule at 6.28 ms is not**: it walks a per-h
 recurrence, so it is latency and occupancy bound rather than bandwidth bound, and it is
 the most promising remaining target in attention. It has not been attempted here.
 
+### Wide Q4_K dot: (block, group) items across the warp — +4.9 %, kept for gate/up
+
+A 2560-wide Q4_K row is 10 blocks, and the dot gave one block to each lane, so 22 of 32
+lanes idled and each active lane ran 8 groups serially. Spreading the 80 (block, group)
+items over the warp gives every lane two or three.
+
+| variant | decode | tokens |
+| --- | --- | --- |
+| shared activation, gate/up | 15.24 → **15.98** tok/s | identical |
+| per-slot activation, down matmul | 15.98 → **16.91** tok/s | **changed** |
+| the LM head | 16.91 → 16.91 tok/s | — |
+
+The gate/up variant is kept. The down matmul is the biggest single win of the three and
+is **not** kept: spreading the items changes the summation order, and that changed the
+greedy tokens for a fixed prompt. Adopting it means re-running the golden set against
+the llama.cpp reference and updating the documented comparison — a validation task, not
+a code task, so the code is left on the bit-identical path. The head gains nothing for
+the same reason as before: it is bandwidth-bound, and its lanes idling does not matter
+when the weights stream at 237 GB/s.
+
 ## Where the time goes now (decode, 8 tokens, this box)
 
 | group | ms/token | share |
 | --- | --- | --- |
-| attention (35 KDA + 7 MLA: projections, conv/delta, MLA absorb) | 31.13 | 47 % |
-| FFN / 512-expert MoE | 35.33 | 53 % |
-| norms, residuals, rope and the rest | 0.39 | 0.6 % |
-| total in the layer loop | 66.84 | |
+| attention (35 KDA + 7 MLA: projections, conv/delta, MLA absorb) | 28.07 | 46 % |
+| FFN / 512-expert MoE | 32.20 | 53 % |
+| norms, residuals, rope and the rest | 0.40 | 0.7 % |
+| total in the layer loop | 60.66 | |
+
+Session total: decode **12.45 → 16.00 tok/s** (+28.5 %), i.e. 25.1 % → 32.1 % of the
+49.9 tok/s bandwidth roofline at depth 0, with the greedy tokens unchanged.
 
 The MoE now moves ~1.5 GB of expert weights per token in 35.33 ms, which is 42 GB/s
 effective against a 237 GB/s box: still 5.6x below the bound, so the quantised dot has

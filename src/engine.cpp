@@ -89,6 +89,7 @@ struct Engine::Impl {
   /// otherwise re-quantises the same 2560 values once per row.
   signed char* act_values{nullptr};
   float* act_scales{nullptr};
+  int* act_sums{nullptr};
   float* expert_gate{nullptr};
   float* expert_up{nullptr};
   float* expert_down{nullptr};
@@ -355,6 +356,7 @@ std::unique_ptr<Engine> Engine::Create(const core::GgufReader& reader,
       alloc(&m.moe_logits, config.n_expert) &&
       hipMalloc(reinterpret_cast<void**>(&m.act_values), config.n_embd * sizeof(signed char)) == hipSuccess &&
       hipMalloc(reinterpret_cast<void**>(&m.act_scales), (config.n_embd / 256) * sizeof(float)) == hipSuccess &&
+      hipMalloc(reinterpret_cast<void**>(&m.act_sums), (config.n_embd / 256) * 8 * sizeof(int)) == hipSuccess &&
       alloc(&m.expert_gate, 8 * (config.n_ff > config.n_ff_exp ? config.n_ff : config.n_ff_exp)) &&
       alloc(&m.expert_up, 8 * (config.n_ff > config.n_ff_exp ? config.n_ff : config.n_ff_exp)) &&
       alloc(&m.expert_down, 8 * n_embd) && alloc(&m.logits, config.n_vocab) && alloc(&m.base_hidden, n_embd) &&

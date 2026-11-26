@@ -323,12 +323,12 @@ void LaunchMoeGather(const void* gate_exps, StorageType gate_type,
   // at ~31 GB/s effective).
   ActivationScratch& scratch = ScratchFor(n_ff > n_embd ? n_ff : n_embd);
   LaunchQuantizeActivation(x, n_embd, scratch.q, scratch.scales, scratch.sums, stream);
-  LaunchGemvExpertsPre(gate_exps, gate_type, ids, n_selected, n_ff, n_embd, x, scratch.q,
-                       scratch.scales, scratch.sums, expert_gate, /*out_stride=*/n_ff,
-                       stream);
-  LaunchGemvExpertsPre(up_exps, up_type, ids, n_selected, n_ff, n_embd, x, scratch.q,
-                       scratch.scales, scratch.sums, expert_up, /*out_stride=*/n_ff,
-                       stream);
+  LaunchGemvExpertsPreWide(gate_exps, gate_type, ids, n_selected, n_ff, n_embd, x,
+                           scratch.q, scratch.scales, scratch.sums, expert_gate,
+                           /*out_stride=*/n_ff, stream);
+  LaunchGemvExpertsPreWide(up_exps, up_type, ids, n_selected, n_ff, n_embd, x, scratch.q,
+                           scratch.scales, scratch.sums, expert_up,
+                           /*out_stride=*/n_ff, stream);
   LaunchSilu(expert_gate, expert_gate, n_selected * n_ff, stream);
   LaunchMulInto(expert_gate, expert_up, expert_gate, n_selected * n_ff, stream);
   // The down matmul's activation differs per slot (each selected expert has its own
