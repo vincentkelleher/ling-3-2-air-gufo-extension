@@ -433,6 +433,30 @@ __global__ void GemmKernel(const std::uint8_t* weights, const float* x, float* y
   }
 }
 
+/// Quantizes activations in 256-wide blocks (the Q8_K shape llama.cpp uses for
+/// K-quants) into caller-owned buffers, for the batched/prepared-activation
+/// paths. Each thread owns one block, so it also owns that block's scale.
+__global__ void QuantizeActivationsKernel(const float* x, int blocks,
+                                          signed char* values, float* scales) {
+  const int b = blockIdx.x * blockDim.x + threadIdx.x;
+  if (b >= blocks) {
+    return;
+  }
+  float amax = 0.0f;
+  for (int j = 0; j < 256; ++j) {
+    const float v = fabsf(x[b * 256 + j]);
+    amax = v > amax ? v : amax;
+  }
+  const float scale = amax > 0.0f ? amax / 127.0f : 1.0f;
+  const float inverse = 1.0f / scale;
+  scales[b] = scale;
+  for (int j = 0; j < 256; ++j) {
+    int a = __float2int_rn(x[b * 256 + j] * inverse);
+    a = a > 127 ? 127 : (a < -127 ? -127 : a);
+    values[b * 256 + j] = static_cast<signed char>(a);
+  }
+}
+
 __global__ void RmsNormKernel(const float* x, const float* weight, float* y,
                               int rows, int cols, float eps) {
   const int row = blockIdx.x;
@@ -624,6 +648,14 @@ void LaunchGemm(const void* weights, StorageType type, std::size_t rows,
     default:
       break;  // K-quant batching is not implemented yet (notes/prefill-design.md)
   }
+}
+
+void LaunchQuantizeActivations(const float* x, std::size_t cols,
+                               signed char* values, float* scales,
+                               hipStream_t stream) {
+  const int blocks = static_cast<int>(cols / 256);
+  QuantizeActivationsKernel<<<(blocks + 31) / 32, 32, 0, stream>>>(
+      x, blocks, values, scales);
 }
 
 void LaunchRmsNorm(const float* x, const float* weight, float* y,

@@ -50,6 +50,12 @@ void LaunchGemm(const void* weights, StorageType type, std::size_t rows,
                 std::size_t x_stride, float* y, std::size_t y_stride,
                 hipStream_t stream);
 
+/// Quantizes `cols` activations in 256-wide blocks into `values` (cols int8s)
+/// and `scales` (cols/256 floats). Powers the prepared-activation GEMV path.
+void LaunchQuantizeActivations(const float* x, std::size_t cols,
+                               signed char* values, float* scales,
+                               hipStream_t stream);
+
 /// y = x * rsqrt(mean(x^2) + eps) * weight, one block per row.
 void LaunchRmsNorm(const float* x, const float* weight, float* y,
                    std::size_t rows, std::size_t cols, float eps,

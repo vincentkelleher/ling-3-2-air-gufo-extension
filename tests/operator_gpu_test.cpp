@@ -905,6 +905,40 @@ int main() {
     HIP_CHECK(hipFree(dw)); HIP_CHECK(hipFree(dx)); HIP_CHECK(hipFree(dy));
   }
 
+  // Activation quantizer: the device buffers must equal a host quantization.
+  {
+    const int cols = 512;  // two 256-blocks
+    std::vector<float> x(cols);
+    for (auto& v : x) v = dist(rng);
+    signed char* dv = nullptr;
+    float* ds = nullptr;
+    float* dx = nullptr;
+    HIP_CHECK(hipMalloc(&dv, cols));
+    HIP_CHECK(hipMalloc(&ds, (cols / 256) * sizeof(float)));
+    HIP_CHECK(hipMalloc(&dx, cols * sizeof(float)));
+    HIP_CHECK(hipMemcpy(dx, x.data(), cols * sizeof(float), hipMemcpyHostToDevice));
+    hipk::LaunchQuantizeActivations(dx, cols, dv, ds, 0);
+    HIP_CHECK(hipDeviceSynchronize());
+    std::vector<signed char> values(cols);
+    std::vector<float> scales(cols / 256);
+    HIP_CHECK(hipMemcpy(values.data(), dv, cols, hipMemcpyDeviceToHost));
+    HIP_CHECK(hipMemcpy(scales.data(), ds, scales.size() * sizeof(float), hipMemcpyDeviceToHost));
+    int mismatches = 0;
+    for (int b = 0; b < cols / 256; ++b) {
+      float amax = 0.0f;
+      for (int j = 0; j < 256; ++j) amax = std::max(amax, std::fabs(x[b * 256 + j]));
+      const float scale = amax > 0.0f ? amax / 127.0f : 1.0f;
+      if (std::fabs(scale - scales[b]) > 1e-6f * std::max(1.0f, scale)) ++mismatches;
+      for (int j = 0; j < 256; ++j) {
+        int expected = static_cast<int>(std::lrint(x[b * 256 + j] / scale));
+        expected = expected > 127 ? 127 : (expected < -127 ? -127 : expected);
+        if (values[b * 256 + j] != expected) ++mismatches;
+      }
+    }
+    Check(mismatches == 0, "activation quantizer mismatches", mismatches, 0);
+    HIP_CHECK(hipFree(dv)); HIP_CHECK(hipFree(ds)); HIP_CHECK(hipFree(dx));
+  }
+
   std::printf("operators: %d failures\n", Failures);
   return Failures == 0 ? 0 : 1;
 }

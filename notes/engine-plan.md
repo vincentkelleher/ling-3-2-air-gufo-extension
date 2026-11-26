@@ -827,3 +827,16 @@ branch, and the per-block scale being written only by thread 0) without making t
 path correct, so something else differs as well. Do not retry this without
 extending the operator suite to compare *the prepared-activation path* against the
 per-row path directly.
+
+### Precondition met: the activation quantizer is tested in isolation (2026-11-27)
+
+`LaunchQuantizeActivations` now writes 256-wide int8 values and one scale per
+block into caller-owned buffers, and the operator suite compares it against a
+host quantization of the same activations: **0 mismatches** (27 checks, all
+passing). The two bugs from the failed retry (a missing Q5_K scale, the per-block
+scale written only by thread 0) would both have been caught by this test.
+
+The GEMV still uses the per-row path, so correctness and the 12.50 tok/s decode
+are untouched. A future retry of the hoisting can now be tested as: quantize once
+with this kernel, run the K-quant GEMV against those buffers, and compare with the
+per-row path on the same weights -- before the engine sees it at all.
