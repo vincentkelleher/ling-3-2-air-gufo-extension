@@ -423,3 +423,25 @@ second position) against `x_5_0.bin` under the hypothesis that only the *state*
 paths (KDA conv/state, MLA cache) are wrong — i.e. run a two-token prompt whose
 second token is the same as the first and check that the block outputs differ in
 the way the cache implies.
+
+## Block 0 composition: k and v disagree, q is exact (2026-11-26, current lead)
+
+A numpy forward of block 0 against `x_0_0.bin` gives correlation 0.9898 and
+rms 0.0389 (numpy) vs 0.0337 (engine) — close, not exact. Stage by stage at
+position 0, numpy vs the engine's own dumps:
+
+| stage | max abs diff | verdict |
+| --- | --- | --- |
+| `qn` (q conv + SiLU + L2) | 1.8e-7 | exact |
+| `gate` (f_a·h + dt, ·a, sigmoid, ×(−5)) | 1.4e-6 | exact |
+| `beta` | 1.2e-7 | exact |
+| `cv` (v conv + SiLU) | 7.1e-2 | **differs** |
+| `kn` (k conv + SiLU + L2) | 7.5e-1 | **differs** |
+
+Same kernel, same layout, same call shape — only the tensors differ, so the
+suspects are the weight mapping for `kda_k`/`kda_v` and the conv weight tensors
+`ssm_conv1d_k/v.weight` (q's path proves the conv formula and layout are right).
+
+Next: dump `m.q`, `m.k`, `m.v` (projections) at position 0 and compare each with
+`W@h` in numpy. That splits "projection mapped to the wrong tensor" from "conv
+weight misread", and the fix is one of the two.
