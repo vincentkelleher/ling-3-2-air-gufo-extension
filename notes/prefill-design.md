@@ -389,3 +389,28 @@ running.
 
 So the order stands as recorded earlier, but for a sharper reason: **batching is
 not just a prefill optimisation, it is what makes speculation possible at all.**
+
+### Device-side grouped MoE: put the kernel in kernels.hip (2026-11-27)
+
+The grouped schedule needs a kernel that, for each expert, loops over the tokens
+that selected it and computes the dot for every output row -- so the expert's
+weights are read once per chunk instead of once per token. That kernel must live
+**in `kernels.hip`**, beside `DotRow`, which is private to that translation unit:
+a `__device__` dispatch declared in one .hip file is not visible to another under
+this build (each file is compiled separately, device functions are not exported).
+
+Attempted the other way round first (dispatch in `kernels.hip`, call from
+`moe.hip`) and it does not link, so the work was reverted; the tree is green at 31
+operator checks.
+
+Shape of the next attempt, worth ~2x on the grouped path by removing both the host
+loop over 512 experts and the per-expert launch overhead:
+
+1. In `kernels.hip`: `MoeExpertMatvecKernel<TYPE>` with one warp per (expert, row),
+   looping over `slots[offsets[e] .. offsets[e] + counts[e])` and writing
+   `out[pair][row]`; reuse `DotRow`.
+2. In `kernels.hip`: `MoeActivateKernel` for `act[pair][j] = silu(gate) * up`.
+3. In `moe.hip`: a launcher that takes the counts/offsets/slots and issues those
+   two, then the existing down projection and `LaunchScatterAdd`.
+4. Validation is already in place: the chunked path's argmax must stay 678 at every
+   chunk size, and the golden set must not move.

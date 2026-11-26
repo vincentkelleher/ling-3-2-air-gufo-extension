@@ -64,6 +64,15 @@ __global__ void ScatterAddKernel(float* dst, const std::int32_t* indices,
   }
 }
 
+__global__ void MoeActivateKernel(const float* gate, const float* up, float* act,
+                                  int count) {
+  const int i = blockIdx.x * blockDim.x + threadIdx.x;
+  if (i < count) {
+    const float g = gate[i];
+    act[i] = (g / (1.0f + expf(-g))) * up[i];
+  }
+}
+
 __global__ void MulKernel(float* out, const float* a, const float* b, int count) {
   const int i = blockIdx.x * blockDim.x + threadIdx.x;
   if (i < count) {

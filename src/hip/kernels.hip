@@ -695,6 +695,8 @@ constexpr int kThreads = 256;
 
 }  // namespace
 
+
+
 std::size_t RowBytes(StorageType type, std::size_t cols) {
   switch (type) {
     case kF32:
