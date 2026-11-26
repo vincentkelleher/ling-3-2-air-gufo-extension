@@ -123,3 +123,25 @@ So the order is now unambiguous:
 
 This also explains why the batched GEMM's per-token win (2.9x) matters twice: it is
 the prefill gain and the speculative-verify gain at the same time.
+
+### A batched forward must include the MoE to be worth it, 2026-11-27
+
+Measured shares of a decode/token pass (`notes/engine-plan.md`, profiled):
+
+| stage | share of time |
+| --- | --- |
+| Q8_0 GEMV (attention projections, LM head) | 34 % |
+| Q4_K expert gate | 25 % |
+| Q6_K expert up/down | 17 % |
+| delta rule, router, F32, Q5_K | ~17 % |
+
+A batched pass that only covers the dense stages (the easy part, since they are
+Q8_0 and `LaunchGemm` already handles Q8_0) would touch 34 % of the work and, at
+2.9x on that share, buy ~1.3x overall. The MoE has to be batched too for the 4-8x
+the design note projects, and batching it means grouping the union of selected
+experts across the M tokens (a token-by-expert-tile schedule) rather than the
+current per-token per-expert GEMVs.
+
+That is the single largest remaining piece of engineering in this project, and it
+is also what makes MTP's accept loop pay (see `notes/prefill-design.md`). It should
+be done in one go with the logits-equality check, not incrementally.
