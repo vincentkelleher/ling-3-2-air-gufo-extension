@@ -412,3 +412,29 @@ llama.cpp encoder 0.04 %, correct description through `tests/image_forward_test.
 a server feature. Next owner should reproduce with the trace at
 `Engine::ForwardEmbedding` and check whether the host swaps or tears down the HIP context
 when an image request is admitted.
+
+## Shared engine across slots: measured, still hangs (2026-11-27)
+
+Implemented the design the owner chose — one engine for every slot, with engine access
+serialised by a mutex in the runner state (`LockEngine` around Prefill, SelectNext and
+Advance) and the adapter holding a single `std::unique_ptr<Engine>` — then measured it with
+`--sessions 2`:
+
+| case | result |
+| --- | --- |
+| one request | 200 |
+| two sequential requests | 200, 200 |
+| two concurrent requests | **hang** (script killed after 900 s; no response, no crash) |
+
+So sharing the engine fixes the earlier double-registration crash and keeps sequential
+serving correct, but does not deliver isolation: concurrent requests still stall. The
+per-call mutex only serialises individual calls, which cannot be enough — two requests
+interleaving on one engine would corrupt each other's state even if they did not stall, because
+each request's prefill writes the same trunk.
+
+Reverted to the verified per-slot design (one engine per slot, which serves one request at a
+time and is what every measured number was taken with). Session isolation therefore stays
+unimplemented, and the two facts worth keeping are: a second engine cannot be created while the
+first has the weights registered, and coarse per-call locking is not a substitute for
+per-session state. A real fix needs either the host to serialise sessions or the engine to grow
+multi-sequence state — both larger than this extension.
