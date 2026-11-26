@@ -15,6 +15,7 @@ gufo_extension_target(
     src/text/chat_template.cpp
     src/config.cpp
     src/weights.cpp
+    src/preprocess.cpp
   LINK_LIBRARIES
     gufo_ext_runtime
     gufo_ext_core
@@ -136,6 +137,21 @@ if(TARGET ling3_air_vision_test)
     LING3_FIXTURES_DIR="${GUFO_EXTENSION_BUILD_ROOT}/fixtures")
   add_test(NAME ling3_air.vision COMMAND ling3_air_vision_test)
   set_tests_properties(ling3_air.vision PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 1800)
+endif()
+
+# Image preprocessing against numpy and PIL references.
+gufo_extension_target(
+  NAME ling3_air_preprocess_test
+  SOURCES
+    tests/preprocess_test.cpp
+  LINK_LIBRARIES
+    gufo_ling3_air
+    gufo_ext_runtime
+    gufo_ext_core
+)
+if(TARGET ling3_air_preprocess_test)
+  add_test(NAME ling3_air.preprocess COMMAND ling3_air_preprocess_test)
+  set_tests_properties(ling3_air.preprocess PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 300)
 endif()
 
 # Config and weight-map validation against a real GGUF.

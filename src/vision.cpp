@@ -439,6 +439,14 @@ bool VisionEncoder::EncodeImage(const float* chw, std::uint32_t grid_h,
   return true;
 }
 
+std::uint32_t VisionEncoder::image_side() const {
+  return impl_->config.patch * impl_->pos_grid;
+}
+
+std::uint32_t VisionEncoder::tokens_per_image() const {
+  return impl_->pos_grid * impl_->pos_grid / 4;
+}
+
 std::size_t VisionEncoder::DeviceBytes() const { return impl_->device_bytes; }
 
 }  // namespace gufo::ext::ling3_air

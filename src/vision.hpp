@@ -68,6 +68,12 @@ class VisionEncoder {
   /// Output width of the projector (the text model's hidden size).
   [[nodiscard]] std::uint32_t text_dim() const;
 
+  /// Side of the square image the tower takes in pixels (patch x position grid).
+  [[nodiscard]] std::uint32_t image_side() const;
+
+  /// Number of embedding rows one image produces (patches / 4 after the 2x2 merge).
+  [[nodiscard]] std::uint32_t tokens_per_image() const;
+
   [[nodiscard]] std::size_t DeviceBytes() const;
 
  private:

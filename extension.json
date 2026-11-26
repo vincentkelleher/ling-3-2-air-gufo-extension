@@ -111,6 +111,12 @@
         "testing"
       ],
       "role": "test"
+    },
+    "ling3_air_preprocess_test": {
+      "requires": [
+        "testing"
+      ],
+      "role": "test"
     }
   },
   "licenses": [
