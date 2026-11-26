@@ -129,6 +129,26 @@ __device__ __forceinline__ float Q6Value(const BlockQ6K& block, int index) {
   return HalfToFloat(block.d) * static_cast<float>(block.scales[scale_index]) * quant;
 }
 
+
+/// llama.cpp quantizes activations to Q8_K (one fp16 scale per 256 weights,
+/// int8 values) before the K-quant dot products. Matching that rounding is what
+/// closes the last logit error; see notes/engine-plan.md.
+__device__ __forceinline__ void ActivationScale(const float* x, int count,
+                                               float& scale) {
+  float amax = 0.0f;
+  for (int i = 0; i < count; ++i) {
+    const float value = fabsf(x[i]);
+    amax = value > amax ? value : amax;
+  }
+  scale = amax > 0.0f ? amax / 127.0f : 1.0f;
+}
+
+__device__ __forceinline__ float QuantizedActivation(float value, float scale) {
+  const float quantized = rintf(value / scale);
+  const float clipped = fminf(127.0f, fmaxf(-127.0f, quantized));
+  return clipped * scale;
+}
+
 __device__ __forceinline__ float WarpSum(float value) {
   for (int offset = 16; offset > 0; offset >>= 1) {
     value += __shfl_down(value, offset);
@@ -163,9 +183,12 @@ __device__ __forceinline__ float DotRow(const std::uint8_t* row, const float* x,
     const int count = cols / 256;
     float sum = 0.0f;
     for (int b = threadIdx.x % 32; b < count; b += 32) {
+      float scale = 1.0f;
+      ActivationScale(x + b * 256, 256, scale);
       float inner = 0.0f;
       for (int j = 0; j < 256; ++j) {
-        inner += Q4Value(blocks[b], j) * x[b * 256 + j];
+        inner += Q4Value(blocks[b], j) *
+                 QuantizedActivation(x[b * 256 + j], scale);
       }
       sum += inner;
     }
@@ -175,9 +198,12 @@ __device__ __forceinline__ float DotRow(const std::uint8_t* row, const float* x,
     const int count = cols / 256;
     float sum = 0.0f;
     for (int b = threadIdx.x % 32; b < count; b += 32) {
+      float scale = 1.0f;
+      ActivationScale(x + b * 256, 256, scale);
       float inner = 0.0f;
       for (int j = 0; j < 256; ++j) {
-        inner += Q5Value(blocks[b], j) * x[b * 256 + j];
+        inner += Q5Value(blocks[b], j) *
+                 QuantizedActivation(x[b * 256 + j], scale);
       }
       sum += inner;
     }
@@ -187,9 +213,11 @@ __device__ __forceinline__ float DotRow(const std::uint8_t* row, const float* x,
     const int count = cols / 256;
     float sum = 0.0f;
     for (int b = threadIdx.x % 32; b < count; b += 32) {
+      float scale = 1.0f;
+      ActivationScale(x + b * 256, 256, scale);
       float inner = 0.0f;
       for (int j = 0; j < 256; ++j) {
-        inner += Q6Value(blocks[b], j) * x[b * 256 + j];
+        inner += Q6Value(blocks[b], j) * QuantizedActivation(x[b * 256 + j], scale);
       }
       sum += inner;
     }

@@ -598,3 +598,11 @@ answer.
 ## Golden-set spot check (2026-11-27)
 
 Prompt 2 ("What is 17 times 23?"): llama.cpp answers "17 x 23 = 17 x 20 + 17 x 3 = 3", the engine answers "The user is asking for the product of 17 and 23. Let me compute this." — same task, different opening, so this prompt diverges at token 0. Prompt 1 matched for eight tokens. Agreement is therefore prompt-dependent, consistent with a logit error of order 0.02-0.5 deciding greedy picks. Both answers are coherent.
+
+## Q8_K activation parity attempted (2026-11-27)
+
+The K-quant GEMV branches now quantize activations the way llama.cpp does (one
+scale per 256-weight block, values rounded to int8 and clipped to +-127) before
+the dot. Prompt 1 still diverges at the same word ("about" vs ":"), so this alone
+does not flip that token; the remaining error must come from elsewhere (the Q8_0
+dots, the LM head, or accumulation order inside the attention/MoE paths).
