@@ -322,6 +322,33 @@ __global__ void GemvAddKernel(const std::uint8_t* weights, const float* x,
   }
 }
 
+/// One warp per (expert, row). The row pointer comes from the device-side id
+/// list, so every selected expert is covered by a single launch. Each warp owns
+/// its own row, so lane 0 writes DotRow's warp-reduced result directly -- a
+/// block-wide sum would mix eight different rows.
+template <int TYPE>
+__global__ void GemvExpertsKernel(const std::uint8_t* weights,
+                                  const std::int32_t* ids, const float* x,
+                                  float* y, int rows_per_expert, int cols,
+                                  int row_bytes, int experts, int batch_stride,
+                                  int out_stride) {
+  const int warp = (blockIdx.x * blockDim.x + threadIdx.x) >> 5;
+  if (warp >= experts * rows_per_expert) {
+    return;
+  }
+  const int expert_slot = warp / rows_per_expert;
+  const int row_in_expert = warp - expert_slot * rows_per_expert;
+  const int expert = ids[expert_slot];
+  const std::uint8_t* row =
+      weights + (static_cast<std::size_t>(expert) * rows_per_expert +
+                 row_in_expert) * row_bytes;
+  const float* source = x + static_cast<std::size_t>(expert_slot) * batch_stride;
+  const float sum = DotRow<TYPE>(row, source, cols);
+  if ((threadIdx.x & 31) == 0) {
+    y[static_cast<std::size_t>(expert_slot) * out_stride + row_in_expert] = sum;
+  }
+}
+
 __global__ void RmsNormKernel(const float* x, const float* weight, float* y,
                               int rows, int cols, float eps) {
   const int row = blockIdx.x;
@@ -448,6 +475,44 @@ void LaunchGemvAdd(const void* weights, StorageType type, std::size_t rows,
     case kQ6K:
       GemvAddKernel<kQ6K><<<blocks, kThreads, 0, stream>>>(
           data, x, bias, y, static_cast<int>(rows), static_cast<int>(cols), row_bytes);
+      break;
+  }
+}
+
+void LaunchGemvExperts(const void* weights, StorageType type,
+                       const std::int32_t* ids, std::size_t experts,
+                       std::size_t rows_per_expert, std::size_t cols,
+                       const float* x, std::size_t batch_stride, float* y,
+                       std::size_t out_stride, hipStream_t stream) {
+  const int row_bytes = static_cast<int>(RowBytes(type, cols));
+  const int total_rows = static_cast<int>(experts * rows_per_expert);
+  const int blocks = (total_rows + kThreads / 32 - 1) / (kThreads / 32);
+  const auto* data = static_cast<const std::uint8_t*>(weights);
+  const int rows_int = static_cast<int>(rows_per_expert);
+  const int cols_int = static_cast<int>(cols);
+  const int experts_int = static_cast<int>(experts);
+  const int batch_int = static_cast<int>(batch_stride);
+  const int out_int = static_cast<int>(out_stride);
+  switch (type) {
+    case kF32:
+      GemvExpertsKernel<kF32><<<blocks, kThreads, 0, stream>>>(
+          data, ids, x, y, rows_int, cols_int, row_bytes, experts_int, batch_int, out_int);
+      break;
+    case kQ8_0:
+      GemvExpertsKernel<kQ8_0><<<blocks, kThreads, 0, stream>>>(
+          data, ids, x, y, rows_int, cols_int, row_bytes, experts_int, batch_int, out_int);
+      break;
+    case kQ4K:
+      GemvExpertsKernel<kQ4K><<<blocks, kThreads, 0, stream>>>(
+          data, ids, x, y, rows_int, cols_int, row_bytes, experts_int, batch_int, out_int);
+      break;
+    case kQ5K:
+      GemvExpertsKernel<kQ5K><<<blocks, kThreads, 0, stream>>>(
+          data, ids, x, y, rows_int, cols_int, row_bytes, experts_int, batch_int, out_int);
+      break;
+    case kQ6K:
+      GemvExpertsKernel<kQ6K><<<blocks, kThreads, 0, stream>>>(
+          data, ids, x, y, rows_int, cols_int, row_bytes, experts_int, batch_int, out_int);
       break;
   }
 }

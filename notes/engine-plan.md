@@ -734,3 +734,18 @@ unit test, and the test caught two problems at once:
 Reverted to the verified 12.48 tok/s tree. To continue: fix the shared reduction
 in `GemvExpertsKernel`, relax the operator tolerance with a comment explaining
 why, and only then rewire `LaunchMoeGather`.
+
+## Expert GEMV kernel: correct and tested, but fusing the gather is 3% slower (2026-11-27)
+
+`LaunchGemvExperts` (one warp per expert-row, device id list) now passes its GPU
+unit test (5.96e-08). Wiring `LaunchMoeGather` to it -- three launches per MoE
+block instead of 24 -- gives identical text but **12.10 tok/s** against 12.48 for
+the per-expert path, consistently over three runs: the extra silu and weighted
+accumulate passes cost more than the saved launches.
+
+The kernel stays in the tree (tested) because it is the right building block once
+prefill batches tokens and the MoE work per launch grows; the gather keeps the
+faster per-expert calls for now.
+
+Also fixed: the operator suite called `LaunchConv1dStep` with the pre-slot
+argument order, so the standalone suite had stopped building.

@@ -35,6 +35,14 @@ void LaunchGemvAdd(const void* weights, StorageType type, std::size_t rows,
                    std::size_t cols, const float* x, const float* bias, float* y,
                    hipStream_t stream);
 
+/// y[slot][row] = dot(weights[ids[slot]][row], x + slot * batch_stride) for every
+/// selected expert, in one launch (batch_stride 0 shares one input).
+void LaunchGemvExperts(const void* weights, StorageType type,
+                       const std::int32_t* ids, std::size_t experts,
+                       std::size_t rows_per_expert, std::size_t cols,
+                       const float* x, std::size_t batch_stride, float* y,
+                       std::size_t out_stride, hipStream_t stream);
+
 /// y = x * rsqrt(mean(x^2) + eps) * weight, one block per row.
 void LaunchRmsNorm(const float* x, const float* weight, float* y,
                    std::size_t rows, std::size_t cols, float eps,

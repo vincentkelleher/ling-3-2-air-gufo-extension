@@ -296,9 +296,9 @@ std::unique_ptr<Engine> Engine::Create(const core::GgufReader& reader,
       alloc(&m.scores, heads * context) && alloc(&m.latent, heads * latent) &&
       alloc(&m.mla_out, v_dim) && alloc(&m.kvq, kv_dim) &&
       alloc(&m.moe_logits, config.n_expert) &&
-      alloc(&m.expert_gate, config.n_ff > config.n_ff_exp ? config.n_ff : config.n_ff_exp) &&
-      alloc(&m.expert_up, config.n_ff > config.n_ff_exp ? config.n_ff : config.n_ff_exp) &&
-      alloc(&m.expert_down, n_embd) && alloc(&m.logits, config.n_vocab) &&
+      alloc(&m.expert_gate, 8 * (config.n_ff > config.n_ff_exp ? config.n_ff : config.n_ff_exp)) &&
+      alloc(&m.expert_up, 8 * (config.n_ff > config.n_ff_exp ? config.n_ff : config.n_ff_exp)) &&
+      alloc(&m.expert_down, 8 * n_embd) && alloc(&m.logits, config.n_vocab) &&
       alloc_int(&m.moe_ids, config.n_expert_used) &&
       alloc(&m.moe_weights, config.n_expert_used) && alloc_int(&m.argmax, 1) &&
       alloc(&m.kernel_debug, 8 * kda_dim);

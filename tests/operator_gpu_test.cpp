@@ -376,7 +376,7 @@ int main() {
     HIP_CHECK(hipMemcpy(dx, x.data(), channels * sizeof(float), hipMemcpyHostToDevice));
     HIP_CHECK(hipMemcpy(dw, weight.data(), weight.size() * sizeof(float), hipMemcpyHostToDevice));
     HIP_CHECK(hipMemcpy(ds, state.data(), state.size() * sizeof(float), hipMemcpyHostToDevice));
-    hipk::LaunchConv1dStep(dx, dw, ds, dy, channels, 0);
+    hipk::LaunchConv1dStep(dx, dw, ds, channels, 0, dy, 0);
     HIP_CHECK(hipDeviceSynchronize());
     std::vector<float> out(channels), got_state(state.size());
     HIP_CHECK(hipMemcpy(out.data(), dy, channels * sizeof(float), hipMemcpyDeviceToHost));
@@ -757,6 +757,43 @@ int main() {
     HIP_CHECK(hipFree(dg)); HIP_CHECK(hipFree(du)); HIP_CHECK(hipFree(dd));
     HIP_CHECK(hipFree(dx)); HIP_CHECK(hipFree(dout)); HIP_CHECK(hipFree(scratch));
     HIP_CHECK(hipFree(di)); HIP_CHECK(hipFree(dw));
+  }
+
+  // Fused expert GEMV: one launch covering every selected expert.
+  {
+    const int experts = 3, rows = 2, cols = 8;
+    std::vector<float> weights(experts * rows * cols), x(cols);
+    for (auto& v : weights) v = 0.5f * dist(rng);
+    for (auto& v : x) v = dist(rng);
+    std::vector<std::int32_t> ids{2, 0, 1};
+    std::vector<float> expected(experts * rows, 0.0f);
+    for (int e = 0; e < experts; ++e) {
+      for (int r = 0; r < rows; ++r) {
+        double sum = 0.0;
+        for (int c = 0; c < cols; ++c) {
+          sum += weights[(ids[e] * rows + r) * cols + c] * x[c];
+        }
+        expected[e * rows + r] = static_cast<float>(sum);
+      }
+    }
+    float* dw; float* dx; float* dy; std::int32_t* di;
+    HIP_CHECK(hipMalloc(&dw, weights.size() * sizeof(float)));
+    HIP_CHECK(hipMalloc(&dx, x.size() * sizeof(float)));
+    HIP_CHECK(hipMalloc(&dy, expected.size() * sizeof(float)));
+    HIP_CHECK(hipMalloc(&di, experts * sizeof(std::int32_t)));
+    HIP_CHECK(hipMemcpy(dw, weights.data(), weights.size() * sizeof(float), hipMemcpyHostToDevice));
+    HIP_CHECK(hipMemcpy(dx, x.data(), x.size() * sizeof(float), hipMemcpyHostToDevice));
+    HIP_CHECK(hipMemcpy(di, ids.data(), experts * sizeof(std::int32_t), hipMemcpyHostToDevice));
+    hipk::LaunchGemvExperts(dw, hipk::kF32, di, experts, rows, cols, dx, 0, dy, rows, 0);
+    HIP_CHECK(hipDeviceSynchronize());
+    std::vector<float> actual(expected.size());
+    HIP_CHECK(hipMemcpy(actual.data(), dy, expected.size() * sizeof(float), hipMemcpyDeviceToHost));
+    double worst = 0.0;
+    for (std::size_t i = 0; i < actual.size(); ++i) {
+      worst = std::max(worst, std::fabs(static_cast<double>(actual[i]) - expected[i]));
+    }
+    Check(worst <= 1e-5, "expert gemv max abs error", worst, 1e-5);
+    HIP_CHECK(hipFree(dw)); HIP_CHECK(hipFree(dx)); HIP_CHECK(hipFree(dy)); HIP_CHECK(hipFree(di));
   }
 
   std::printf("operators: %d failures\n", Failures);
