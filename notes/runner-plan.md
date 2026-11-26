@@ -378,3 +378,37 @@ engine itself: two `Engine` instances on two threads against one HIP device — 
 own stream, but the weight mapping, the host-registered ranges and the shared `gpus` are
 process-wide. That needs either host-level serialisation of sessions or a single engine
 shared by all sessions, which is a different design from the one-session-per-slot contract.
+
+## Vision through the server: wired, then reverted (2026-11-27)
+
+Image input was implemented on the runner and **reverted**, because it crashes:
+
+- `PreparePrompt` accepted `ChatMessage::images`, decoded and encoded each image with the
+  extension's `VisionEncoder`, built the `<|vision_start|>…<|image_pad|>…<|vision_end|>`
+  block, and returned the projected rows through a `Ling3ImageContext : TextPromptContext`
+  (the host hands it back to `SetPromptContext`, which is the designed handoff).
+  `Prefill` then fed each marker position with `Engine::ForwardEmbedding` and every other
+  position with `ForwardToken`.
+- With the mmproj supplied, the host reported the model as image-capable
+  (`supports_vision=1`, "serving vision path … -> loaded"), decoded the request, and then
+  **segfaulted** — before calling `PreparePrompt` at all in the first attempt, and on the
+  second with this backtrace:
+
+        hip::Device::WaitActiveStreams(hip::Stream*, bool)
+        hip::getStream(ihipStream_t*, bool)
+        hip::hipMemcpyAsync(...)
+        Engine::ForwardFromEmbedded                     engine.cpp:769  (D2D copy of m.x)
+        Engine::ForwardEmbedding                        engine.cpp:466
+        Ling3Runner::Prefill                            runner.cpp:586
+
+  i.e. a HIP-internal crash inside a plain device-to-device copy, on our path, with the
+  engine's stream. The same copy runs for every ordinary token, so what differs is the
+  per-token `ForwardEmbedding` drive and whatever the host did with the device when the
+  request carried an image.
+
+Since the provider must not advertise a path that crashes, `supports_vision` is back to
+false and image input stays an **engine-level** capability (verified: numpy 3.2e-06,
+llama.cpp encoder 0.04 %, correct description through `tests/image_forward_test.cpp`), not
+a server feature. Next owner should reproduce with the trace at
+`Engine::ForwardEmbedding` and check whether the host swaps or tears down the HIP context
+when an image request is admitted.
