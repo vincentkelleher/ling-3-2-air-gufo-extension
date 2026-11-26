@@ -137,14 +137,22 @@ notes/               engine-plan (status + verification log), benchmarks, prefil
 
 ## Building and testing
 
-See [notes/build.md](notes/build.md) for the exact commands (Nix devshell in a
-container with the GPU, a Gufo 0.36.0 checkout, `cmake --preset` equivalent,
-module install, and ctest with `LING3_GGUF` set).
+See [notes/build.md](notes/build.md) for the exact commands (Nix devshell in a container
+with the GPU, a Gufo 0.36.0 checkout, the module build, install and `diagnose`).
 
-`ctest -R '^ling3_air\.'` runs: probe, config/weights, tokenizer, chat template
-and the dequantization comparison against Gufo (5 tests, all passing). The GPU
-operator suite (`tests/operator_gpu_test.cpp`, 23 checks) and the end-to-end
-forward (`tests/forward_test.cpp`) run outside ctest because they need the GPU.
+`ctest -R '^ling3_air\.'` runs nine tests and all pass: probe, config/weights mapping,
+tokenizer, chat template, dequantization against Gufo, dot versus Gufo, image
+preprocessing, the vision encoder against a numpy reference, and end-to-end image
+conditioning. The last two need `LING3_MMPROJ` plus a fixture from `tools/` and skip
+themselves otherwise, as do the end-to-end forward and vision tests without `LING3_GGUF`.
+The GPU operator suite (`tests/operator_gpu_test.cpp`, 31 checks) runs outside ctest.
+
+Measurements come from committed scripts rather than pasted numbers:
+`tools/bench_report.py` (bandwidth, both rooflines, % of roofline, medians of N),
+`tools/golden_set.py` (the llama.cpp comparison) and `tools/roofline.py`. Two records sit
+beside this file: [docs/conformance.md](docs/conformance.md) maps Gufo's conformance
+checklist to evidence, and [docs/parity.md](docs/parity.md) is the side-by-side against
+llama.cpp with the commands behind every row.
 
 ## Honest summary
 
