@@ -112,3 +112,37 @@ decoders waiting under ~250 ms, matching the guidance in `docs/extension-api.md`
   state edges, prefill scheduling, cache.
 - The golden set and `tools/bench_report.py` rerun through the server, so the
   README numbers come from the served path rather than the test harness.
+
+## The cache adapter, read from the header (2026-11-27)
+
+`CreateComponentCacheResources` must hand back a `cache::Adapter`
+(`src/cache/adapter.hpp`), and that is the deep part of serving. Its contract, as
+the four in-tree extensions implement it (DeepSeek's `ContinuationAdapter` is 669
+lines):
+
+| method | responsibility here |
+| --- | --- |
+| `GetCapabilities()` | which component kinds are supported |
+| `Components()` | stable descriptors: one append-row component per MLA latent cache (row = 576 floats), one private-state component per KDA block (conv + delta) |
+| `CompatibilityIdentity()` | model digests (from `models.lock.json`) + layout + context + settings that change state |
+| `CreateSlot(guard)` | a slot owning one engine session |
+| `Positions(slot)` | per-component row/position |
+| `PlanPrefill(slot, first, end)` | chunk boundaries (our 32-token chunks) |
+| `BeginRestore(slot, positions)` | validate capacity, guard the ranges being replaced |
+| `CapturePrivate` / `LoadPrivate` (+ `…Piece`) | whole-buffer copies for KDA state, piece-wise required for arbitrary offsets |
+| `CopyRowsOut` / `CopyRowsIn` | append rows of the MLA latent cache |
+| `BorrowRowsView` | optional; empty means "copy instead of share" |
+| `Validate(slot, positions)` | complete loads, one position per component; a failure latches |
+| `Invalidate(slot)` | release borrowers and leave an empty, cold-prefillable slot |
+
+Two facts that make a first version cheaper:
+
+- **A null adapter is legal in principle**: `Components()` may return an empty
+  span, `PlanPrefill` may return `{end}`, and then the cache simply never reuses a
+  prefix. Serving would work with full prefill every request — enough to satisfy
+  "HTTP serving" while reuse is added later. Worth trying first, because it removes
+  `CopyRows*`, `BorrowRowsView` and the piece-wise paths entirely.
+- The one unknown left in the runner itself is `sampling::SamplerState`: `SelectNext`
+  must go through it rather than sample on the host, or temperature/top-k/top-p and
+  the reasoning budget will diverge from the server's own accounting. Read
+  `include/gufo/ext/sampling.hpp` and the LFM3 runner before writing it.
