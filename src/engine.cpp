@@ -903,6 +903,10 @@ bool Engine::ForwardFromEmbedded(std::uint32_t position, std::string* error) {
   return true;
 }
 
+const float* Engine::SnapshotData() const { return impl_->snapshot; }
+
+std::size_t Engine::SnapshotFloats() const { return impl_->snapshot_floats; }
+
 void Engine::SnapshotState() {
   Impl& m = *impl_;
   if (m.snapshot == nullptr) {

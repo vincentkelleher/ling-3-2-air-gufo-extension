@@ -249,3 +249,28 @@ What that leaves, in order of size:
 
 The runner's sampling is greedy (`SelectNext` ignores the sampler), which is exact at
 temperature 0; honouring temperature/top-k/top-p is a separate small step.
+
+## Where the adapter stops (2026-11-27)
+
+The runner now registers a **private-state component** instead of an empty component set:
+
+- the component is the engine's snapshot buffer (KDA conv/delta, MLA latent caches and
+  positions), sized exactly as `Engine::Create` allocates it —
+  `n_layer_total x (9 * kda_inner + heads * kda_dim^2 + context * kv_dim)` floats, exposed
+  through `Engine::SnapshotData()`/`SnapshotFloats()`;
+- `CapturePrivate`/`LoadPrivate` copy that buffer with `hipMemcpy` (synchronous, on the
+  default stream — correct but serialised; the asynchronous form needs the device stream
+  behind `cache::Stream`);
+- `ComponentCacheResources` now supplies `allocate` (host storage handed back through
+  `Payload::Committed`), `device_only` (false) and `share` (nullopt).
+
+`gufo serve llm` gets through "prefix index has no required components" and now fails at
+`phase=sessions` with `bad_function_call`, i.e. one more empty hook is being called. The
+next value to fill is almost certainly `ComponentCacheResources::stream` (a `StreamLease`,
+declared outside `src/cache/*.hpp`, so its shape still has to be read) — an empty lease
+called during session creation is exactly a `bad_function_call`. After that come the
+device-stream downcast for asynchronous copies and the server's streaming/cancellation
+tests.
+
+So the ladder is now: empty components (rejected) → one private-state component (accepted,
+`allocate`/`device_only`/`share` needed) → stream lease + async copies → server test suite.

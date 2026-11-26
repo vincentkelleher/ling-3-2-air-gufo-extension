@@ -76,6 +76,11 @@ class Engine {
 
   /// Snapshots / restores the trunk state (KDA conv+delta, MLA caches).
   void SnapshotState();
+  /// The snapshot buffer's device address and size in floats: the same bytes
+  /// `SnapshotState` writes and `RestoreState` reads. The serving cache captures and
+  /// loads exactly this, which is what makes a private-state component possible.
+  [[nodiscard]] const float* SnapshotData() const;
+  [[nodiscard]] std::size_t SnapshotFloats() const;
   void RestoreState();
 
   /// MTP: predicts the token after `token` given the base model's final hidden

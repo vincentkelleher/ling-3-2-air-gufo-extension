@@ -1,5 +1,7 @@
 #include "src/runner.hpp"
 
+#include <hip/hip_runtime.h>
+
 #include <gufo/ext/adapter.hpp>
 #include <gufo/ext/registry.hpp>
 
@@ -7,6 +9,8 @@
 
 #include <algorithm>
 #include <cstring>
+#include <map>
+#include <vector>
 #include <utility>
 
 #include "src/engine.hpp"
@@ -52,16 +56,31 @@ class NullSlot final : public cache::Slot {
   [[nodiscard]] bool IsValid() const noexcept override { return true; }
 };
 
-/// The adapter that reports no components, so serving works without prefix reuse.
-class NullAdapter final : public cache::Adapter {
+/// Adapter with one private-state component: the trunk's snapshot buffer (KDA conv and
+/// delta state, the MLA latent caches and their positions). Its bytes are exactly what
+/// `Engine::SnapshotState` writes and `RestoreState` reads, so a restore reproduces an
+/// uninterrupted run rather than approximating it.
+///
+/// Copies are synchronous on the default stream. That is correct but serialised; the
+/// asynchronous form needs the device stream type behind `cache::Stream`, which is the
+/// follow-up rather than the first milestone.
+class Ling3ComponentAdapter final : public cache::Adapter {
  public:
-  NullAdapter(cache::Identity identity, std::uint32_t context)
-      : identity_(std::move(identity)), context_(context) {}
+  Ling3ComponentAdapter(cache::Identity identity, std::size_t state_bytes,
+                        std::uint32_t context)
+      : identity_(std::move(identity)), context_(context) {
+    component_.id = cache::ComponentId{0};
+    component_.layout_version = 1;
+    component_.kind = cache::ComponentKind::kPrivateState;
+    component_.state_bytes = state_bytes;
+  }
+
+  void Register(cache::Slot* slot, Engine* engine) { engines_[slot] = engine; }
 
   [[nodiscard]] cache::Capabilities GetCapabilities() const override { return {}; }
   [[nodiscard]] std::span<const cache::ComponentDescriptor> Components()
       const override {
-    return {};
+    return {&component_, 1};
   }
   [[nodiscard]] cache::Identity CompatibilityIdentity() const override {
     return identity_;
@@ -80,14 +99,28 @@ class NullAdapter final : public cache::Adapter {
     return {first, end};
   }
   void BeginRestore(cache::Slot&, std::span<const cache::ComponentPosition>) override {}
-  [[nodiscard]] cache::Completion CapturePrivate(const cache::Slot&, cache::ComponentId,
-                                                 std::span<std::byte>,
+
+  [[nodiscard]] cache::Completion CapturePrivate(const cache::Slot& slot,
+                                                 cache::ComponentId,
+                                                 std::span<std::byte> payload,
                                                  cache::Stream&) override {
+    Engine* engine = EngineFor(slot);
+    if (engine == nullptr || payload.size() < component_.state_bytes) {
+      return Ready();
+    }
+    hipMemcpy(payload.data(), engine->SnapshotData(), component_.state_bytes,
+              hipMemcpyDeviceToHost);
     return Ready();
   }
-  [[nodiscard]] cache::Completion LoadPrivate(cache::Slot&, cache::ComponentId,
-                                              std::span<const std::byte>,
+  [[nodiscard]] cache::Completion LoadPrivate(cache::Slot& slot, cache::ComponentId,
+                                              std::span<const std::byte> payload,
                                               cache::Stream&) override {
+    Engine* engine = EngineFor(slot);
+    if (engine == nullptr || payload.size() < component_.state_bytes) {
+      return Ready();
+    }
+    hipMemcpy(const_cast<float*>(engine->SnapshotData()), payload.data(),
+              component_.state_bytes, hipMemcpyHostToDevice);
     return Ready();
   }
   [[nodiscard]] cache::Completion CopyRowsOut(const cache::Slot&, cache::ComponentId,
@@ -109,8 +142,15 @@ class NullAdapter final : public cache::Adapter {
   [[nodiscard]] bool Invalidate(cache::Slot&) noexcept override { return true; }
 
  private:
+  [[nodiscard]] Engine* EngineFor(const cache::Slot& slot) const {
+    const auto found = engines_.find(const_cast<cache::Slot*>(&slot));
+    return found == engines_.end() ? nullptr : found->second;
+  }
+
   cache::Identity identity_;
   std::uint32_t context_{0};
+  cache::ComponentDescriptor component_{};
+  std::map<cache::Slot*, Engine*> engines_;
 };
 
 }  // namespace
@@ -223,21 +263,60 @@ std::string Ling3Runner::Decode(std::span<const TextRunnerToken> tokens) const {
 std::unique_ptr<ComponentCacheResources> Ling3Runner::CreateComponentCacheResources(
     cache::ResourceLedger&, std::size_t) const {
   auto resources = std::make_unique<ComponentCacheResources>();
-  // Identity is an opaque byte blob: the model id is what distinguishes two
-  // checkpoints for this adapter, which has no restorable components anyway.
+  // Identity is an opaque byte blob: the model id distinguishes two checkpoints.
   cache::Identity identity(impl_->model_id.begin(), impl_->model_id.end());
-  resources->adapter = std::make_unique<NullAdapter>(identity, impl_->max_context);
+  // The snapshot is n_layer_total x (9 * kda_inner + heads * kda_dim^2 + context * kv_dim)
+  // floats; the engine allocates exactly that (see Engine::Create).
+  const Ling3Config& c = impl_->config;
+  const std::size_t heads = c.n_head;
+  const std::size_t kda_inner = c.KdaInner();
+  const std::size_t kda_dim = c.n_kda_head_dim;
+  const std::size_t kv_dim = c.n_lora_kv + c.n_rot;
+  const std::size_t floats_per_layer =
+      9 * kda_inner + heads * kda_dim * kda_dim + impl_->max_context * kv_dim;
+  const std::size_t state_bytes =
+      static_cast<std::size_t>(c.n_layer_total) * floats_per_layer * sizeof(float);
+  resources->adapter =
+      std::make_unique<Ling3ComponentAdapter>(identity, state_bytes, impl_->max_context);
+  // The host asks this for the buffer it captures a component into, then takes ownership
+  // through `finish`. Host memory is right here: the snapshot is copied device-to-host
+  // by the adapter itself.
+  resources->allocate = [](const cache::PayloadRequest& request) {
+    auto storage = std::make_shared<std::vector<std::byte>>(request.bytes);
+    cache::ComponentCaptureBuffer buffer;
+    buffer.bytes = std::span<std::byte>(storage->data(), storage->size());
+    buffer.allocation = storage->data();
+    buffer.finish = [storage]() {
+      return cache::Payload::Committed(
+          cache::ResourceCharge{},
+          std::static_pointer_cast<const void>(storage));
+    };
+    return buffer;
+  };
+  // The payload lives in host memory, so it is never device-only, and this adapter
+  // never shares append rows (it has none).
+  resources->device_only = [](const void*) { return false; };
+  resources->share = [](const cache::PayloadRequest&,
+                        std::span<const std::byte>) -> std::optional<cache::Payload> {
+    return std::nullopt;
+  };
   return resources;
 }
 
-std::unique_ptr<TextRunnerState> Ling3Runner::BindComponentState(cache::Adapter&,
-                                                                 cache::Slot&) const {
+std::unique_ptr<TextRunnerState> Ling3Runner::BindComponentState(
+    cache::Adapter& adapter, cache::Slot& slot) const {
   std::string error;
   auto engine = g_engine_factory == nullptr ? nullptr : g_engine_factory(&error);
   if (engine == nullptr) {
     return nullptr;
   }
-  return std::make_unique<Ling3RunnerState>(std::move(engine), impl_->config);
+  auto state = std::make_unique<Ling3RunnerState>(std::move(engine), impl_->config);
+  // The adapter copies this slot's snapshot, so it needs the engine that owns it.
+  auto* components = dynamic_cast<Ling3ComponentAdapter*>(&adapter);
+  if (components != nullptr) {
+    components->Register(&slot, &state->engine());
+  }
+  return state;
 }
 
 void Ling3Runner::ReconcileComponentState(TextRunnerState&, std::size_t) const {}
