@@ -173,3 +173,18 @@ deliberately rather than by multiplying the existing buffers.
 This is one coherent piece of work — chunked forward, grouped MoE, batched MLA
 attention with a causal mask, validated by last-token logits against the sequential
 path. It is the largest remaining engineering item in the project.
+
+## Grouped-MoE schedule kernel, 2026-11-27
+
+`LaunchBuildExpertLists` turns `ids[tokens][top_k]` into per-expert token lists
+(counts, offsets, token slots), which is what a chunked pass needs to read each
+expert's weights once for all the tokens that selected it. Counts are scattered on
+the device; the 512-entry prefix sum runs on the host, which keeps the order
+deterministic and costs less than a device scan at this size.
+
+Unit test in the operator suite: 4 tokens x top-3 over 6 experts, checking counts,
+offsets and that every slot really selected its expert — `29 checks, 0 failures`.
+
+This is infrastructure for a chunked forward (M around 256-512) that does not
+exist yet; it was built now because it is small, self-contained and testable, in
+the same order the GEMM kernel was built ahead of the prefill wiring.

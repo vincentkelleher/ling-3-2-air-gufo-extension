@@ -13,6 +13,29 @@ namespace {
 constexpr int kMaxExperts = 512;
 constexpr int kThreads = 256;
 
+/// Counts and scatters (token slot) pairs into per-expert buckets.
+__global__ void BuildExpertListsKernel(const std::int32_t* ids, int pairs,
+                                       int top_k, int n_expert,
+                                       std::int32_t* counts, std::int32_t* cursor,
+                                       const std::int32_t* offsets,
+                                       std::int32_t* token_slots, int scatter) {
+  const int p = blockIdx.x * blockDim.x + threadIdx.x;
+  if (p >= pairs) {
+    return;
+  }
+  const int token = p / top_k;
+  const int expert = ids[p];
+  if (expert < 0 || expert >= n_expert) {
+    return;
+  }
+  if (scatter == 0) {
+    atomicAdd(&counts[expert], 1);
+  } else {
+    const int slot = atomicAdd(&cursor[expert], 1);
+    token_slots[offsets[expert] + slot] = token;
+  }
+}
+
 __global__ void MulKernel(float* out, const float* a, const float* b, int count) {
   const int i = blockIdx.x * blockDim.x + threadIdx.x;
   if (i < count) {
@@ -138,6 +161,38 @@ void LaunchFfn(const void* gate, StorageType gate_type, const void* up,
                                             static_cast<int>(n_ff));
   LaunchGemv(down, down_type, n_embd, n_ff, expert_gate, expert_down, stream);
   LaunchAxpy(out, expert_down, weight, n_embd, stream);
+}
+
+void LaunchBuildExpertLists(const std::int32_t* ids, std::size_t tokens,
+                            std::size_t top_k, std::size_t n_expert,
+                            std::int32_t* counts, std::int32_t* cursor,
+                            std::int32_t* offsets, std::int32_t* token_slots,
+                            hipStream_t stream) {
+  const int pairs = static_cast<int>(tokens * top_k);
+  const int blocks = (pairs + kThreads - 1) / kThreads;
+
+  hipMemsetAsync(counts, 0, n_expert * sizeof(std::int32_t), stream);
+  BuildExpertListsKernel<<<blocks, kThreads, 0, stream>>>(
+      ids, pairs, static_cast<int>(top_k), static_cast<int>(n_expert), counts,
+      cursor, offsets, token_slots, /*scatter=*/0);
+
+  // Prefix sum on the host: 512 entries, and it keeps the order deterministic.
+  std::vector<std::int32_t> host_counts(n_expert);
+  hipMemcpyAsync(host_counts.data(), counts, n_expert * sizeof(std::int32_t),
+                 hipMemcpyDeviceToHost, stream);
+  hipStreamSynchronize(stream);
+  std::vector<std::int32_t> host_offsets(n_expert);
+  std::int32_t running = 0;
+  for (std::size_t e = 0; e < n_expert; ++e) {
+    host_offsets[e] = running;
+    running += host_counts[e];
+  }
+  hipMemcpyAsync(offsets, host_offsets.data(), n_expert * sizeof(std::int32_t),
+                 hipMemcpyHostToDevice, stream);
+  hipMemsetAsync(cursor, 0, n_expert * sizeof(std::int32_t), stream);
+  BuildExpertListsKernel<<<blocks, kThreads, 0, stream>>>(
+      ids, pairs, static_cast<int>(top_k), static_cast<int>(n_expert), counts,
+      cursor, offsets, token_slots, /*scatter=*/1);
 }
 
 void LaunchMoeGather(const void* gate_exps, StorageType gate_type,

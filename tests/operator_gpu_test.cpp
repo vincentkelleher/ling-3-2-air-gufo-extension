@@ -1045,6 +1045,52 @@ int main() {
     }
   }
 
+  // Grouped-MoE schedule: per-expert token lists from per-token selections.
+  {
+    const int tokens = 4, top_k = 3, n_expert = 6;
+    std::vector<std::int32_t> ids{0, 2, 5,  2, 5, 5,  1, 0, 5,  5, 2, 0};
+    std::vector<std::int32_t> counts(n_expert), cursor(n_expert), offsets(n_expert), slots(tokens * top_k);
+    std::int32_t* dc = nullptr; std::int32_t* dcur = nullptr; std::int32_t* doff = nullptr;
+    std::int32_t* ds = nullptr; std::int32_t* di = nullptr;
+    HIP_CHECK(hipMalloc(&dc, n_expert * sizeof(std::int32_t)));
+    HIP_CHECK(hipMalloc(&dcur, n_expert * sizeof(std::int32_t)));
+    HIP_CHECK(hipMalloc(&doff, n_expert * sizeof(std::int32_t)));
+    HIP_CHECK(hipMalloc(&ds, tokens * top_k * sizeof(std::int32_t)));
+    HIP_CHECK(hipMalloc(&di, ids.size() * sizeof(std::int32_t)));
+    HIP_CHECK(hipMemcpy(di, ids.data(), ids.size() * sizeof(std::int32_t), hipMemcpyHostToDevice));
+    hipk::LaunchBuildExpertLists(di, tokens, top_k, n_expert, dc, dcur, doff, ds, 0);
+    HIP_CHECK(hipDeviceSynchronize());
+    HIP_CHECK(hipMemcpy(counts.data(), dc, n_expert * sizeof(std::int32_t), hipMemcpyDeviceToHost));
+    HIP_CHECK(hipMemcpy(offsets.data(), doff, n_expert * sizeof(std::int32_t), hipMemcpyDeviceToHost));
+    HIP_CHECK(hipMemcpy(slots.data(), ds, slots.size() * sizeof(std::int32_t), hipMemcpyDeviceToHost));
+    // Expected: expert 0 -> tokens 0,2,3; 2 -> 0,1,3; 5 -> 0,1,1,2,2 ... verify counts and membership.
+    bool ok = true;
+    int total = 0;
+    for (int e = 0; e < n_expert; ++e) {
+      int expected = 0;
+      for (int t = 0; t < tokens; ++t) {
+        for (int k = 0; k < top_k; ++k) {
+          if (ids[t * top_k + k] == e) ++expected;
+        }
+      }
+      if (counts[e] != expected) ok = false;
+      if (offsets[e] != total) ok = false;
+      for (int i = 0; i < counts[e]; ++i) {
+        const int slot = slots[offsets[e] + i];
+        bool found = false;
+        for (int k = 0; k < top_k; ++k) {
+          if (ids[slot * top_k + k] == e) found = true;
+        }
+        if (!found) ok = false;
+      }
+      total += counts[e];
+    }
+    if (total != tokens * top_k) ok = false;
+    Check(ok, "expert list schedule", ok ? 0.0 : 1.0, 0.0);
+    HIP_CHECK(hipFree(dc)); HIP_CHECK(hipFree(dcur)); HIP_CHECK(hipFree(doff));
+    HIP_CHECK(hipFree(ds)); HIP_CHECK(hipFree(di));
+  }
+
   std::printf("operators: %d failures\n", Failures);
   return Failures == 0 ? 0 : 1;
 }

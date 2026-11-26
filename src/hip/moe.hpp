@@ -21,6 +21,17 @@ void LaunchRouterSelect(const float* logits, const float* bias,
                         std::size_t group_used, std::size_t top_k, float scale,
                         std::int32_t* ids, float* weights, hipStream_t stream);
 
+/// Turns per-token expert selections into per-expert token lists (the schedule
+/// grouped MoE needs): `counts[expert]` and `tokens[offset[expert] .. ]` hold the
+/// token slots that selected each expert. `ids` is `[tokens][top_k]`,
+/// `cursor`/`counts`/`offsets` are `n_expert` ints of scratch, `tokens` holds
+/// `count` pairs. Returns false if the device side could not be read back.
+void LaunchBuildExpertLists(const std::int32_t* ids, std::size_t tokens,
+                            std::size_t top_k, std::size_t n_expert,
+                            std::int32_t* counts, std::int32_t* cursor,
+                            std::int32_t* offsets, std::int32_t* token_slots,
+                            hipStream_t stream);
+
 /// One SwiGLU FFN over `n_embd -> n_ff -> n_embd`, added into `out` with
 /// `weight`: `out += weight * down(silu(gate(x)) * up(x))`.
 /// `expert_gate`/`expert_up`/`expert_act` are `n_ff` floats of scratch,
