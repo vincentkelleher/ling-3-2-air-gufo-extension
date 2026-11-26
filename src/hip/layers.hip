@@ -196,6 +196,13 @@ __global__ void ArgmaxKernel(const float* x, int count, std::int32_t* result) {
   }
 }
 
+__global__ void MulIntoKernel(const float* a, const float* b, float* out, int count) {
+  const int i = blockIdx.x * blockDim.x + threadIdx.x;
+  if (i < count) {
+    out[i] = a[i] * b[i];
+  }
+}
+
 __global__ void AxpyKernel(float* y, const float* z, float scale, std::size_t count) {
   const std::size_t i = static_cast<std::size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
   if (i < count) {
@@ -244,6 +251,12 @@ void LaunchDeltaRuleStep(const float* q, const float* k, const float* v,
 void LaunchArgmax(const float* x, std::size_t count, std::int32_t* result,
                   hipStream_t stream) {
   ArgmaxKernel<<<1, kThreads, 0, stream>>>(x, static_cast<int>(count), result);
+}
+
+void LaunchMulInto(const float* a, const float* b, float* out, std::size_t count,
+                   hipStream_t stream) {
+  const int blocks = static_cast<int>((count + kThreads - 1) / kThreads);
+  MulIntoKernel<<<blocks, kThreads, 0, stream>>>(a, b, out, static_cast<int>(count));
 }
 
 void LaunchAxpy(float* y, const float* z, float scale, std::size_t count,

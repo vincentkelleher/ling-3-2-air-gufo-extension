@@ -50,6 +50,10 @@ void LaunchDeltaRuleStep(const float* q, const float* k, const float* v,
 void LaunchArgmax(const float* x, std::size_t count, std::int32_t* result,
                   hipStream_t stream);
 
+/// `out[i] = a[i] * b[i]` (may alias neither input).
+void LaunchMulInto(const float* a, const float* b, float* out, std::size_t count,
+                   hipStream_t stream);
+
 /// `y = x + scale * z`
 void LaunchAxpy(float* y, const float* z, float scale, std::size_t count,
                 hipStream_t stream);

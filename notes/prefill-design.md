@@ -188,3 +188,25 @@ offsets and that every slot really selected its expert — `29 checks, 0 failure
 This is infrastructure for a chunked forward (M around 256-512) that does not
 exist yet; it was built now because it is small, self-contained and testable, in
 the same order the GEMM kernel was built ahead of the prefill wiring.
+
+## Chunked forward: first attempt hit an aperture violation, 2026-11-27
+
+Implemented `PrefillChunk` (dense stages batched through `LaunchGemm`, KDA/MLA and
+routed MoE per token) and ran it on the 25-token prompt. The probe crashed in
+`GemmKernel<kQ8_0>` with `HSA_STATUS_ERROR_MEMORY_APERTURE_VIOLATION` and a grid of
+**[1048576, 1, 1]** blocks. A grid that large means the launch received a row count
+of 2^20 instead of the real one (`kda_inner` 4096, `q_dim` 6144, `n_ff` 6144,
+`n_embd` 2560, `n_vocab` 157184 are all far from it), so one of the calls in the new
+path passes its arguments out of order -- most likely where a GEMM's `rows` and
+`cols` were swapped for the MLA `kv_a` (576 per row) or the shared expert (768).
+
+Reverted rather than left in the tree: the path is unreachable by default, and a
+segfaulting branch is worse than a missing one. `LaunchMulInto` (an elementwise
+multiply used by the chunked FFN) was kept, but it needs a check in the operator
+suite before use -- untested code is what caused the earlier regressions.
+
+Next attempt should build the chunk path **block by block**: first embeddings and
+the norm over M rows (assert `m.bx` equals M sequential `ForwardToken` embeddings),
+then one KDA block's projections, and so on, with an equality check at each step.
+That is slower to write and much faster to debug than a 250-line method validated
+only at the end.
