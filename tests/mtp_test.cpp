@@ -188,6 +188,26 @@ int main(int argc, char** argv) {
     }
   }
 
+  // 2b. Does the MTP head write state the snapshot covers? Digest, draft, restore, digest.
+  {
+    const std::vector<double> before = engine->DebugStateDigest();
+    engine->SnapshotState();
+    engine->ForwardMtp(engine->Argmax(), start, &error);
+    engine->RestoreState();
+    const std::vector<double> after = engine->DebugStateDigest();
+    std::size_t differing = 0;
+    for (std::size_t i = 0; i < before.size(); ++i) {
+      if (before[i] != after[i]) ++differing;
+    }
+    std::size_t ps = 0;
+    for (std::size_t i = 0; i < before.size(); ++i) {
+      if (std::abs(before[i] - after[i]) > 1e-9) ++ps;
+    }
+    std::printf("     mtp writes: %zu of %zu layers differ after restore (near: %zu)\n",
+                differing, before.size(), ps);
+    if (!rewind()) return 1;
+  }
+
   // 3. Speculation: draft one token with the MTP head, verify trunk + draft in one pass,
   // accept the draft only when the trunk's own token matches, rewind and re-feed exactly what
   // was accepted. VerifyDrafts checkpoints internally, so this loop takes none of its own.

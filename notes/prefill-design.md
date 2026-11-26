@@ -464,6 +464,11 @@ verifying. `tests/mtp_test.cpp` therefore asserts the restore exactness and *pri
 speculative divergence instead of asserting it, so the suite is green while the evidence stays
 in every run.
 
+A fourth probe rules the MTP head out as the source: digest, one `ForwardMtp`, restore, digest
+again gives **0 of 43 layers differing**, so the head's writes are entirely covered by the
+snapshot and a rejected draft leaves no trace. That leaves the loop's own control flow (the
+sequence of feeds and rewinds, not any kernel) as the only remaining explanation.
+
 Next owner: instrument the loop's per-step `current` and compare it with the plain stream's
 token at the same position. With restore now trusted, the divergence can only be in how the
 draft/verify sequence advances `position`, which is a bookkeeping read of one value, not a
