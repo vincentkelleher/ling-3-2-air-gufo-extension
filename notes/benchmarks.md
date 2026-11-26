@@ -97,3 +97,22 @@ That is the deviation the `engine-prefill` contract asks to record.
 Reproduce: `tools/golden_set.py --engine-wrapper <script> --llama-wrapper <script>
 --steps 24`; the engine reads its prompt from `LING3_PROMPT_FILE` so marker
 characters survive the shell.
+
+### Chunked ingestion changes the continuation slightly (2026-11-27)
+
+With `LING3_PREFILL_CHUNK=1` the prompt is ingested through `PrefillChunk` and
+decode continues normally. Compared with the sequential path on the pinned prompt:
+
+- sequential: `The user is asking a straightforward factual question about the capital of`
+- chunked:    `The user is asking a straightforward factual question. The capital of`
+
+Same first seven words, then a near-tie decides differently. That is expected --
+the chunked path sums the same products in a different order, and the margins here
+are 0.01-0.05 -- but it is worth stating plainly: **prefill batching perturbs greedy
+output at near-ties**, exactly as llama.cpp's own CPU/GPU paths do. The default stays
+sequential until the chunked path is the only path and the golden set is re-measured
+against it.
+
+This does not affect the parity question with llama.cpp, where the deviation was
+already one token at a 0.048 margin, but it means any future "token-for-token"
+comparison has to state which prefill path produced the tokens.

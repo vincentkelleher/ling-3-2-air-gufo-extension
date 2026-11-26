@@ -228,7 +228,21 @@ int main(int argc, char** argv) {
   std::vector<ling::text::TokenId> produced;
   std::size_t position = 0;
   const auto start_time = std::chrono::steady_clock::now();
-  if (use_prompt) {
+  if (use_prompt && std::getenv("LING3_PREFILL_CHUNK") != nullptr) {
+    // Ingest the prompt through the chunked path; decode then continues normally.
+    std::vector<std::int32_t> ids(prompt_tokens.begin(), prompt_tokens.end() - 1);
+    std::size_t consumed = 0;
+    while (consumed < ids.size()) {
+      const std::size_t chunk = ids.size() - consumed < 32 ? ids.size() - consumed : 32;
+      if (!engine->PrefillChunk(ids.data() + consumed, chunk,
+                                static_cast<std::uint32_t>(consumed), -1, &error)) {
+        std::fprintf(stderr, "chunk prefill: %s\n", error.c_str());
+        return 1;
+      }
+      consumed += chunk;
+    }
+    token = static_cast<std::int32_t>(prompt_tokens.back());
+  } else if (use_prompt) {
     for (std::size_t i = 0; i + 1 < prompt_tokens.size(); ++i) {
       if (!engine->ForwardToken(static_cast<std::int32_t>(prompt_tokens[i]),
                                 static_cast<std::uint32_t>(position++),
