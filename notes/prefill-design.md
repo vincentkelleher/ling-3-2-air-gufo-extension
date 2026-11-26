@@ -210,3 +210,28 @@ the norm over M rows (assert `m.bx` equals M sequential `ForwardToken` embedding
 then one KDA block's projections, and so on, with an equality check at each step.
 That is slower to write and much faster to debug than a 250-line method validated
 only at the end.
+
+## Chunked forward: two faults, reverted again (2026-11-27, keep this)
+
+Attempt 2 added `PrefillChunk` with the `kda_out`/`mla_out` fix (KDA blocks keep
+their output projection in `kda_out`; using `mla_out` dereferenced a null tensor,
+which was the first aperture violation). It still faulted:
+`HSA_STATUS_ERROR_MEMORY_FAULT`, no output.
+
+What *is* proven on this path, and should be kept in the next attempt:
+
+- Chunk embeddings equal per-token embeddings exactly (a debug hook compared 8 rows
+  against `DebugEmbedding`; worst absolute difference **0**).
+- The batched GEMM itself is validated for F32 and Q8_0 against a host reference
+  (4.8e-07, 1.4e-06) and measured at 2.9x per token at M=8 on a real projection.
+- Buffer sizes are right on paper: `bx/bh/battn/bffnh/bffout` 32 x n_embd,
+  `bq` 32 x q_dim, `bk` 32 x max(kda_inner, 576), `bv` 32 x kda_inner,
+  `bgated` 32 x max(kda_inner, v_dim), `bffa/b` 32 x n_ff.
+
+So the defect is an index, not a size, and it is somewhere in the per-token loop
+(the only part that mixes chunk rows with single-token scratch). The next attempt
+should not re-run the whole thing: build it block by block with a dump after each
+stage, exactly as the nump verification was done for the single-token path --
+embeddings (done), then one KDA block's three projections with the GEMM output
+compared against three GEMVs on the same rows, then conv, and so on. Each step is a
+five-minute check with an exact equality, instead of a crash after 250 lines.
