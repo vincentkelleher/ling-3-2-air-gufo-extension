@@ -41,6 +41,7 @@ gufo_extension_target(
     src/engine.cpp
     src/drivers.cpp
     src/vision.cpp
+    src/runner.cpp
   LINK_LIBRARIES
     gufo_ling3_air
     gufo_ext_runtime

@@ -217,3 +217,35 @@ Order of work, so each step is independently testable:
 
 Known unknowns left: the `sampling::SamplerState` API for `SelectNext`, and the fields
 `TextRunnerDescriptor` requires (the installed API has no `TextSchedulingProfile`).
+
+## The no-component adapter is rejected by the host (2026-11-27)
+
+Implemented it: `src/runner.cpp` + `src/runner.hpp` provide a complete
+`TextModelRunner` (13 virtuals) with a `NullAdapter` that reports no components,
+`PlanPrefill` returning `{first, end}`, and always-ready completions, plus a state that
+owns an `Engine`. It compiles, installs, and `gufo serve llm` **loads it** — the provider
+factory is called, the GGUF is opened, sessions are created — and then the loader stops
+with:
+
+    Error loading model '…Q4_K_M-00001-of-00003.gguf': prefix index has no required
+    components
+
+So the host requires at least one component to build a prefix index, and the cheap
+milestone written above (empty `Components()`) is **not viable**. Recorded here so nobody
+spends the same effort twice.
+
+What that leaves, in order of size:
+
+1. **One append-rows component that is never read back.** Report a single component with
+   the MLA latent cache's row width (`latent * 4` = 2304 bytes) and implement
+   `CopyRowsOut`/`CopyRowsIn` over a contiguous staging copy of the latent rows. Serving
+   then works with full prefill per request; reuse stays off. This is the smallest change
+   that satisfies "has components" and keeps every transfer trivially correct.
+2. **The real adapter**: one append-rows component per MLA layer plus private state for
+   the KDA conv/delta buffers, with `Validate`/`Invalidate` latches and
+   `ReconcileComponentState` restoring each slot's frontier. That is the 756-line
+   adaptation the size table above measures, and it is what prefix reuse and rollback
+   actually need.
+
+The runner's sampling is greedy (`SelectNext` ignores the sampler), which is exact at
+temperature 0; honouring temperature/top-k/top-p is a separate small step.

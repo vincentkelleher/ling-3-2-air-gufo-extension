@@ -22,6 +22,7 @@
 #include "src/config.hpp"
 #include "src/engine.hpp"
 #include "src/preprocess.hpp"
+#include "src/runner.hpp"
 #include "src/vision.hpp"
 #include "src/text/chat_template.hpp"
 #include "src/text/tokenizer.hpp"
@@ -472,6 +473,52 @@ int RunLing3Bench(const TextBenchOptions& options,
   return 0;
 }
 
+/// Serving context: one model per process, so the runner factory reaches the reader,
+/// the config and the weights through this file-static rather than through captures
+/// (the provider registers a plain function pointer).
+struct ServingContext {
+  std::shared_ptr<const core::GgufReader> reader;
+  Ling3Config config;
+  Ling3Weights weights;
+};
+
+ServingContext g_serving;
+
+std::unique_ptr<Engine> CreateServingEngine(std::string* error) {
+  if (g_serving.reader == nullptr) {
+    if (error != nullptr) *error = "ling3_air: no model reader for serving";
+    return nullptr;
+  }
+  EngineOptions options;
+  options.max_context = g_serving.config.n_ctx_train > 0 ? 4096 : 4096;
+  return Engine::Create(*g_serving.reader, g_serving.config, g_serving.weights, options,
+                        error);
+}
+
+std::shared_ptr<gufo::ext::TextModelRunner> CreateLing3Runner(
+    const gufo::ext::TextRunnerOptions& options, std::string* error) {
+  if (options.reader == nullptr) {
+    if (error != nullptr) *error = "ling3_air: serving needs a GGUF reader";
+    return nullptr;
+  }
+  g_serving.reader = options.reader;
+  if (!ParseConfig(*options.reader, &g_serving.config, error)) {
+    return nullptr;
+  }
+  if (!LoadWeights(*options.reader, g_serving.config, &g_serving.weights, error)) {
+    return nullptr;
+  }
+  auto tokenizer = text::Tokenizer::CreateFromGguf(*options.reader, error);
+  if (tokenizer == nullptr) {
+    return nullptr;
+  }
+  Ling3Runner::SetEngineFactory(&CreateServingEngine);
+  const std::uint32_t context =
+      options.max_context > 0 ? options.max_context : g_serving.config.n_ctx_train;
+  return std::make_shared<Ling3Runner>(g_serving.config, std::move(tokenizer),
+                                       options.model_path, context);
+}
+
 }  // namespace gufo::ext::ling3_air
 
 void ling3_air_provider_register(gufo::ext::Registry& registry) {
@@ -481,7 +528,7 @@ void ling3_air_provider_register(gufo::ext::Registry& registry) {
       .id = "ling3-air",
       .probe = &gufo::ext::ling3_air::ProbeLing3,
       .probe_gguf = &gufo::ext::ling3_air::ProbeLing3Gguf,
-      .create = nullptr,
+      .create = &gufo::ext::ling3_air::CreateLing3Runner,
       .bench_driver = &gufo::ext::ling3_air::RunLing3Bench,
       .prompt_driver = &gufo::ext::ling3_air::RunLing3Prompt,
       .chat_driver = &gufo::ext::ling3_air::RunLing3Chat,
