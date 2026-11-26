@@ -518,3 +518,15 @@ Next (single build): in `Conv1dStepKernel`, for `c < 4`, write the four window
 values, the four weights and the slot index into a debug buffer; dump it for the
 q, k and v launches of block 0 at position 0. Four floats each decide whether the
 window, the weights or the slot is wrong.
+
+## SOLVED: conv state slot stride (2026-11-27)
+
+Each conv slot holds three history columns, so slots are `3 * channels` apart,
+not `channels`. With a `channels` stride, q's shift wrote into k's window and k's
+into v's (the in-kernel dump showed k/v windows `[0, x_q, 0, x]`). Fix: allocate
+`9 * channels` and address `state + slot * 3 * channels`.
+
+Result: coherent output. `The capital of France is` now continues with
+"The user is asking a straightforward factual question about the", and
+llama.cpp's answer for the same prompt is "The user is asking" — so the engine is
+at or near token equality. Next: the pinned golden set, then the serving path.

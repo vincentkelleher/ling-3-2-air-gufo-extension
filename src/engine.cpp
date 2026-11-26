@@ -305,11 +305,11 @@ std::unique_ptr<Engine> Engine::Create(const core::GgufReader& reader,
   m.v_absorb.assign(config.n_layer_total, nullptr);
   for (std::uint32_t il = 0; il < config.n_layer_total; ++il) {
     if (config.IsKda(il)) {
-      if (!alloc(&m.conv_state[il], 3 * kda_inner) ||
+      if (!alloc(&m.conv_state[il], 9 * kda_inner) ||
           !alloc(&m.delta_state[il], heads * kda_dim * kda_dim)) {
         return fail("engine: KDA state allocation failed");
       }
-      hipMemset(m.conv_state[il], 0, 3 * kda_inner * sizeof(float));
+      hipMemset(m.conv_state[il], 0, 9 * kda_inner * sizeof(float));
       hipMemset(m.delta_state[il], 0, heads * kda_dim * kda_dim * sizeof(float));
     } else {
       if (!alloc(&m.mla_cache[il], context * kv_dim)) {
@@ -484,6 +484,9 @@ bool Engine::ForwardToken(std::int32_t token, std::uint32_t position,
       hip::LaunchConv1dStep(m.q, static_cast<const float*>(dev(layer.kda_conv_q)),
                             m.conv_state[il], kda_inner, 0, m.cq, stream,
                             (il == 0 && std::getenv("LING3_DUMP") != nullptr) ? m.kernel_debug : nullptr);
+      if (il == 0) {
+        dump_at("/work/p_convq_%u.bin", m.kernel_debug, 32, position);
+      }
       hip::LaunchSilu(m.cq, m.cq, kda_inner, stream);
       if (il == 0 && std::getenv("LING3_DUMP") != nullptr) {
         std::vector<float> host(kda_inner);
@@ -497,10 +500,16 @@ bool Engine::ForwardToken(std::int32_t token, std::uint32_t position,
       hip::LaunchConv1dStep(m.k, static_cast<const float*>(dev(layer.kda_conv_k)),
                             m.conv_state[il], kda_inner, 1, m.ck, stream,
                             (il == 0 && std::getenv("LING3_DUMP") != nullptr) ? m.kernel_debug : nullptr);
+      if (il == 0) {
+        dump_at("/work/p_convk_%u.bin", m.kernel_debug, 32, position);
+      }
       hip::LaunchSilu(m.ck, m.ck, kda_inner, stream);
       hip::LaunchConv1dStep(m.v, static_cast<const float*>(dev(layer.kda_conv_v)),
                             m.conv_state[il], kda_inner, 2, m.cv, stream,
                             (il == 0 && std::getenv("LING3_DUMP") != nullptr) ? m.kernel_debug : nullptr);
+      if (il == 0) {
+        dump_at("/work/p_convv_%u.bin", m.kernel_debug, 32, position);
+      }
       hip::LaunchSilu(m.cv, m.cv, kda_inner, stream);
 
       hip::LaunchGemv(dev(layer.kda_f_a), Storage(layer.kda_f_a.type), kda_inner,

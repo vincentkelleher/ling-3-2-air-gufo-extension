@@ -16,7 +16,7 @@ __global__ void Conv1dStepKernel(const float* x, const float* weight,
   if (c >= channels) {
     return;
   }
-  float* slice = state + static_cast<std::size_t>(slot) * channels;
+  float* slice = state + static_cast<std::size_t>(slot) * 3 * channels;
   const float window[4] = {slice[c], slice[channels + c], slice[2 * channels + c],
                            x[c]};
   // The GGUF stores ssm_conv1d_*.weight as [kernel, 1, channels]: the kernel
