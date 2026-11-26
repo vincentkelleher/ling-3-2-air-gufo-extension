@@ -939,6 +939,76 @@ int main() {
     HIP_CHECK(hipFree(dv)); HIP_CHECK(hipFree(ds)); HIP_CHECK(hipFree(dx));
   }
 
+  // Prepared-activation K-quant GEMV must equal the per-row path exactly.
+  for (const auto type : {hipk::kQ4K, hipk::kQ6K}) {
+    const int cols = 256, rows = 4;
+    const std::size_t row_bytes = type == hipk::kQ4K ? 144 : 210;
+    std::vector<std::uint8_t> weights(row_bytes * rows);
+    for (auto& value : weights) value = static_cast<std::uint8_t>(byte(rng));
+    // Sane fp16 scales: raw random bytes give NaN/inf scales and both paths then
+    // differ in garbage, which is not a parity measurement.
+    for (int row = 0; row < rows; ++row) {
+      std::uint8_t* base = weights.data() + row * row_bytes;
+      const float d = 0.01f + 0.001f * static_cast<float>(row);
+      if (type == hipk::kQ4K) {
+        auto* block = reinterpret_cast<BlockQ4K*>(base);
+        block->d = FloatToHalf(d);
+        block->dmin = FloatToHalf(d * 0.5f);
+        for (int i = 0; i < 12; ++i) block->scales[i] = static_cast<std::uint8_t>(3 + i);
+      } else {
+        auto* block = reinterpret_cast<BlockQ6K*>(base);
+        block->d = FloatToHalf(d);
+        for (int i = 0; i < 16; ++i) block->scales[i] = static_cast<std::int8_t>(-6 + i);
+      }
+    }
+    std::vector<float> x(cols);
+    for (auto& value : x) value = dist(rng);
+    // Host quantization, the same rounding the kernels use.
+    std::vector<signed char> values(cols);
+    std::vector<float> scales(1);
+    float amax = 0.0f;
+    for (const float value : x) amax = std::max(amax, std::fabs(value));
+    const float scale = amax > 0.0f ? amax / 127.0f : 1.0f;
+    scales[0] = scale;
+    for (int i = 0; i < cols; ++i) {
+      int a = static_cast<int>(std::lrint(x[i] / scale));
+      a = a > 127 ? 127 : (a < -127 ? -127 : a);
+      values[i] = static_cast<signed char>(a);
+    }
+    void* dw = nullptr;
+    float* dx = nullptr;
+    float* dy_row = nullptr;
+    float* dy_prep = nullptr;
+    signed char* dv = nullptr;
+    float* ds = nullptr;
+    HIP_CHECK(hipMalloc(&dw, weights.size()));
+    HIP_CHECK(hipMalloc(&dx, cols * sizeof(float)));
+    HIP_CHECK(hipMalloc(&dy_row, rows * sizeof(float)));
+    HIP_CHECK(hipMalloc(&dy_prep, rows * sizeof(float)));
+    HIP_CHECK(hipMalloc(&dv, cols));
+    HIP_CHECK(hipMalloc(&ds, sizeof(float)));
+    HIP_CHECK(hipMemcpy(dw, weights.data(), weights.size(), hipMemcpyHostToDevice));
+    HIP_CHECK(hipMemcpy(dx, x.data(), cols * sizeof(float), hipMemcpyHostToDevice));
+    HIP_CHECK(hipMemcpy(dv, values.data(), cols, hipMemcpyHostToDevice));
+    HIP_CHECK(hipMemcpy(ds, scales.data(), sizeof(float), hipMemcpyHostToDevice));
+    hipk::LaunchGemv(dw, type, rows, cols, dx, dy_row, 0);
+    hipk::LaunchGemvPrepared(dw, type, rows, cols, dv, ds, dy_prep, 0);
+    HIP_CHECK(hipDeviceSynchronize());
+    std::vector<float> row_out(rows), prep_out(rows);
+    HIP_CHECK(hipMemcpy(row_out.data(), dy_row, rows * sizeof(float), hipMemcpyDeviceToHost));
+    HIP_CHECK(hipMemcpy(prep_out.data(), dy_prep, rows * sizeof(float), hipMemcpyDeviceToHost));
+    double worst = 0.0;
+    for (int i = 0; i < rows; ++i) {
+      worst = std::max(worst, std::fabs(static_cast<double>(row_out[i]) - prep_out[i]));
+    }
+    char label[64];
+    std::snprintf(label, sizeof(label), "prepared vs per-row %s",
+                  type == hipk::kQ4K ? "Q4_K" : "Q6_K");
+    Check(worst <= 1e-5, label, worst, 1e-5);
+    HIP_CHECK(hipFree(dw)); HIP_CHECK(hipFree(dx)); HIP_CHECK(hipFree(dy_row));
+    HIP_CHECK(hipFree(dy_prep)); HIP_CHECK(hipFree(dv)); HIP_CHECK(hipFree(ds));
+  }
+
   std::printf("operators: %d failures\n", Failures);
   return Failures == 0 ? 0 : 1;
 }

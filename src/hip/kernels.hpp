@@ -56,6 +56,12 @@ void LaunchQuantizeActivations(const float* x, std::size_t cols,
                                signed char* values, float* scales,
                                hipStream_t stream);
 
+/// K-quant GEMV against activations prepared by LaunchQuantizeActivations.
+/// Reproduces the per-row path exactly; Q4_K and Q6_K only.
+void LaunchGemvPrepared(const void* weights, StorageType type, std::size_t rows,
+                        std::size_t cols, const signed char* values,
+                        const float* scales, float* y, hipStream_t stream);
+
 /// y = x * rsqrt(mean(x^2) + eps) * weight, one block per row.
 void LaunchRmsNorm(const float* x, const float* weight, float* y,
                    std::size_t rows, std::size_t cols, float eps,

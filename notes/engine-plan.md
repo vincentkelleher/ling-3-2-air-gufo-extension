@@ -840,3 +840,20 @@ The GEMV still uses the per-row path, so correctness and the 12.50 tok/s decode
 are untouched. A future retry of the hoisting can now be tested as: quantize once
 with this kernel, run the K-quant GEMV against those buffers, and compare with the
 per-row path on the same weights -- before the engine sees it at all.
+
+### Prepared-activation K-quant GEMV: correct but slower when wired (2026-11-27)
+
+`LaunchGemvPrepared` (Q4_K and Q6_K against activations quantized once) is
+equivalent to the per-row path to **9.5e-07** and **1.9e-06** on the same weights,
+asserted in the operator suite. Wiring it into the MoE gather -- quantize the
+block input once, use the prepared path for gate and up, keep down per-row --
+produced the same text but **7.92 tok/s against 12.54**, so the wiring was
+reverted while both kernels and their tests stay.
+
+That is the third time an activation-quantization hoist has cost more than it
+saves (Q8_0 hoist, Q8_K hoist, this). The pattern is consistent with the profile:
+the K-quant expert GEMVs are small matrices (1-1.6 MB per launch) whose time goes
+to launch latency and weight traffic, not to the activation arithmetic. Further
+work on them should batch or fuse the *launches* (the tested `LaunchGemvExperts`
+kernel does exactly that and needs the prefill batch to pay) rather than move the
+activation work around.

@@ -457,6 +457,76 @@ __global__ void QuantizeActivationsKernel(const float* x, int blocks,
   }
 }
 
+/// K-quant GEMV against activations that were quantized once by
+/// LaunchQuantizeActivations. Must reproduce the per-row path exactly (both use
+/// the same activation rounding); the operator suite asserts that.
+template <int TYPE>
+__global__ void GemvPreparedKernel(const std::uint8_t* weights,
+                                   const signed char* values, const float* scales,
+                                   float* y, int rows, int cols, int row_bytes) {
+  const int warp = (blockIdx.x * blockDim.x + threadIdx.x) >> 5;
+  if (warp >= rows) {
+    return;
+  }
+  const std::uint8_t* row = weights + static_cast<std::size_t>(warp) * row_bytes;
+  float sum = 0.0f;
+  if constexpr (TYPE == kQ4K) {
+    const auto* blocks = reinterpret_cast<const BlockQ4K*>(row);
+    for (int b = threadIdx.x & 31; b < cols / 256; b += 32) {
+      const float d = HalfToFloat(blocks[b].d);
+      const float dmin = HalfToFloat(blocks[b].dmin);
+      float inner = 0.0f;
+      for (int g = 0; g < 8; ++g) {
+        int sum_qa = 0;
+        int sum_a = 0;
+        for (int i = 0; i < 32; ++i) {
+          const int j = g * 32 + i;
+          const int a = static_cast<int>(values[b * 256 + j]);
+          sum_qa += Q4Code(blocks[b], j) * a;
+          sum_a += a;
+        }
+        float sc = 0.0f;
+        float m = 0.0f;
+        Q4ScaleMin(g, blocks[b].scales, sc, m);
+        inner += d * sc * static_cast<float>(sum_qa) -
+                 dmin * m * static_cast<float>(sum_a);
+      }
+      sum += inner * scales[b];
+    }
+  } else if constexpr (TYPE == kQ6K) {
+    const auto* blocks = reinterpret_cast<const BlockQ6K*>(row);
+    for (int b = threadIdx.x & 31; b < cols / 256; b += 32) {
+      const float d = HalfToFloat(blocks[b].d);
+      float inner = 0.0f;
+      for (int g = 0; g < 16; ++g) {
+        const int half = g / 8;
+        const int segment = (g % 8) / 2;
+        const int lane_base = (g * 16) % 32;
+        const std::uint8_t* ql = blocks[b].ql + half * 64 + (segment % 2) * 32;
+        const int ql_shift = (segment / 2) * 4;
+        const int qh_shift = segment * 2;
+        int total = 0;
+        for (int i = 0; i < 16; ++i) {
+          const int j = g * 16 + i;
+          const int lane = lane_base + i;
+          const int low = (ql[lane] >> ql_shift) & 0x0F;
+          const int high = (blocks[b].qh[half * 32 + lane] >> qh_shift) & 0x03;
+          total += (((high << 4) | low) - 32) * static_cast<int>(values[b * 256 + j]);
+        }
+        inner += d * static_cast<float>(blocks[b].scales[g]) *
+                 static_cast<float>(total);
+      }
+      sum += inner * scales[b];
+    }
+  }
+  for (int offset = 16; offset > 0; offset >>= 1) {
+    sum += __shfl_down(sum, offset);
+  }
+  if ((threadIdx.x & 31) == 0) {
+    y[warp] = sum;
+  }
+}
+
 __global__ void RmsNormKernel(const float* x, const float* weight, float* y,
                               int rows, int cols, float eps) {
   const int row = blockIdx.x;
@@ -656,6 +726,24 @@ void LaunchQuantizeActivations(const float* x, std::size_t cols,
   const int blocks = static_cast<int>(cols / 256);
   QuantizeActivationsKernel<<<(blocks + 31) / 32, 32, 0, stream>>>(
       x, blocks, values, scales);
+}
+
+void LaunchGemvPrepared(const void* weights, StorageType type, std::size_t rows,
+                        std::size_t cols, const signed char* values,
+                        const float* scales, float* y, hipStream_t stream) {
+  const int row_bytes = static_cast<int>(RowBytes(type, cols));
+  const int warps = static_cast<int>(rows);
+  const int blocks = (warps * 32 + kThreads - 1) / kThreads;
+  const auto* data = static_cast<const std::uint8_t*>(weights);
+  if (type == kQ4K) {
+    GemvPreparedKernel<kQ4K><<<blocks, kThreads, 0, stream>>>(
+        data, values, scales, y, static_cast<int>(rows), static_cast<int>(cols),
+        row_bytes);
+  } else if (type == kQ6K) {
+    GemvPreparedKernel<kQ6K><<<blocks, kThreads, 0, stream>>>(
+        data, values, scales, y, static_cast<int>(rows), static_cast<int>(cols),
+        row_bytes);
+  }
 }
 
 void LaunchRmsNorm(const float* x, const float* weight, float* y,
