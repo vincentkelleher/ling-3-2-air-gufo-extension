@@ -92,6 +92,8 @@ struct Engine::Impl {
   float* moe_weights{nullptr};
   std::int32_t* argmax{nullptr};
   float* base_hidden{nullptr};
+  float* bx{nullptr};
+  float* bh{nullptr};
   hipStream_t queue{nullptr};
   float* kernel_debug{nullptr};
 
@@ -304,7 +306,8 @@ std::unique_ptr<Engine> Engine::Create(const core::GgufReader& reader,
       alloc(&m.expert_down, 8 * n_embd) && alloc(&m.logits, config.n_vocab) && alloc(&m.base_hidden, n_embd) &&
       alloc_int(&m.moe_ids, config.n_expert_used) &&
       alloc(&m.moe_weights, config.n_expert_used) && alloc_int(&m.argmax, 1) &&
-      alloc(&m.kernel_debug, 8 * kda_dim);
+      alloc(&m.kernel_debug, 8 * kda_dim) &&
+      alloc(&m.bx, 32 * n_embd) && alloc(&m.bh, 32 * n_embd);
   if (!ok) {
     return fail("engine: device scratch allocation failed");
   }
@@ -814,6 +817,25 @@ bool Engine::ForwardMtp(std::int32_t token, std::uint32_t position,
     return false;
   }
   return true;
+}
+
+void Engine::DebugChunkStage1(const std::int32_t* tokens, std::size_t count,
+                              float* host_x, float* host_h) {
+  Impl& m = *impl_;
+  const std::size_t n_embd = m.config.n_embd;
+  const std::size_t rows = count < 32 ? count : 32;
+  for (std::size_t i = 0; i < rows; ++i) {
+    hip::LaunchEmbeddingRow(m.Dev(m.weights.token_embd),
+                            RawType(m.weights.token_embd.type), m.config.n_vocab,
+                            n_embd, tokens[i],
+                            m.bx + i * n_embd, m.queue);
+  }
+  const auto& layer = m.weights.layers[0];
+  hip::LaunchRmsNorm(m.bx, static_cast<const float*>(m.Dev(layer.attn_norm)), m.bh,
+                     rows, n_embd, m.config.rms_eps, m.queue);
+  hipStreamSynchronize(m.queue);
+  hipMemcpy(host_x, m.bx, rows * n_embd * sizeof(float), hipMemcpyDeviceToHost);
+  hipMemcpy(host_h, m.bh, rows * n_embd * sizeof(float), hipMemcpyDeviceToHost);
 }
 
 void Engine::DebugEmbedding(std::int32_t token, float* host_row) {

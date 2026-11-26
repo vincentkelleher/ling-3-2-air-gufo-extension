@@ -139,6 +139,34 @@ int main(int argc, char** argv) {
                 magnitude);
   }
 
+  // Chunked path, stage 1: embeddings plus the M-row RMSNorm, against a host
+  // computation from the same embeddings and block 0's norm weight.
+  if (use_prompt && std::getenv("LING3_CHUNK_STAGE1") != nullptr) {
+    const std::size_t rows = prompt_tokens.size() < 8 ? prompt_tokens.size() : 8;
+    std::vector<std::int32_t> ids(rows);
+    for (std::size_t i = 0; i < rows; ++i) ids[i] = static_cast<std::int32_t>(prompt_tokens[i]);
+    std::vector<float> x(rows * config.n_embd), h(rows * config.n_embd);
+    engine->DebugChunkStage1(ids.data(), rows, x.data(), h.data());
+    const auto* norm_weight =
+        static_cast<const float*>(weights.layers[0].attn_norm.data);
+    double worst = 0.0;
+    for (std::size_t r = 0; r < rows; ++r) {
+      double sum = 0.0;
+      for (std::size_t i = 0; i < config.n_embd; ++i) {
+        const double v = x[r * config.n_embd + i];
+        sum += v * v;
+      }
+      const double scale = 1.0 / std::sqrt(sum / config.n_embd + config.rms_eps);
+      for (std::size_t i = 0; i < config.n_embd; ++i) {
+        const double expected = x[r * config.n_embd + i] * scale * norm_weight[i];
+        const double diff = std::fabs(h[r * config.n_embd + i] - expected);
+        worst = diff > worst ? diff : worst;
+      }
+    }
+    std::printf("chunk stage1: %zu rows, norm worst abs diff %.3g\n", rows, worst);
+    return worst <= 1e-5 ? 0 : 1;
+  }
+
   std::int32_t token = use_prompt ? prompt_tokens.front() : 156891;
   std::vector<ling::text::TokenId> produced;
   std::size_t position = 0;
