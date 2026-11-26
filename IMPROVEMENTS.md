@@ -136,8 +136,13 @@ items over the warp gives every lane two or three.
 | per-slot activation, down matmul | 15.98 → **16.91** tok/s | **changed** |
 | the LM head | 16.91 → 16.91 tok/s | — |
 
-The gate/up variant is kept. The down matmul is the biggest single win of the three and
-is **not** kept: spreading the items changes the summation order, and that changed the
+The gate/up variant is kept. The KDA projections were also tried with the wide dot
+(one quantisation of `m.h` serving q/k/v/f_a/g_a): tokens identical, **no gain**
+(16.00 -> 15.91 tok/s), because those matrices already run at 91 % of the bandwidth
+bound — 2 GB of projection weights per token in 9.66 ms. That path was reverted and the
+unused wide variants were removed rather than left in the tree.
+
+The down matmul is the biggest single win of the three and is **not** kept: spreading the items changes the summation order, and that changed the
 greedy tokens for a fixed prompt. Adopting it means re-running the golden set against
 the llama.cpp reference and updating the documented comparison — a validation task, not
 a code task, so the code is left on the bit-identical path. The head gains nothing for

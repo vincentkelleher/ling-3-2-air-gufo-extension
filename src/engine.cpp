@@ -331,6 +331,9 @@ std::unique_ptr<Engine> Engine::Create(const core::GgufReader& reader,
   const std::size_t latent = config.n_lora_kv;
   const std::size_t kv_dim = latent + config.n_rot;
   const std::size_t context = options.max_context;
+  // The widest activation the prepared/wide path quantises is the KDA inner width (the
+  // output projection reads it); the rest are n_embd.
+  const std::size_t act_cols = std::max<std::size_t>(config.n_embd, config.KdaInner());
 
   auto alloc = [](float** pointer, std::size_t count) {
     return hipMalloc(reinterpret_cast<void**>(pointer), count * sizeof(float)) ==
@@ -354,9 +357,9 @@ std::unique_ptr<Engine> Engine::Create(const core::GgufReader& reader,
       alloc(&m.scores, heads * context) && alloc(&m.latent, heads * latent) &&
       alloc(&m.mla_out, v_dim) && alloc(&m.kvq, kv_dim) &&
       alloc(&m.moe_logits, config.n_expert) &&
-      hipMalloc(reinterpret_cast<void**>(&m.act_values), config.n_embd * sizeof(signed char)) == hipSuccess &&
-      hipMalloc(reinterpret_cast<void**>(&m.act_scales), (config.n_embd / 256) * sizeof(float)) == hipSuccess &&
-      hipMalloc(reinterpret_cast<void**>(&m.act_sums), (config.n_embd / 256) * 8 * sizeof(int)) == hipSuccess &&
+      hipMalloc(reinterpret_cast<void**>(&m.act_values), act_cols * sizeof(signed char)) == hipSuccess &&
+      hipMalloc(reinterpret_cast<void**>(&m.act_scales), (act_cols / 256) * sizeof(float)) == hipSuccess &&
+      hipMalloc(reinterpret_cast<void**>(&m.act_sums), (act_cols / 256) * 8 * sizeof(int)) == hipSuccess &&
       alloc(&m.expert_gate, 8 * (config.n_ff > config.n_ff_exp ? config.n_ff : config.n_ff_exp)) &&
       alloc(&m.expert_up, 8 * (config.n_ff > config.n_ff_exp ? config.n_ff : config.n_ff_exp)) &&
       alloc(&m.expert_down, 8 * n_embd) && alloc(&m.logits, config.n_vocab) && alloc(&m.base_hidden, n_embd) &&
