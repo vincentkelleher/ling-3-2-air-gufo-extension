@@ -43,7 +43,7 @@ at the bottom.
 | case | engine | reference |
 | --- | --- | --- |
 | decode, short context | **12.49 tok/s** | llama.cpp CPU: 12.52 tok/s |
-| prefill, 24-token prompt | 12.49 tok/s (token by token) | llama.cpp CPU prompt eval: 24.20 tok/s |
+| prefill, 24-token prompt | 12.49 tok/s sequential, **15.41 tok/s chunked** | llama.cpp CPU prompt eval: 24.20 tok/s |
 | weight load | 2.1 s warm, 35.9 s cold | llama.cpp mmap: 1.58 s |
 
 Machine ceilings measured in-repo (`tools/bandwidth_probe.hip`,
@@ -58,9 +58,12 @@ path on the same machine. Depth rows: 12.54 / 12.41 / 12.04 tok/s at depth
 - **No HTTP serving**: the runner does not implement the `TextModelRunner`
   contract yet, so `gufo serve llm --model ling-3.2-air` cannot use it. The
   component cache, continuation and streaming are therefore absent.
-- **No batched prefill**: prompt tokens are fed one at a time, which is why
-  prefill equals decode speed (12.5 tok/s, against a 6,277 tok/s roofline at
-  2,048 tokens). `notes/prefill-design.md` quantifies why: with top-8 of 512 experts a batch of M
+- **Prefill is only partly batched**: `PrefillChunk` batches the projections, the
+  out projection, the dense FFN and the shared expert over a chunk (8 tokens
+  today), which gives 15.41 tok/s against 12.51 sequential — 1.23x. The routed
+  MoE and the attention state are still per token, and the chunk size is 32, so
+  the 4-8x in `notes/prefill-design.md` is not reached yet (it needs chunk sizes
+  around 256-512 plus grouped MoE). `notes/prefill-design.md` quantifies why: with top-8 of 512 experts a batch of M
 tokens gives M/64 tokens per expert, so prefill must be **chunked** (M around
 256-512) for the expert weights to amortise; batching only the dense stages would
 buy about 1.3x.
