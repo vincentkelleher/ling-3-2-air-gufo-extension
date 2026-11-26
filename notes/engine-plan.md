@@ -403,3 +403,23 @@ Current evidence that the composition, not a stage, is at fault: every stage
 listed in the table above matches, yet the engine's top-8 logits for the pinned
 prompt (65522, 4279, 28057, 70, 12773, 14, 12, 39) do not contain `The` (678),
 which is what llama.cpp generates for that prompt.
+
+### `llama-eval-callback` prints, it does not dump
+
+Run: `cd /work/cbout && llama-eval-callback -m <gguf> -f /work/prompt.txt -n 1
+--temp 0`. It writes **no files** (the directory stayed empty) and prints every
+node's tensor to stdout in a truncated array form (`[2.7559, 8.7211, ..., -2.7697]`)
+plus a `sum = ...` per tensor. Truncation makes it useless for an exact
+comparison, and parsing stdout for 42 blocks x dozens of ops is not worth it.
+
+Better next step for the composition bug: a numpy forward of **blocks 0 and 1**
+only (both KDA + dense, whose primitives are already verified), compared against
+`x_0_0.bin` and `x_1_0.bin`. If block 0 and 1 match, extend to block 2 (MoE) and
+block 5 (MLA) the same way; the first block whose output diverges is the bug, and
+the numpy code is exact rather than truncated.
+
+Cheaper still, if the numpy port is too slow: compare our `x_5_1.bin` (MLA block,
+second position) against `x_5_0.bin` under the hypothesis that only the *state*
+paths (KDA conv/state, MLA cache) are wrong — i.e. run a two-token prompt whose
+second token is the same as the first and check that the block outputs differ in
+the way the cache implies.
