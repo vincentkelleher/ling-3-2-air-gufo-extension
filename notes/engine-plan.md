@@ -288,3 +288,22 @@ Next step: in `DeltaRuleKernel`, dump `decay[0..head_dim)` for head 0 to a file
 on the first call, and compare with `expf(d_gate.bin[0..128])`. If they differ, the
 pointer is wrong; if they match, the multiply is being lost (e.g. a compiler or
 aliasing problem) and the fix is to write the decayed state explicitly.
+
+### Correction: the position-1 experiment was invalid (do not chase the decay)
+
+`d_state.bin` — the file I treated as "state after token 1" — equals position 0's
+`M0 = k0[i]*v0[j]*beta0` to **1.9e-9**, while `d_kn`/`d_cv`/`d_gate` in the same
+comparison *do* differ between the 1-step and 2-step runs. So the state dump was
+position 0's, and every "the decay is not applied" number follows from that:
+`state == M0*exp(g1) + upd` looked wrong (3.6e-2) and `state == M0 + upd` looked
+right (1.6e-3) purely because the file was M0.
+
+Before redoing the check, make the dumps **position-stamped** (`d_state_p%u.bin`,
+same for the other stages). Then the two-position comparison is meaningful, and
+only then is it worth asking whether `exp(g)` reaches `DeltaRuleKernel`.
+
+What this leaves: every position-0 stage verified (table above), the state write
+verified, and the end-to-end difference from llama.cpp unexplained. The next
+two steps are therefore (1) position-stamped dumps + the position-1 delta check,
+and (2) token-for-token comparison against llama.cpp on the pinned prompt, which
+is what `engine-assembly` actually requires.
