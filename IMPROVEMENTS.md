@@ -211,6 +211,26 @@ attack would have to change the access pattern — grouping tokens by expert so 
 weights are read once for a batch — which is the batched-MoE work `notes/prefill-design.md`
 describes and is not attempted here.
 
+### Wider blocks for the expert GEMVs (512 threads) — neutral, reverted
+
+The expert GEMVs read eight scattered 1.4 MB regions, so the hypothesis was that more warps
+in flight would hide the latency behind the ~40 GB/s they sustain:
+
+| | decode |
+| --- | --- |
+| 256-thread blocks (8 warps) | 16.87-17.02 tok/s |
+| 512-thread blocks (16 warps) | 16.93 tok/s |
+
+Identical tokens, no change. Reverted.
+
+That closes the launch-shape family: launch count, block width, warp shape, per-expert
+launches and lane-dot width have all been measured and none of them moves the MoE. Together
+with the earlier results (activation re-quantisation +15 %, wide dot +11 %, everything else
+neutral) the conclusion is that this engine's decode sits at **16-17 tok/s (32-34 % of the
+49.9 tok/s roofline)** and that the next step is not a parameter but a different kernel:
+a tiled Q4_K matrix-multiply with shared-memory staging (the shape llama.cpp's `mul_mat`
+uses), where a warp cooperatively stages a weight tile instead of walking rows.
+
 ## Where the time goes now (decode, 8 tokens, this box)
 
 | group | ms/token | share |
