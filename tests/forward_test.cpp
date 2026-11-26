@@ -166,6 +166,13 @@ int main(int argc, char** argv) {
       return 1;
     }
   }
+  // MTP: after a trunk step, block 42 predicts the token *after* the one the
+  // trunk just picked. Compare that prediction with what the trunk produces on
+  // its next step; agreement is what speculative decoding needs to be exact.
+  const bool check_mtp = std::getenv("LING3_MTP") != nullptr;
+  std::int32_t mtp_prediction = -1;
+  std::size_t mtp_compared = 0;
+  std::size_t mtp_agreed = 0;
   const auto decode_start = std::chrono::steady_clock::now();
   for (int step = 0; step < steps; ++step) {
     const auto step_start = std::chrono::steady_clock::now();
@@ -174,6 +181,20 @@ int main(int argc, char** argv) {
       return 1;
     }
     token = engine->Argmax();
+    if (check_mtp) {
+      if (mtp_prediction >= 0) {
+        ++mtp_compared;
+        if (mtp_prediction == token) {
+          ++mtp_agreed;
+        }
+      }
+      // Draft from this step's hidden state: block 42 at the next position.
+      if (!engine->ForwardMtp(token, static_cast<std::uint32_t>(position), &error)) {
+        std::fprintf(stderr, "mtp: %s\n", error.c_str());
+        return 1;
+      }
+      mtp_prediction = engine->Argmax();
+    }
     produced.push_back(static_cast<ling::text::TokenId>(token));
     const double ms = std::chrono::duration<double, std::milli>(
                           std::chrono::steady_clock::now() - step_start)
@@ -194,6 +215,10 @@ int main(int argc, char** argv) {
   }
   std::printf("\n%.2f tok/s over %d steps (%.3f s)\n", steps / seconds, steps,
               seconds);
+  if (check_mtp) {
+    std::printf("mtp: %zu of %zu predictions matched the trunk\n", mtp_agreed,
+                mtp_compared);
+  }
   if (use_prompt && tokenizer != nullptr) {
     std::printf("text: %s\n", tokenizer->Decode(produced, false).c_str());
     std::printf("tokens with control:");

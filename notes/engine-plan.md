@@ -1001,3 +1001,26 @@ Next for MTP, in order: `Engine::ForwardMtp` using the base model's final hidden
 state (`m.h` after the last RMSNorm) plus the candidate token's embedding through
 block 42, then a draft loop, then exactness (drafted output must equal plain
 greedy) and a speed measurement at 12.5 tok/s decode.
+
+## MTP block forward implemented and validated, 2026-11-27
+
+`Engine::ForwardMtp(token, position)` mirrors llama.cpp's `graph_mtp`: it keeps
+the base model's normalised final hidden state (which sits in `m.h` after the last
+RMSNorm), runs
+`eh_proj(concat(rmsnorm(token_emb, nextn.enorm), rmsnorm(hidden, nextn.hnorm)))`
+through block 42 (its own MLA attention and MoE, on `mla_cache[42]`), then
+`nextn.shared_head_norm` and the shared LM head. Q4_0 support, added just before
+this, is what made block 42 readable.
+
+Validation (`LING3_MTP=1` in `tests/forward_test.cpp`): after each trunk step,
+draft the next token with block 42 and compare it with the token the trunk actually
+produces on its next step. On the pinned prompt: **7 of 9 drafts matched**.
+
+That is the behaviour speculative decoding needs. With MTP enabled but no accept
+loop yet, decode measures 11.99 tok/s against 12.54 without it, i.e. the draft
+block costs ~4 % per token and buys nothing until drafts are actually accepted.
+
+Next: the accept loop (draft K tokens, verify the prefix with one trunk pass,
+accept the matching prefix), then exactness (accepted output must equal plain
+greedy) and a speed measurement, which is what `engine-assembly`'s MTP half and the
+goal's criterion 3 ask for.

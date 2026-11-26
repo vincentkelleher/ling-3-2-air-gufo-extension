@@ -91,6 +91,7 @@ struct Engine::Impl {
   std::int32_t* moe_ids{nullptr};
   float* moe_weights{nullptr};
   std::int32_t* argmax{nullptr};
+  float* base_hidden{nullptr};
   hipStream_t queue{nullptr};
   float* kernel_debug{nullptr};
 
@@ -300,7 +301,7 @@ std::unique_ptr<Engine> Engine::Create(const core::GgufReader& reader,
       alloc(&m.moe_logits, config.n_expert) &&
       alloc(&m.expert_gate, 8 * (config.n_ff > config.n_ff_exp ? config.n_ff : config.n_ff_exp)) &&
       alloc(&m.expert_up, 8 * (config.n_ff > config.n_ff_exp ? config.n_ff : config.n_ff_exp)) &&
-      alloc(&m.expert_down, 8 * n_embd) && alloc(&m.logits, config.n_vocab) &&
+      alloc(&m.expert_down, 8 * n_embd) && alloc(&m.logits, config.n_vocab) && alloc(&m.base_hidden, n_embd) &&
       alloc_int(&m.moe_ids, config.n_expert_used) &&
       alloc(&m.moe_weights, config.n_expert_used) && alloc_int(&m.argmax, 1) &&
       alloc(&m.kernel_debug, 8 * kda_dim);
@@ -712,6 +713,103 @@ bool Engine::ForwardToken(std::int32_t token, std::uint32_t position,
   if (status != hipSuccess) {
     if (error != nullptr) {
       *error = std::string("engine: forward failed: ") + hipGetErrorString(status);
+    }
+    return false;
+  }
+  return true;
+}
+
+bool Engine::ForwardMtp(std::int32_t token, std::uint32_t position,
+                        std::string* error) {
+  Impl& m = *impl_;
+  const Ling3Config& c = m.config;
+  const auto& weights = m.weights;
+  const LayerWeights& layer = weights.layers[c.n_layer];  // block 42
+  hipStream_t stream = m.queue;
+  const std::size_t n_embd = c.n_embd;
+  const std::size_t heads = c.n_head;
+  const std::size_t latent = c.n_lora_kv;
+  const std::size_t v_dim = heads * c.n_head_dim_v_mla;
+  const float eps = c.rms_eps;
+  auto dev = [&m](const Tensor& tensor) { return m.Dev(tensor); };
+
+  // m.h holds the base model's normalised final hidden state; keep it, the
+  // block's scratch reuses m.h below.
+  hipMemcpyAsync(m.base_hidden, m.h, n_embd * sizeof(float),
+                 hipMemcpyDeviceToDevice, stream);
+  hip::LaunchRmsNorm(m.base_hidden, static_cast<const float*>(dev(layer.nextn_hnorm)),
+                     m.qn, 1, n_embd, eps, stream);
+  hip::LaunchEmbeddingRow(dev(weights.token_embd), RawType(weights.token_embd.type),
+                          c.n_vocab, n_embd, token, m.kn, stream);
+  hip::LaunchRmsNorm(m.kn, static_cast<const float*>(dev(layer.nextn_enorm)), m.kn, 1,
+                     n_embd, eps, stream);
+  hipMemcpyAsync(m.q, m.kn, n_embd * sizeof(float), hipMemcpyDeviceToDevice, stream);
+  hipMemcpyAsync(m.q + n_embd, m.qn, n_embd * sizeof(float),
+                 hipMemcpyDeviceToDevice, stream);
+  hip::LaunchGemv(dev(layer.nextn_eh_proj), Storage(layer.nextn_eh_proj.type), n_embd,
+                  2 * n_embd, m.q, m.x, stream);
+
+  hip::LaunchRmsNorm(m.x, static_cast<const float*>(dev(layer.attn_norm)), m.h, 1,
+                     n_embd, eps, stream);
+  // Same MLA block as the trunk, on block 42's own weights and cache.
+  hip::LaunchGemv(dev(layer.mla_q), Storage(layer.mla_q.type),
+                  heads * c.n_head_dim_mla, n_embd, m.h, m.q, stream);
+  hip::LaunchSplitQ(m.q, m.qn, m.q_pe, heads, c.NopeDim(), c.n_rot, stream);
+  hip::LaunchGemv(dev(layer.mla_kv_a), Storage(layer.mla_kv_a.type),
+                  latent + c.n_rot, n_embd, m.h, m.kvq, stream);
+  hip::LaunchRmsNorm(m.kvq, static_cast<const float*>(dev(layer.mla_kv_a_norm)),
+                     m.latent, 1, latent, eps, stream);
+  hip::LaunchRope(m.q_pe, heads, c.n_rot, c.n_rot, position, c.rope_freq_base, true,
+                  stream);
+  hip::LaunchRope(m.kvq + latent, 1, c.n_rot, c.n_rot, position, c.rope_freq_base,
+                  true, stream);
+  hip::LaunchMlaAppend(m.latent, m.kvq + latent, m.mla_cache[c.n_layer], position,
+                       latent, c.n_rot, stream);
+  hip::LaunchGemv(dev(layer.mla_gate), Storage(layer.mla_gate.type), heads, n_embd,
+                  m.h, m.beta_pre, stream);
+  hip::LaunchMlaAbsorbQ(m.qn, m.k_absorb[c.n_layer], m.q_abs, heads, stream);
+  hip::LaunchMlaScores(m.q_abs, m.q_pe, m.mla_cache[c.n_layer], heads, position + 1,
+                       m.scores, stream);
+  hip::LaunchMlaSoftmax(m.scores, heads, position + 1, stream);
+  hip::LaunchMlaLatentSum(m.scores, m.mla_cache[c.n_layer], heads, position + 1,
+                          m.latent, stream);
+  hip::LaunchMlaValueAbsorb(m.latent, m.v_absorb[c.n_layer], m.beta_pre, m.mla_out,
+                            heads, stream);
+  hip::LaunchGemv(dev(layer.mla_out), Storage(layer.mla_out.type), n_embd, v_dim,
+                  m.mla_out, m.attn_out, stream);
+
+  hip::LaunchAxpy(m.x, m.attn_out, 1.0f, n_embd, stream);
+  hipMemcpyAsync(m.ffn_inp, m.x, n_embd * sizeof(float), hipMemcpyDeviceToDevice,
+                 stream);
+  hip::LaunchRmsNorm(m.ffn_inp, static_cast<const float*>(dev(layer.ffn_norm)),
+                     m.ffn_h, 1, n_embd, eps, stream);
+  hip::LaunchGemv(dev(layer.gate_inp), Storage(layer.gate_inp.type), c.n_expert,
+                  n_embd, m.ffn_h, m.moe_logits, stream);
+  hip::LaunchRouterSelect(m.moe_logits,
+                          static_cast<const float*>(dev(layer.exp_probs_b)),
+                          c.n_expert, c.n_group, c.n_group_used, c.n_expert_used,
+                          c.expert_weights_scale, m.moe_ids, m.moe_weights, stream);
+  hip::LaunchMoeGather(dev(layer.gate_exps), Storage(layer.gate_exps.type),
+                       dev(layer.up_exps), Storage(layer.up_exps.type),
+                       dev(layer.down_exps), Storage(layer.down_exps.type), n_embd,
+                       c.n_ff_exp, m.ffn_h, m.moe_ids, m.moe_weights,
+                       c.n_expert_used, m.x, m.expert_gate, m.expert_up,
+                       m.expert_down, stream);
+  hip::LaunchFfn(dev(layer.gate_shexp), Storage(layer.gate_shexp.type),
+                 dev(layer.up_shexp), Storage(layer.up_shexp.type),
+                 dev(layer.down_shexp), Storage(layer.down_shexp.type), n_embd,
+                 c.n_ff_shexp, m.ffn_h, 1.0f, m.x, m.expert_gate, m.expert_up,
+                 m.expert_down, stream);
+
+  hip::LaunchRmsNorm(m.x, static_cast<const float*>(dev(layer.nextn_shared_head_norm)),
+                     m.h, 1, n_embd, eps, stream);
+  hip::LaunchGemv(dev(weights.output), Storage(weights.output.type), c.n_vocab,
+                  n_embd, m.h, m.logits, stream);
+  hip::LaunchArgmax(m.logits, c.n_vocab, m.argmax, stream);
+  const hipError_t status = hipStreamSynchronize(stream);
+  if (status != hipSuccess) {
+    if (error != nullptr) {
+      *error = std::string("engine: MTP forward failed: ") + hipGetErrorString(status);
     }
     return false;
   }

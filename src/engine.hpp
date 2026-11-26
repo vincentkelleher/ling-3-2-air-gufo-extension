@@ -37,6 +37,12 @@ class Engine {
   [[nodiscard]] bool ForwardToken(std::int32_t token, std::uint32_t position,
                                   std::string* error);
 
+  /// MTP: predicts the token after `token` given the base model's final hidden
+  /// state (the one produced by the last ForwardToken). Mirrors llama.cpp's
+  /// graph_mtp: eh_proj(concat(token embedding, hidden)) -> block 42 -> head.
+  [[nodiscard]] bool ForwardMtp(std::int32_t token, std::uint32_t position,
+                                std::string* error);
+
   /// Copies the embedding row the first step would compute (debug/test hook).
   void DebugEmbedding(std::int32_t token, float* host_row);
 
