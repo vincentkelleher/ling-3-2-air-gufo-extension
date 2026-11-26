@@ -235,3 +235,24 @@ stage, exactly as the nump verification was done for the single-token path --
 embeddings (done), then one KDA block's three projections with the GEMM output
 compared against three GEMVs on the same rows, then conv, and so on. Each step is a
 five-minute check with an exact equality, instead of a crash after 250 lines.
+
+### Chunk path stages 1-2 verified, 2026-11-27
+
+Two stages are now checked by the engine itself and printed by
+`tests/forward_test.cpp` with `LING3_CHUNK_STAGE1=1`:
+
+| stage | check | worst diff |
+| --- | --- | --- |
+| 1 | M-row RMSNorm vs a host recomputation from the same embeddings and block 0's weight | 1.4e-07 |
+| 2 | batched projection (`LaunchGemm` over M rows) vs per-row `LaunchGemv` on the same rows | 2.98e-08 |
+
+So the chunk buffers, the row indexing and the GEMM wiring are right for the
+dense front of a block. Also found while reviewing the buffers: `bk` must hold
+`kda_inner` per row (4096) for KDA blocks even though the MLA branch needs only
+576, so it is sized for the larger of the two -- an overflow there would have been
+the next fault after the null `mla_out` one.
+
+The remaining unverified part is the per-token loop (conv, delta, MLA attention)
+and the MoE/shared-expert tail. Stage 3 should therefore be: block 0 only, chunked,
+with `m.bx` dumped and compared against the numpy block-0 reference already built
+for the single-token path (which matched at 7e-07).

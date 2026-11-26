@@ -164,7 +164,10 @@ int main(int argc, char** argv) {
       }
     }
     std::printf("chunk stage1: %zu rows, norm worst abs diff %.3g\n", rows, worst);
-    return worst <= 1e-5 ? 0 : 1;
+    const float projection = engine->DebugChunkProjectionDiff(rows);
+    std::printf("chunk stage2: batched projection vs per-row GEMV worst abs diff %.3g\n",
+                projection);
+    return (worst <= 1e-5 && projection <= 1e-4) ? 0 : 1;
   }
 
   std::int32_t token = use_prompt ? prompt_tokens.front() : 156891;

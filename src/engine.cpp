@@ -94,6 +94,15 @@ struct Engine::Impl {
   float* base_hidden{nullptr};
   float* bx{nullptr};
   float* bh{nullptr};
+  float* bq{nullptr};
+  float* bk{nullptr};
+  float* bv{nullptr};
+  float* bgated{nullptr};
+  float* battn{nullptr};
+  float* bffnh{nullptr};
+  float* bffa{nullptr};
+  float* bffb{nullptr};
+  float* bffout{nullptr};
   hipStream_t queue{nullptr};
   float* kernel_debug{nullptr};
 
@@ -307,7 +316,13 @@ std::unique_ptr<Engine> Engine::Create(const core::GgufReader& reader,
       alloc_int(&m.moe_ids, config.n_expert_used) &&
       alloc(&m.moe_weights, config.n_expert_used) && alloc_int(&m.argmax, 1) &&
       alloc(&m.kernel_debug, 8 * kda_dim) &&
-      alloc(&m.bx, 32 * n_embd) && alloc(&m.bh, 32 * n_embd);
+      alloc(&m.bx, 32 * n_embd) && alloc(&m.bh, 32 * n_embd) &&
+      alloc(&m.bq, 32 * q_dim) &&
+      alloc(&m.bk, 32 * (kda_inner > kv_dim ? kda_inner : kv_dim)) &&
+      alloc(&m.bv, 32 * kda_inner) && alloc(&m.bgated, 32 * q_dim) &&
+      alloc(&m.battn, 32 * n_embd) && alloc(&m.bffnh, 32 * n_embd) &&
+      alloc(&m.bffa, 32 * config.n_ff) && alloc(&m.bffb, 32 * config.n_ff) &&
+      alloc(&m.bffout, 32 * n_embd);
   if (!ok) {
     return fail("engine: device scratch allocation failed");
   }
@@ -836,6 +851,33 @@ void Engine::DebugChunkStage1(const std::int32_t* tokens, std::size_t count,
   hipStreamSynchronize(m.queue);
   hipMemcpy(host_x, m.bx, rows * n_embd * sizeof(float), hipMemcpyDeviceToHost);
   hipMemcpy(host_h, m.bh, rows * n_embd * sizeof(float), hipMemcpyDeviceToHost);
+}
+
+float Engine::DebugChunkProjectionDiff(std::size_t rows) {
+  Impl& m = *impl_;
+  const Ling3Config& c = m.config;
+  const std::size_t n_embd = c.n_embd;
+  const std::size_t inner = c.KdaInner();
+  const auto& layer = m.weights.layers[0];
+  // Reuse whatever the chunk buffer already holds as the input rows; the caller
+  // fills it through DebugChunkStage1.
+  hip::LaunchGemm(m.Dev(layer.kda_q), Storage(layer.kda_q.type), inner, n_embd, m.bx,
+                  rows, n_embd, m.bq, inner, m.queue);
+  std::vector<float> batched(rows * inner), single(inner);
+  hipStreamSynchronize(m.queue);
+  hipMemcpy(batched.data(), m.bq, rows * inner * sizeof(float), hipMemcpyDeviceToHost);
+  float worst = 0.0f;
+  for (std::size_t i = 0; i < rows; ++i) {
+    hip::LaunchGemv(m.Dev(layer.kda_q), Storage(layer.kda_q.type), inner, n_embd,
+                    m.bx + i * n_embd, m.k, m.queue);
+    hipStreamSynchronize(m.queue);
+    hipMemcpy(single.data(), m.k, inner * sizeof(float), hipMemcpyDeviceToHost);
+    for (std::size_t j = 0; j < inner; ++j) {
+      const float diff = std::fabs(batched[i * inner + j] - single[j]);
+      worst = diff > worst ? diff : worst;
+    }
+  }
+  return worst;
 }
 
 void Engine::DebugEmbedding(std::int32_t token, float* host_row) {

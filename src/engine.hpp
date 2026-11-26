@@ -42,6 +42,11 @@ class Engine {
   void DebugChunkStage1(const std::int32_t* tokens, std::size_t count, float* host_x,
                         float* host_h);
 
+  /// Chunked-path stage 2 (debug): projects block 0's KDA query both ways, batched
+  /// through the GEMM and per row through the GEMV, and returns the largest
+  /// absolute difference between the two.
+  float DebugChunkProjectionDiff(std::size_t rows);
+
   /// MTP: predicts the token after `token` given the base model's final hidden
   /// state (the one produced by the last ForwardToken). Mirrors llama.cpp's
   /// graph_mtp: eh_proj(concat(token embedding, hidden)) -> block 42 -> head.
