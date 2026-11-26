@@ -32,7 +32,35 @@ __global__ void BuildExpertListsKernel(const std::int32_t* ids, int pairs,
     atomicAdd(&counts[expert], 1);
   } else {
     const int slot = atomicAdd(&cursor[expert], 1);
-    token_slots[offsets[expert] + slot] = token;
+    token_slots[offsets[expert] + slot] = p;  // pair index: token*top_k + k
+  }
+}
+
+__global__ void GatherRowsKernel(const float* src, const std::int32_t* indices,
+                                int count, int width, float* dst, int divisor) {
+  const int row = blockIdx.y;
+  if (row >= count) {
+    return;
+  }
+  const int from = divisor > 1 ? indices[row] / divisor : indices[row];
+  for (int i = blockIdx.x * blockDim.x + threadIdx.x; i < width; i += blockDim.x * gridDim.x) {
+    dst[static_cast<std::size_t>(row) * width + i] =
+        src[static_cast<std::size_t>(from) * width + i];
+  }
+}
+
+__global__ void ScatterAddKernel(float* dst, const std::int32_t* indices,
+                                 const float* weight_table, int count, int width,
+                                 const float* src, int divisor) {
+  const int row = blockIdx.y;
+  if (row >= count) {
+    return;
+  }
+  const int to = divisor > 1 ? indices[row] / divisor : indices[row];
+  const float weight = divisor > 1 ? weight_table[indices[row]] : weight_table[row];
+  for (int i = blockIdx.x * blockDim.x + threadIdx.x; i < width; i += blockDim.x * gridDim.x) {
+    atomicAdd(&dst[static_cast<std::size_t>(to) * width + i],
+              weight * src[static_cast<std::size_t>(row) * width + i]);
   }
 }
 
@@ -167,7 +195,9 @@ void LaunchBuildExpertLists(const std::int32_t* ids, std::size_t tokens,
                             std::size_t top_k, std::size_t n_expert,
                             std::int32_t* counts, std::int32_t* cursor,
                             std::int32_t* offsets, std::int32_t* token_slots,
-                            hipStream_t stream) {
+                            hipStream_t stream,
+                            std::vector<std::int32_t>* host_counts,
+                            std::vector<std::int32_t>* host_offsets) {
   const int pairs = static_cast<int>(tokens * top_k);
   const int blocks = (pairs + kThreads - 1) / kThreads;
 
@@ -177,22 +207,47 @@ void LaunchBuildExpertLists(const std::int32_t* ids, std::size_t tokens,
       cursor, offsets, token_slots, /*scatter=*/0);
 
   // Prefix sum on the host: 512 entries, and it keeps the order deterministic.
-  std::vector<std::int32_t> host_counts(n_expert);
-  hipMemcpyAsync(host_counts.data(), counts, n_expert * sizeof(std::int32_t),
+  std::vector<std::int32_t> host_counts_out(n_expert);
+  hipMemcpyAsync(host_counts_out.data(), counts, n_expert * sizeof(std::int32_t),
                  hipMemcpyDeviceToHost, stream);
   hipStreamSynchronize(stream);
-  std::vector<std::int32_t> host_offsets(n_expert);
+  std::vector<std::int32_t> offsets_out(n_expert);
   std::int32_t running = 0;
   for (std::size_t e = 0; e < n_expert; ++e) {
-    host_offsets[e] = running;
-    running += host_counts[e];
+    offsets_out[e] = running;
+    running += host_counts_out[e];
   }
-  hipMemcpyAsync(offsets, host_offsets.data(), n_expert * sizeof(std::int32_t),
+  if (host_counts != nullptr) *host_counts = host_counts_out;
+  if (host_offsets != nullptr) *host_offsets = offsets_out;
+  hipMemcpyAsync(offsets, offsets_out.data(), n_expert * sizeof(std::int32_t),
                  hipMemcpyHostToDevice, stream);
   hipMemsetAsync(cursor, 0, n_expert * sizeof(std::int32_t), stream);
   BuildExpertListsKernel<<<blocks, kThreads, 0, stream>>>(
       ids, pairs, static_cast<int>(top_k), static_cast<int>(n_expert), counts,
       cursor, offsets, token_slots, /*scatter=*/1);
+}
+
+void LaunchGatherRows(const float* src, const std::int32_t* indices,
+                      std::size_t count, std::size_t width, float* dst,
+                      hipStream_t stream, std::size_t divisor) {
+  if (count == 0) return;
+  const dim3 grid((static_cast<unsigned>(width) + kThreads - 1) / kThreads,
+                  static_cast<unsigned>(count));
+  GatherRowsKernel<<<grid, kThreads, 0, stream>>>(
+      src, indices, static_cast<int>(count), static_cast<int>(width), dst,
+      static_cast<int>(divisor));
+}
+
+void LaunchScatterAdd(float* dst, const std::int32_t* indices,
+                      const float* weight_table, std::size_t count,
+                      std::size_t width, const float* src, hipStream_t stream,
+                      std::size_t divisor) {
+  if (count == 0) return;
+  const dim3 grid((static_cast<unsigned>(width) + kThreads - 1) / kThreads,
+                  static_cast<unsigned>(count));
+  ScatterAddKernel<<<grid, kThreads, 0, stream>>>(
+      dst, indices, weight_table, static_cast<int>(count), static_cast<int>(width),
+      src, static_cast<int>(divisor));
 }
 
 void LaunchMoeGather(const void* gate_exps, StorageType gate_type,

@@ -387,6 +387,34 @@ __global__ void GemvExpertsKernel(const std::uint8_t* weights,
 /// weights stop being read once per token.
 constexpr int kMaxGemmBatch = 8;
 
+// Prepared activations for the batched K-quant GEMM: one int8 value and one
+// 256-block scale per token. Quantizing inside the weight loop cost 5x.
+__device__ signed char g_gemm_q[8 * 8192];
+__device__ float g_gemm_s[8 * 32];
+
+__global__ void QuantizeGemmActivationsKernel(const float* x, int batch, int cols,
+                                              int x_stride) {
+  const int b = blockIdx.x * blockDim.x + threadIdx.x;  // 256-block index
+  const int m = blockIdx.y;
+  if (m >= batch || b >= cols / 256) {
+    return;
+  }
+  const float* row = x + static_cast<std::size_t>(m) * x_stride + b * 256;
+  float amax = 0.0f;
+  for (int j = 0; j < 256; ++j) {
+    const float v = fabsf(row[j]);
+    amax = v > amax ? v : amax;
+  }
+  const float scale = amax > 0.0f ? amax / 127.0f : 1.0f;
+  const float inverse = 1.0f / scale;
+  g_gemm_s[m * 32 + b] = scale;
+  for (int j = 0; j < 256; ++j) {
+    int a = __float2int_rn(row[j] * inverse);
+    a = a > 127 ? 127 : (a < -127 ? -127 : a);
+    g_gemm_q[m * 8192 + b * 256 + j] = static_cast<signed char>(a);
+  }
+}
+
 template <int TYPE>
 __global__ void GemmKernel(const std::uint8_t* weights, const float* x, float* y,
                            int rows, int cols, int row_bytes, int batch,
@@ -420,6 +448,62 @@ __global__ void GemmKernel(const std::uint8_t* weights, const float* x, float* y
           HalfToFloat(blocks[b].d) * static_cast<float>(blocks[b].qs[k % 32]);
       for (int m = 0; m < batch; ++m) {
         accumulator[m] += weight * x[m * x_stride + k];
+      }
+    }
+  } else if constexpr (TYPE == kQ4K) {
+    // Same arithmetic as the per-row Q4_K dot: per 32-value group, the weight is
+    // d*sc*code - dmin*m, and the activations are quantized per 256-block.
+    const auto* blocks = reinterpret_cast<const BlockQ4K*>(weight_row);
+    for (int b = threadIdx.x; b < cols / 256; b += blockDim.x) {
+      const float d = HalfToFloat(blocks[b].d);
+      const float dmin = HalfToFloat(blocks[b].dmin);
+      for (int g = 0; g < 8; ++g) {
+        float sc = 0.0f;
+        float m_min = 0.0f;
+        Q4ScaleMin(g, blocks[b].scales, sc, m_min);
+        const float weight_scale = d * sc;
+        const float weight_min = dmin * m_min;
+        for (int i = 0; i < 32; ++i) {
+          const int j = b * 256 + g * 32 + i;
+          const int code = Q4Code(blocks[b], g * 32 + i);
+          const float weight = weight_scale * static_cast<float>(code) - weight_min;
+          for (int m = 0; m < batch; ++m) {
+            accumulator[m] += weight *
+                static_cast<float>(static_cast<int>(g_gemm_q[m * 8192 + j]));
+          }
+        }
+      }
+      for (int m = 0; m < batch; ++m) {
+        accumulator[m] *= g_gemm_s[m * 32 + b];
+      }
+    }
+  } else if constexpr (TYPE == kQ6K) {
+    const auto* blocks = reinterpret_cast<const BlockQ6K*>(weight_row);
+    for (int b = threadIdx.x; b < cols / 256; b += blockDim.x) {
+      const float d = HalfToFloat(blocks[b].d);
+      for (int g = 0; g < 16; ++g) {
+        const int half = g / 8;
+        const int segment = (g % 8) / 2;
+        const int lane_base = (g * 16) % 32;
+        const std::uint8_t* ql = blocks[b].ql + half * 64 + (segment % 2) * 32;
+        const int ql_shift = (segment / 2) * 4;
+        const int qh_shift = segment * 2;
+        const float group_scale = d * static_cast<float>(blocks[b].scales[g]);
+        for (int i = 0; i < 16; ++i) {
+          const int j = b * 256 + g * 16 + i;
+          const int lane = lane_base + i;
+          const int low = (ql[lane] >> ql_shift) & 0x0F;
+          const int high = (blocks[b].qh[half * 32 + lane] >> qh_shift) & 0x03;
+          const int code = ((high << 4) | low) - 32;
+          const float weight = group_scale * static_cast<float>(code);
+          for (int m = 0; m < batch; ++m) {
+            accumulator[m] += weight *
+                static_cast<float>(static_cast<int>(g_gemm_q[m * 8192 + j]));
+          }
+        }
+      }
+      for (int m = 0; m < batch; ++m) {
+        accumulator[m] *= g_gemm_s[m * 32 + b];
       }
     }
   } else {
@@ -752,6 +836,15 @@ void LaunchGemm(const void* weights, StorageType type, std::size_t rows,
     const int batch_int = static_cast<int>(slice);
     x = x_block + offset * x_stride;
     y = y_block + offset * y_stride;
+    if (type == kQ4K || type == kQ6K) {
+      // Quantize this tile immediately before its GEMM: the prepared buffers hold
+      // kMaxGemmBatch tokens, and same-stream ordering makes the dependency hold
+      // without a synchronisation.
+      const dim3 grid(static_cast<unsigned>((cols / 256 + 31) / 32),
+                      static_cast<unsigned>(slice));
+      QuantizeGemmActivationsKernel<<<grid, 32, 0, stream>>>(
+          x, batch_int, static_cast<int>(cols), static_cast<int>(x_stride));
+    }
   switch (type) {
     case kF32:
       GemmKernel<kF32><<<rows_int, kThreads, 0, stream>>>(
@@ -761,8 +854,16 @@ void LaunchGemm(const void* weights, StorageType type, std::size_t rows,
       GemmKernel<kQ8_0><<<rows_int, kThreads, 0, stream>>>(
           data, x, y, rows_int, cols_int, row_bytes, batch_int, x_int, y_int);
       break;
+    case kQ4K:
+      GemmKernel<kQ4K><<<rows_int, kThreads, 0, stream>>>(
+          data, x, y, rows_int, cols_int, row_bytes, batch_int, x_int, y_int);
+      break;
+    case kQ6K:
+      GemmKernel<kQ6K><<<rows_int, kThreads, 0, stream>>>(
+          data, x, y, rows_int, cols_int, row_bytes, batch_int, x_int, y_int);
+      break;
     default:
-      break;  // K-quant batching is not implemented yet (notes/prefill-design.md)
+      break;  // Q5_K batching is not implemented yet (notes/prefill-design.md)
   }
   }
 }

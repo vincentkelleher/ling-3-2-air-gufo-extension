@@ -104,6 +104,17 @@ struct Engine::Impl {
   float* bffb{nullptr};
   float* bffout{nullptr};
   static constexpr int kMaxChunk = 256;
+  float* brooter{nullptr};
+  std::int32_t* brouter_ids{nullptr};
+  float* brouter_w{nullptr};
+  std::int32_t* bslots{nullptr};
+  std::int32_t* bcounts{nullptr};
+  std::int32_t* boffsets{nullptr};
+  std::int32_t* bcursor{nullptr};
+  float* bgather{nullptr};
+  float* bgate{nullptr};
+  float* bup{nullptr};
+  float* bout{nullptr};
   hipStream_t queue{nullptr};
   float* kernel_debug{nullptr};
 
@@ -323,7 +334,18 @@ std::unique_ptr<Engine> Engine::Create(const core::GgufReader& reader,
       alloc(&m.bv, Impl::kMaxChunk * kda_inner) && alloc(&m.bgated, Impl::kMaxChunk * q_dim) &&
       alloc(&m.battn, Impl::kMaxChunk * n_embd) && alloc(&m.bffnh, Impl::kMaxChunk * n_embd) &&
       alloc(&m.bffa, Impl::kMaxChunk * config.n_ff) && alloc(&m.bffb, Impl::kMaxChunk * config.n_ff) &&
-      alloc(&m.bffout, Impl::kMaxChunk * n_embd);
+      alloc(&m.bffout, Impl::kMaxChunk * n_embd) &&
+      alloc(&m.brooter, Impl::kMaxChunk * config.n_expert) &&
+      alloc_int(&m.brouter_ids, Impl::kMaxChunk * config.n_expert_used) &&
+      alloc(&m.brouter_w, Impl::kMaxChunk * config.n_expert_used) &&
+      alloc_int(&m.bslots, Impl::kMaxChunk * config.n_expert_used) &&
+      alloc_int(&m.bcounts, config.n_expert) &&
+      alloc_int(&m.boffsets, config.n_expert) &&
+      alloc_int(&m.bcursor, config.n_expert) &&
+      alloc(&m.bgather, Impl::kMaxChunk * n_embd) &&
+      alloc(&m.bgate, Impl::kMaxChunk * config.n_ff_exp) &&
+      alloc(&m.bup, Impl::kMaxChunk * config.n_ff_exp) &&
+      alloc(&m.bout, Impl::kMaxChunk * n_embd);
   if (!ok) {
     return fail("engine: device scratch allocation failed");
   }
@@ -877,22 +899,74 @@ bool Engine::PrefillChunk(const std::int32_t* tokens, std::size_t count,
         hip::LaunchAxpy(m.bx + row, m.bffout + row, 1.0f, n_embd, stream);
       }
     } else {
+      // The grouped schedule is correct but slower until the K-quant GEMM is as
+      // fast as the GEMV path, so it stays opt-in (notes/prefill-design.md).
+      if (M > 8 && std::getenv("LING3_GROUPED_MOE") != nullptr) {
+      // Grouped MoE: one batched router, then each expert runs once over all the
+      // tokens that selected it, so its weights are read once per chunk instead
+      // of once per token (notes/prefill-design.md).
+      hip::LaunchGemm(dev(layer.gate_inp), Storage(layer.gate_inp.type), c.n_expert,
+                      n_embd, m.bffnh, M, n_embd, m.brooter, c.n_expert, stream);
       for (int i = 0; i < M; ++i) {
-        const std::size_t row = static_cast<std::size_t>(i) * n_embd;
-        hipMemcpyAsync(m.ffn_h, m.bffnh + row, n_embd * sizeof(float),
-                       hipMemcpyDeviceToDevice, stream);
-        hip::LaunchGemv(dev(layer.gate_inp), Storage(layer.gate_inp.type), c.n_expert,
-                        n_embd, m.ffn_h, m.moe_logits, stream);
-        hip::LaunchRouterSelect(m.moe_logits,
+        hip::LaunchRouterSelect(m.brooter + static_cast<std::size_t>(i) * c.n_expert,
                                 static_cast<const float*>(dev(layer.exp_probs_b)),
-                                c.n_expert, c.n_group, c.n_group_used, c.n_expert_used,
-                                c.expert_weights_scale, m.moe_ids, m.moe_weights, stream);
-        hip::LaunchMoeGather(dev(layer.gate_exps), Storage(layer.gate_exps.type),
-                             dev(layer.up_exps), Storage(layer.up_exps.type),
-                             dev(layer.down_exps), Storage(layer.down_exps.type), n_embd,
-                             c.n_ff_exp, m.ffn_h, m.moe_ids, m.moe_weights,
-                             c.n_expert_used, m.bx + row, m.expert_gate, m.expert_up,
-                             m.expert_down, stream);
+                                c.n_expert, c.n_group, c.n_group_used,
+                                c.n_expert_used, c.expert_weights_scale,
+                                m.brouter_ids + static_cast<std::size_t>(i) * c.n_expert_used,
+                                m.brouter_w + static_cast<std::size_t>(i) * c.n_expert_used,
+                                stream);
+      }
+      std::vector<std::int32_t> host_counts, host_offsets;
+      hip::LaunchBuildExpertLists(m.brouter_ids, M, c.n_expert_used, c.n_expert,
+                                  m.bcounts, m.bcursor, m.boffsets, m.bslots, stream,
+                                  &host_counts, &host_offsets);
+      const StorageType gate_type = Storage(layer.gate_exps.type);
+      const StorageType up_type = Storage(layer.up_exps.type);
+      const StorageType down_type = Storage(layer.down_exps.type);
+      const std::size_t gate_row = hip::RowBytes(gate_type, n_embd);
+      const std::size_t up_row = hip::RowBytes(up_type, n_embd);
+      const std::size_t down_row = hip::RowBytes(down_type, c.n_ff_exp);
+      const auto* gate_base = static_cast<const char*>(dev(layer.gate_exps));
+      const auto* up_base = static_cast<const char*>(dev(layer.up_exps));
+      const auto* down_base = static_cast<const char*>(dev(layer.down_exps));
+      for (std::size_t e = 0; e < c.n_expert; ++e) {
+        const std::size_t k = static_cast<std::size_t>(host_counts[e]);
+        if (k == 0) {
+          continue;
+        }
+        const std::int32_t* slots = m.bslots + host_offsets[e];
+        hip::LaunchGatherRows(m.bffnh, slots, k, n_embd, m.bgather, stream,
+                              c.n_expert_used);
+        hip::LaunchGemm(gate_base + e * c.n_ff_exp * gate_row, gate_type, c.n_ff_exp,
+                        n_embd, m.bgather, k, n_embd, m.bgate, c.n_ff_exp, stream);
+        hip::LaunchGemm(up_base + e * c.n_ff_exp * up_row, up_type, c.n_ff_exp, n_embd,
+                        m.bgather, k, n_embd, m.bup, c.n_ff_exp, stream);
+        hip::LaunchSilu(m.bgate, m.bgate, k * c.n_ff_exp, stream);
+        hip::LaunchMulInto(m.bgate, m.bup, m.bgate, k * c.n_ff_exp, stream);
+        hip::LaunchGemm(down_base + e * n_embd * down_row, down_type, n_embd, c.n_ff_exp,
+                        m.bgate, k, c.n_ff_exp, m.bout, n_embd, stream);
+        hip::LaunchScatterAdd(m.bx, slots, m.brouter_w, k, n_embd, m.bout, stream,
+                              c.n_expert_used);
+      }
+      } else {
+        for (int i = 0; i < M; ++i) {
+          const std::size_t row = static_cast<std::size_t>(i) * n_embd;
+          hipMemcpyAsync(m.ffn_h, m.bffnh + row, n_embd * sizeof(float),
+                         hipMemcpyDeviceToDevice, stream);
+          hip::LaunchGemv(dev(layer.gate_inp), Storage(layer.gate_inp.type), c.n_expert,
+                          n_embd, m.ffn_h, m.moe_logits, stream);
+          hip::LaunchRouterSelect(m.moe_logits,
+                                  static_cast<const float*>(dev(layer.exp_probs_b)),
+                                  c.n_expert, c.n_group, c.n_group_used, c.n_expert_used,
+                                  c.expert_weights_scale, m.moe_ids, m.moe_weights,
+                                  stream);
+          hip::LaunchMoeGather(dev(layer.gate_exps), Storage(layer.gate_exps.type),
+                               dev(layer.up_exps), Storage(layer.up_exps.type),
+                               dev(layer.down_exps), Storage(layer.down_exps.type),
+                               n_embd, c.n_ff_exp, m.ffn_h, m.moe_ids, m.moe_weights,
+                               c.n_expert_used, m.bx + row, m.expert_gate, m.expert_up,
+                               m.expert_down, stream);
+        }
       }
       hip::LaunchGemm(dev(layer.gate_shexp), Storage(layer.gate_shexp.type),
                       c.n_ff_shexp, n_embd, m.bffnh, M, n_embd, m.bffa, c.n_ff_shexp,

@@ -301,3 +301,35 @@ That is the plateau the profile predicted for batching only the dense stages:
 Q8_0 work is 34 % of a pass, and 2.9x on that share gives ~1.3x overall. The 4-8x
 needs the routed MoE grouped by expert across the chunk (25 % + 17 % of the pass),
 which is the next piece.
+
+### Grouped MoE: implemented correctly, still slower than per-token (2026-11-27)
+
+Grouped MoE is in the chunked path behind `LING3_GROUPED_MOE`. It is *correct* (the
+same argmax at every chunk size after the K-quant GEMM existed -- before that it
+was silently wrong because `LaunchGemm` dropped K-quant launches, which is exactly
+the class of bug the operator suite exists to catch and did not, since no test
+covered a K-quant GEMM).
+
+What was built and kept:
+
+- `GemmKernel` branches for Q4_K and Q6_K with the same per-group arithmetic as the
+  per-row dot (`d*sc*code - dmin*m`, prepared int8 activations per 256-block).
+- Prepared activations quantized per 8-token tile, immediately before its GEMM;
+  quantizing the whole chunk overflowed the 8-token buffer, and quantizing inside
+  the weight loop cost 5x.
+- `LaunchGatherRows`/`LaunchScatterAdd` with pair-index slots, plus host counts and
+  offsets from `LaunchBuildExpertLists`.
+
+Measured, 104-token prompt, all with argmax 678:
+
+| path | rate |
+| --- | --- |
+| sequential | 12.48 tok/s |
+| chunked, per-token MoE (default) | **16.20 tok/s** |
+| chunked, grouped MoE | 6.5-7.7 tok/s |
+
+Grouped MoE loses because the host loops over all 512 experts per block (most hold
+one or two tokens at this chunk size) and the naive K-quant GEMM is several times
+slower per launch than the tuned GEMV. To make it pay it needs (a) a K-quant GEMM
+with the GEMV's efficiency, and (b) chunk sizes where experts actually collect
+tokens (M in the hundreds). Until then the default stays per-token.

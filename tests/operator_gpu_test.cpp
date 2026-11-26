@@ -1076,12 +1076,11 @@ int main() {
       if (counts[e] != expected) ok = false;
       if (offsets[e] != total) ok = false;
       for (int i = 0; i < counts[e]; ++i) {
-        const int slot = slots[offsets[e] + i];
-        bool found = false;
-        for (int k = 0; k < top_k; ++k) {
-          if (ids[slot * top_k + k] == e) found = true;
-        }
-        if (!found) ok = false;
+        // Slots hold pair indices (token * top_k + k), so the pair must name this
+        // expert and the token must be inside the batch.
+        const int pair = slots[offsets[e] + i];
+        if (pair < 0 || pair >= tokens * top_k) ok = false;
+        if (ids[pair] != e) ok = false;
       }
       total += counts[e];
     }
@@ -1089,6 +1088,50 @@ int main() {
     Check(ok, "expert list schedule", ok ? 0.0 : 1.0, 0.0);
     HIP_CHECK(hipFree(dc)); HIP_CHECK(hipFree(dcur)); HIP_CHECK(hipFree(doff));
     HIP_CHECK(hipFree(ds)); HIP_CHECK(hipFree(di));
+  }
+
+  // Gather/scatter primitives for grouped MoE.
+  {
+    const int count = 3, width = 4, rows = 4;
+    std::vector<float> src(rows * width), dst(rows * width, 0.0f), gathered(count * width);
+    for (std::size_t i = 0; i < src.size(); ++i) src[i] = static_cast<float>(i) + 1.0f;
+    std::vector<std::int32_t> indices{2, 0, 1};
+    std::vector<float> weights{1.0f, 2.0f, 3.0f};
+    float* ds = nullptr;
+    float* dg = nullptr;
+    float* dsc = nullptr;
+    std::int32_t* di = nullptr;
+    float* dw = nullptr;
+    HIP_CHECK(hipMalloc(&ds, src.size() * sizeof(float)));
+    HIP_CHECK(hipMalloc(&dg, gathered.size() * sizeof(float)));
+    HIP_CHECK(hipMalloc(&dsc, dst.size() * sizeof(float)));
+    HIP_CHECK(hipMalloc(&di, count * sizeof(std::int32_t)));
+    HIP_CHECK(hipMalloc(&dw, count * sizeof(float)));
+    HIP_CHECK(hipMemcpy(ds, src.data(), src.size() * sizeof(float), hipMemcpyHostToDevice));
+    HIP_CHECK(hipMemset(dsc, 0, dst.size() * sizeof(float)));
+    HIP_CHECK(hipMemcpy(di, indices.data(), count * sizeof(std::int32_t), hipMemcpyHostToDevice));
+    HIP_CHECK(hipMemcpy(dw, weights.data(), count * sizeof(float), hipMemcpyHostToDevice));
+    hipk::LaunchGatherRows(ds, di, count, width, dg, 0);
+    hipk::LaunchScatterAdd(dsc, di, dw, count, width, ds, 0);
+    HIP_CHECK(hipDeviceSynchronize());
+    HIP_CHECK(hipMemcpy(gathered.data(), dg, gathered.size() * sizeof(float), hipMemcpyDeviceToHost));
+    HIP_CHECK(hipMemcpy(dst.data(), dsc, dst.size() * sizeof(float), hipMemcpyDeviceToHost));
+    bool ok = true;
+    for (int r = 0; r < count; ++r) {
+      for (int c = 0; c < width; ++c) {
+        const float expected = src[indices[r] * width + c];
+        if (gathered[r * width + c] != expected) ok = false;
+      }
+    }
+    for (int r = 0; r < count; ++r) {
+      for (int c = 0; c < width; ++c) {
+        const float expected = weights[r] * src[r * width + c];
+        if (std::fabs(dst[indices[r] * width + c] - expected) > 1e-6f) ok = false;
+      }
+    }
+    Check(ok, "gather/scatter rows", ok ? 0.0 : 1.0, 0.0);
+    HIP_CHECK(hipFree(ds)); HIP_CHECK(hipFree(dg)); HIP_CHECK(hipFree(dsc));
+    HIP_CHECK(hipFree(di)); HIP_CHECK(hipFree(dw));
   }
 
   std::printf("operators: %d failures\n", Failures);

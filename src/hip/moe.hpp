@@ -30,7 +30,20 @@ void LaunchBuildExpertLists(const std::int32_t* ids, std::size_t tokens,
                             std::size_t top_k, std::size_t n_expert,
                             std::int32_t* counts, std::int32_t* cursor,
                             std::int32_t* offsets, std::int32_t* token_slots,
-                            hipStream_t stream);
+                            hipStream_t stream,
+                            std::vector<std::int32_t>* host_counts = nullptr,
+                            std::vector<std::int32_t>* host_offsets = nullptr);
+
+/// `dst[i][*] = src[indices[i]][*]` for `count` rows of `width` floats.
+void LaunchGatherRows(const float* src, const std::int32_t* indices,
+                      std::size_t count, std::size_t width, float* dst,
+                      hipStream_t stream, std::size_t divisor = 1);
+
+/// `dst[indices[i]][*] += weight[i] * src[i][*]` for `count` rows of `width`.
+void LaunchScatterAdd(float* dst, const std::int32_t* indices,
+                      const float* weight_table, std::size_t count,
+                      std::size_t width, const float* src, hipStream_t stream,
+                      std::size_t divisor = 1);
 
 /// One SwiGLU FFN over `n_embd -> n_ff -> n_embd`, added into `out` with
 /// `weight`: `out += weight * down(silu(gate(x)) * up(x))`.
