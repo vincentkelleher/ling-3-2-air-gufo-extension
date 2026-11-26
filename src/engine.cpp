@@ -482,7 +482,8 @@ bool Engine::ForwardToken(std::int32_t token, std::uint32_t position,
         dump_at("/work/p_vproj_%u.bin", m.v, kda_inner, position);
       }
       hip::LaunchConv1dStep(m.q, static_cast<const float*>(dev(layer.kda_conv_q)),
-                            m.conv_state[il], kda_inner, 0, m.cq, stream);
+                            m.conv_state[il], kda_inner, 0, m.cq, stream,
+                            (il == 0 && std::getenv("LING3_DUMP") != nullptr) ? m.kernel_debug : nullptr);
       hip::LaunchSilu(m.cq, m.cq, kda_inner, stream);
       if (il == 0 && std::getenv("LING3_DUMP") != nullptr) {
         std::vector<float> host(kda_inner);
@@ -494,10 +495,12 @@ bool Engine::ForwardToken(std::int32_t token, std::uint32_t position,
         }
       }
       hip::LaunchConv1dStep(m.k, static_cast<const float*>(dev(layer.kda_conv_k)),
-                            m.conv_state[il], kda_inner, 1, m.ck, stream);
+                            m.conv_state[il], kda_inner, 1, m.ck, stream,
+                            (il == 0 && std::getenv("LING3_DUMP") != nullptr) ? m.kernel_debug : nullptr);
       hip::LaunchSilu(m.ck, m.ck, kda_inner, stream);
       hip::LaunchConv1dStep(m.v, static_cast<const float*>(dev(layer.kda_conv_v)),
-                            m.conv_state[il], kda_inner, 2, m.cv, stream);
+                            m.conv_state[il], kda_inner, 2, m.cv, stream,
+                            (il == 0 && std::getenv("LING3_DUMP") != nullptr) ? m.kernel_debug : nullptr);
       hip::LaunchSilu(m.cv, m.cv, kda_inner, stream);
 
       hip::LaunchGemv(dev(layer.kda_f_a), Storage(layer.kda_f_a.type), kda_inner,

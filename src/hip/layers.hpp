@@ -19,7 +19,7 @@ namespace gufo::ext::ling3_air::hip {
 /// floats); the pointers are not offset by the caller.
 void LaunchConv1dStep(const float* x, const float* weight, float* state,
                       std::size_t channels, std::size_t slot, float* out,
-                      hipStream_t stream);
+                      hipStream_t stream, float* debug = nullptr);
 
 /// L2 normalisation over each `head_dim` slice of a `[heads][head_dim]` row:
 /// `y = x / max(||x||_2, eps)`.
