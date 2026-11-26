@@ -199,3 +199,23 @@ Behaviourally, on a red circle with a blue square and small text, this extension
 answers: "there's a large red circle, and inside it, centered, is a blue square. In
 the upper-left corner, there's small text" — where llama.cpp says "a large, solid red
 circle". Both are correct; ours names the square and the text too.
+
+## CLI image flag: open question (2026-11-27)
+
+`gufo prompt --image` does not reach the driver's image handling, while
+`tests/image_forward_test.cpp` proves the same helpers work. Facts collected:
+
+- `gufo prompt --help` lists `--image`; the CLI stores it in `options.image_paths`
+  (verified in Gufo's `src/cli/prompt/prompt.cpp`), and it accepts a nonexistent path
+  without complaint, so parsing happens.
+- The driver entry `RunLing3Prompt` calls `RunPromptLike`, and a temporary
+  `fprintf(stderr, ...)` at the top of `RunPromptLike` never printed, even though the
+  freshly installed module contains that string and `gufo diagnose` reports that exact
+  `.so` path as loaded.
+- The plain prompt path through the same function prints its own timing line, so the
+  driver is being called.
+
+The next step for whoever picks this up: run the same probe inside `RunLing3Prompt` and
+`RunLing3Chat` separately, and check whether `gufo extension install` is loading a
+different module than `diagnose` reports (for example a build-cache copy inside
+`/work/ext-build`). Until then the flag is documented as unverified.

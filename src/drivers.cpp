@@ -21,6 +21,8 @@
 
 #include "src/config.hpp"
 #include "src/engine.hpp"
+#include "src/preprocess.hpp"
+#include "src/vision.hpp"
 #include "src/text/chat_template.hpp"
 #include "src/text/tokenizer.hpp"
 #include "src/probe.hpp"
@@ -207,6 +209,125 @@ bool Generate(Loaded& model, const std::vector<text::TokenId>& prompt,
   return true;
 }
 
+namespace {
+
+/// The chat template's image spelling: one marker token per projected row, inside
+/// the vision delimiters. `` is replaced by the marker below.
+std::string VisionBlock(std::uint32_t rows) {
+  std::string block = "<|vision_start|>";
+  for (std::uint32_t i = 0; i < rows; ++i) {
+    block += "<|image_pad|>";
+  }
+  block += "<|vision_end|>";
+  return block;
+}
+
+/// Encodes every image through the mmproj and reports the row count per image.
+bool EncodeImages(const TextPromptOptions& options,
+                  std::vector<float>* rows, std::uint32_t* rows_per_image,
+                  std::string* error) {
+  if (options.vision_model_path.empty()) {
+    *error = "image input needs --mmproj (vision_model_path)";
+    return false;
+  }
+  const auto mmproj = core::GgufReader::OpenFile(options.vision_model_path, error);
+  if (!mmproj) {
+    return false;
+  }
+  const auto vision = VisionEncoder::Create(*mmproj, error);
+  if (!vision) {
+    return false;
+  }
+  *rows_per_image = vision->tokens_per_image();
+  const int side = static_cast<int>(vision->image_side());
+  const int grid = side / static_cast<int>(vision->Config().patch);
+  for (const std::string& path : options.image_paths) {
+    core::Image image;
+    try {
+      image = core::DecodeImage(core::ReadImageFile(path));
+    } catch (const std::exception& failure) {
+      *error = "cannot read " + path + ": " + failure.what();
+      return false;
+    }
+    const std::vector<float> chw = ResizeToChw(
+        image.pixels.data(), static_cast<int>(image.width),
+        static_cast<int>(image.height), side, ImageNorm{});
+    std::vector<float> encoded;
+    if (!vision->EncodeImage(chw.data(), static_cast<std::uint32_t>(grid),
+                             static_cast<std::uint32_t>(grid), &encoded, error)) {
+      return false;
+    }
+    rows->insert(rows->end(), encoded.begin(), encoded.end());
+  }
+  return true;
+}
+
+/// Generation with vision rows injected at the prompt's image markers. The trunk is
+/// the same as `Generate`; only those positions enter through an embedding instead of
+/// a token id (`Engine::ForwardEmbedding`).
+bool GenerateWithImages(Loaded& model, const std::vector<text::TokenId>& prompt,
+                        const std::vector<std::size_t>& markers,
+                        const std::vector<float>& rows, std::uint32_t row_width,
+                        const sampling::SamplingConfig& sampling, std::size_t max_tokens,
+                        const std::function<void(text::TokenId, const std::string&)>& on_token,
+                        RunResult* result, std::string* error) {
+  Engine& engine = *model.engine;
+  const auto& config = model.config;
+  std::mt19937_64 rng(sampling.seed >= 0 ? static_cast<std::uint64_t>(sampling.seed)
+                                         : std::random_device{}());
+  std::vector<float> logits(config.n_vocab);
+  if (prompt.empty()) {
+    return true;
+  }
+  const auto prefill_start = Clock::now();
+  std::size_t row = 0;
+  std::size_t marker_index = 0;
+  const std::size_t last = prompt.size() - 1;
+  for (std::size_t i = 0; i < last; ++i) {
+    const bool is_marker = marker_index < markers.size() && markers[marker_index] == i;
+    bool ok = false;
+    if (is_marker) {
+      ok = engine.ForwardEmbedding(rows.data() + row * row_width,
+                                   static_cast<std::uint32_t>(i), error);
+      ++row;
+      ++marker_index;
+    } else {
+      ok = engine.ForwardToken(static_cast<std::int32_t>(prompt[i]),
+                               static_cast<std::uint32_t>(i), error);
+    }
+    if (!ok) {
+      return false;
+    }
+  }
+  result->prompt_tokens = prompt.size();
+  result->prefill_seconds =
+      std::chrono::duration<double>(Clock::now() - prefill_start).count();
+  std::int32_t token = static_cast<std::int32_t>(prompt[last]);
+  std::size_t position = last;
+  const auto decode_start = Clock::now();
+  for (std::size_t step = 0; step < max_tokens; ++step) {
+    if (!engine.ForwardToken(token, static_cast<std::uint32_t>(position), error)) {
+      return false;
+    }
+    ++position;
+    engine.ReadLogits(logits.data());
+    token = Sample(logits, sampling, rng);
+    if (token == static_cast<std::int32_t>(model.tokenizer->Eos()) ||
+        token == 156892) {
+      break;
+    }
+    const std::string piece =
+        model.tokenizer->Decode({static_cast<text::TokenId>(token)});
+    on_token(static_cast<text::TokenId>(token), piece);
+    ++result->generated;
+  }
+  result->decode_seconds =
+      std::chrono::duration<double>(Clock::now() - decode_start).count();
+  return true;
+}
+
+}  // namespace
+
 int RunPromptLike(const TextPromptOptions& options, const core::GgufReader& reader,
                   const std::string& prompt_text) {
   Loaded model;
@@ -216,17 +337,57 @@ int RunPromptLike(const TextPromptOptions& options, const core::GgufReader& read
     return 1;
   }
   const auto thinking = options.thinking_mode().value_or(true);
-  const std::string framed = FrameSingleTurn(options.system_prompt, prompt_text, thinking,
+  std::vector<float> image_rows;
+  std::uint32_t rows_per_image = 0;
+  if (!options.image_paths.empty()) {
+    if (!EncodeImages(options, &image_rows, &rows_per_image, &error)) {
+      std::fprintf(stderr, "%s\n", error.c_str());
+      return 1;
+    }
+    std::fprintf(stderr, "encoded %zu image(s), %u rows each\n",
+                 options.image_paths.size(), rows_per_image);
+  }
+  const std::string user_text =
+      options.image_paths.empty()
+          ? prompt_text
+          : VisionBlock(rows_per_image *
+                        static_cast<std::uint32_t>(options.image_paths.size())) +
+                prompt_text;
+  const std::string framed = FrameSingleTurn(options.system_prompt, user_text, thinking,
                                              options.use_chat_template);
   const auto ids = model.tokenizer->Encode(framed, /*parse_special=*/true);
   if (options.display_prompt) {
     std::printf("%s", framed.c_str());
   }
   RunResult result;
-  const bool ok = Generate(
-      model, ids, options.sampling, options.max_tokens,
-      [](text::TokenId, const std::string& piece) { std::fputs(piece.c_str(), stdout); },
-      &result, &error);
+  bool ok = false;
+  if (options.image_paths.empty()) {
+    ok = Generate(
+        model, ids, options.sampling, options.max_tokens,
+        [](text::TokenId, const std::string& piece) { std::fputs(piece.c_str(), stdout); },
+        &result, &error);
+  } else {
+    std::vector<std::size_t> markers;
+    for (std::size_t i = 0; i < ids.size(); ++i) {
+      if (model.tokenizer->Decode({ids[i]}, /*skip_special=*/true) == "<|image_pad|>") {
+        markers.push_back(i);
+      }
+    }
+    const std::size_t expected =
+        static_cast<std::size_t>(rows_per_image) * options.image_paths.size();
+    if (markers.size() != expected) {
+      std::fprintf(stderr,
+                   "prompt has %zu image markers but %zu projected rows; the chat "
+                   "template and the vision tower disagree\n",
+                   markers.size(), expected);
+      return 1;
+    }
+    ok = GenerateWithImages(
+        model, ids, markers, image_rows, rows_per_image, options.sampling,
+        options.max_tokens,
+        [](text::TokenId, const std::string& piece) { std::fputs(piece.c_str(), stdout); },
+        &result, &error);
+  }
   std::printf("\n");
   if (!ok) {
     std::fprintf(stderr, "%s\n", error.c_str());

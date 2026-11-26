@@ -12,6 +12,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <map>
 #include <string>
 #include <vector>
 
@@ -169,40 +170,63 @@ std::unique_ptr<Engine> Engine::Create(const core::GgufReader& reader,
   // is what made an uploading engine thrash swap. tests/../tools/zerocopy_probe
   // measured 238 GB/s warm through the registered mapping versus 223 GB/s for a
   // device copy, so nothing is given up.
+  // A reader may hand back regions that start anywhere inside one mapping (Gufo's
+  // engine, for instance, registers each shard from its first tensor). hipHostRegister
+  // needs a page-aligned start and rejects the range otherwise, so align down and
+  // register each mapping once, then offset the device pointer for each region.
+  std::map<std::uintptr_t, void*> pinned;
   for (const auto& region : reader.GetMappedRegions()) {
-    void* host = const_cast<void*>(region.data);
-    const hipError_t registered =
-        hipHostRegister(host, region.size, hipHostRegisterMapped);
-    if (registered != hipSuccess) {
-      return fail(std::string("engine: cannot register a weight shard: ") +
-                  hipGetErrorString(registered));
+    const auto* data = static_cast<const std::uint8_t*>(region.data);
+    if (data == nullptr || region.size == 0) {
+      continue;
     }
+    const std::uintptr_t address = reinterpret_cast<std::uintptr_t>(data);
+    const std::uintptr_t aligned_address =
+        address & ~static_cast<std::uintptr_t>(4095);
+    const std::size_t delta = address - aligned_address;
     void* device = nullptr;
-    const hipError_t mapped = hipHostGetDevicePointer(&device, host, 0);
-    if (mapped != hipSuccess || device == nullptr) {
-      return fail(std::string("engine: cannot map a weight shard: ") +
-                  hipGetErrorString(mapped));
+    const auto existing = pinned.find(aligned_address);
+    if (existing != pinned.end()) {
+      device = existing->second;
+    } else {
+      void* host = reinterpret_cast<void*>(aligned_address);
+      const std::size_t aligned_size = delta + region.size;
+      const hipError_t registered =
+          hipHostRegister(host, aligned_size, hipHostRegisterMapped);
+      if (registered != hipSuccess) {
+        // The usual cause on this box is another process holding the GPU's GTT:
+        // a 100 GiB registration fails with EINVAL when the device is full.
+        return fail(std::string("engine: cannot register a weight shard: ") +
+                    hipGetErrorString(registered) + " (region " +
+                    std::to_string(region.size / 1048576) + " MiB at " +
+                    std::to_string(delta) + " bytes into a page)");
+      }
+      const hipError_t mapped = hipHostGetDevicePointer(&device, host, 0);
+      if (mapped != hipSuccess || device == nullptr) {
+        return fail(std::string("engine: cannot map a weight shard: ") +
+                    hipGetErrorString(mapped));
+      }
+      pinned.emplace(aligned_address, device);
     }
-    // Prove the registered range is readable end to end: sample four spots on
-    // the GPU and compare with the mapped bytes. A partially pinned range would
-    // otherwise show up much later as NaN activations.
+    // Prove the registered range is readable end to end: sample four spots on the
+    // GPU and compare with the mapped bytes. A partially pinned range would show up
+    // much later as NaN activations.
     for (const double fraction : {0.0, 0.33, 0.66, 0.999}) {
       const std::size_t offset = static_cast<std::size_t>(
           fraction * static_cast<double>(region.size - 256));
       std::uint8_t probe[256];
-      if (hipMemcpy(probe, static_cast<const std::uint8_t*>(device) + offset,
+      if (hipMemcpy(probe, static_cast<const std::uint8_t*>(device) + delta + offset,
                     sizeof(probe), hipMemcpyDeviceToHost) != hipSuccess) {
         return fail("engine: cannot read back a weight shard");
       }
-      if (std::memcmp(probe, static_cast<const std::uint8_t*>(region.data) + offset,
-                      sizeof(probe)) != 0) {
+      if (std::memcmp(probe, data + offset, sizeof(probe)) != 0) {
         return fail("engine: registered shard reads back differently at offset " +
                     std::to_string(offset));
       }
     }
-    m.host_base.push_back(static_cast<const std::uint8_t*>(region.data));
+    m.host_base.push_back(data);
     m.host_size.push_back(region.size);
-    m.device_base.push_back(static_cast<std::uint8_t*>(device));
+    m.device_base.push_back(static_cast<std::uint8_t*>(device) + delta);
     m.device_bytes += region.size;
   }
 
