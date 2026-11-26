@@ -6,7 +6,9 @@
 warm) and decodes on the GPU at **12.49 tok/s** — level with llama.cpp's CPU path
 (12.52) and 25 % of the measured 49.9 tok/s roofline. Deterministic (hash-equal
 across runs), coherent, and **identical to llama.cpp for the first eight tokens**
-of the pinned prompt, then a split decided by a 0.022 logit margin.
+of the pinned prompt, then a split decided by a 0.048 logit margin (measured with
+the corrected prompt and marker; an earlier 0.022 came from a differently framed
+prompt).
 
 **Verified numerically** (numpy reference from the GGUF, stage by stage): token
 embedding (bit-exact), Q8_0/Q4_K/Q5_K/Q6_K dequantization (14/14 against Gufo's
@@ -601,7 +603,10 @@ Next: measure the divergence position and the logit margin at it (how close the
 top-2 are), then reduce error where it matters — for example, keep activations in
 fp32 through the MoE gather and match llama.cpp's `Q8_K` activation quantization.
 
-## The divergence is decided by a 0.022 logit margin (2026-11-27)
+## The divergence is decided by a 0.022 logit margin (2026-11-27) -- SUPERSEDED
+
+> Measured with a doubly framed prompt and the 8-character marker spelling. The
+> corrected figures are 0.048 at position 33, in "Corrected near-tie" below.
 
 Per-step argmax and top-2 margin for the pinned prompt (logits dumped per
 position with `LING3_DUMP`):
