@@ -224,10 +224,46 @@ int main(int argc, char** argv) {
     if (!rewind()) return 1;
   }
 
+  // 2d. The composition the loop actually performs: MTP, two feeds, one restore.
+  {
+    const std::vector<double> before = engine->DebugStateDigest();
+    engine->SnapshotState();
+    engine->ForwardMtp(engine->Argmax(), start, &error);
+    engine->ForwardToken(engine->Argmax(), start, &error);
+    engine->ForwardToken(engine->Argmax(), start + 1, &error);
+    engine->RestoreState();
+    const std::vector<double> after = engine->DebugStateDigest();
+    std::size_t differing = 0;
+    for (std::size_t i = 0; i < before.size(); ++i) {
+      if (before[i] != after[i]) ++differing;
+    }
+    std::printf("     composed (mtp+2 feeds) restore: %zu of %zu layers differ\n", differing,
+                before.size());
+    if (!rewind()) return 1;
+  }
+
   // 3. Speculation: draft one token with the MTP head, verify trunk + draft in one pass,
   // accept the draft only when the trunk's own token matches, rewind and re-feed exactly what
   // was accepted. VerifyDrafts checkpoints internally, so this loop takes none of its own.
   {
+    // Own checkpoint and own reference: the probes above each called SnapshotState, and there
+    // is one snapshot buffer, so the base checkpoint they overwrote must be re-established here
+    // (rewind() + a fresh reference decode from exactly this state).
+    if (!rewind()) {
+      return 1;
+    }
+    engine->SnapshotState();
+    if (!engine->ForwardToken(last_prompt, last_position, &error)) {
+      return 1;
+    }
+    std::vector<std::int32_t> local_reference;
+    std::vector<std::vector<float>> local_logits;
+    if (!Greedy(*engine, start, steps, &local_reference, &local_logits, &error)) {
+      return 1;
+    }
+    if (!rewind()) {
+      return 1;
+    }
     const auto started = std::chrono::steady_clock::now();
     std::vector<std::int32_t> speculative;
     std::size_t drafted = 0;
@@ -260,11 +296,7 @@ int main(int argc, char** argv) {
       }
       rows[1] = engine->Argmax();
       const bool took_draft = rows[0] == draft;
-      if (speculative.size() < reference.size()) {
-        std::printf("     step %zu: pos %u current %d draft %d trunk %d reference %d\n",
-                    speculative.size(), position, current, draft, rows[0],
-                    reference[speculative.size()]);
-      }
+
       speculative.push_back(current);
       if (took_draft) {
         speculative.push_back(draft);
@@ -286,9 +318,9 @@ int main(int argc, char** argv) {
     speculative.resize(static_cast<std::size_t>(steps));
     const double seconds =
         std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count();
-    std::size_t divergence = reference.size();
-    for (std::size_t i = 0; i < std::min(speculative.size(), reference.size()); ++i) {
-      if (speculative[i] != reference[i]) {
+    std::size_t divergence = local_reference.size();
+    for (std::size_t i = 0; i < std::min(speculative.size(), local_reference.size()); ++i) {
+      if (speculative[i] != local_reference[i]) {
         divergence = i;
         break;
       }
@@ -296,8 +328,8 @@ int main(int argc, char** argv) {
     // Reported, not asserted: the loop still diverges (see notes/prefill-design.md), and this
     // test's contract is the restore exactness above. Printing it keeps the evidence in every
     // run without turning an unproven feature into a failing suite.
-    std::printf("%s speculative stream (divergence index, unproven) %.3g\n",
-                divergence == reference.size() ? "ok  " : "note", static_cast<double>(divergence));
+    Check(divergence == local_reference.size(), "speculative stream (divergence index)",
+          static_cast<double>(divergence), static_cast<double>(local_reference.size()));
     std::printf("     drafts %zu, accepted %zu (%.0f %%), %.2f s for %d tokens\n", drafted,
                 accepted, drafted == 0 ? 0.0 : 100.0 * static_cast<double>(accepted) / drafted,
                 seconds, steps);

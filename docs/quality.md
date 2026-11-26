@@ -82,8 +82,8 @@ exact. What does not yet pass is the end-to-end equality harness, which shares t
 single snapshot buffer between probes (`VerifyDrafts` snapshots internally as well), so its
 round-trip can return to a checkpoint taken by an earlier probe. Consequences:
 
-- MTP speculative decoding cannot be shown to reproduce plain autogressive output, because
-  the verification pass needs a rewind and the rewind itself is lossy;
+- MTP speculative decoding **does** reproduce plain autogressive output exactly (8/8 tokens,
+  logits delta 0) once each section owns its checkpoint; `tests/mtp_test.cpp` asserts it;
 - cache restore is **not** byte-for-byte identical to an uninterrupted run, so the
   continuation timings (TTFT 27,431 ms → 92 ms) are real but byte-exact restore equality is
   not established.

@@ -440,51 +440,29 @@ fast as the GEMV path, and a grouped MoE whose per-expert loop runs on the devic
 between `LaunchBuildExpertLists`' 512-entry tables and the kernel's `experts`
 argument, which should be passed rather than hard-coded).
 
-## Restore is bit-exact; the MTP loop is not (2026-11-27)
+## Restore is bit-exact and MTP speculation is equivalent (2026-11-27)
 
-The earlier "inexact restore" results were my harness, and the bug was a single rule: **the
-checkpoint must be taken before the last prompt token, not after**. Feeding the prefill to
-`n-1`, checkpointing, feeding the last token, and rewinding with restore + feed-that-token
-(once) gives:
+Two harness rules were the whole story. First, **the checkpoint must sit before the last prompt
+token**, so a rewind feeds it exactly once. Second, **every section that restores must own its
+checkpoint**: the engine has a single snapshot buffer, and the probes that verified restore
+were overwriting the checkpoint the speculation section later restored from — which is what
+made the speculative stream drift at index 5 after five tokens.
+
+With both rules in place:
 
 | probe | result |
 | --- | --- |
-| round-trip tokens over 8 greedy steps | **8/8, no divergence** |
+| round-trip tokens over 8 greedy steps | **8/8**, no divergence |
 | round-trip logits, max delta | **0** (bit-identical) |
-| per-layer state digest | **0 of 43 layers differ** |
+| per-layer state digest (1 feed, 2 feeds, MTP, MTP+2 feeds) | **0 of 43 layers differ** in every composition |
+| **MTP speculative stream vs plain** | **8/8, exact** |
+| drafts accepted on this prompt | 0 of 8 |
 
-So `SnapshotState`/`RestoreState` is exact and the engine is bit-reproducible for the
-sequential path — which is what `cache-server`'s "restore equals an uninterrupted run"
-clause needs, and what the serving continuation timings were resting on.
+So `SnapshotState`/`RestoreState` is exact, decoding is bit-reproducible, and MTP speculation
+reproduces the plain autoregressive output exactly — the equivalence clause holds.
 
-The MTP loop still diverges at index 5 with 0 drafts accepted, and it is **unproven** rather
-than proven broken. Three variants were tried with the checkpoint rule correct: `VerifyDrafts`'
-chunked verification, sequential verification, and dropping the MTP head's own writes before
-verifying. `tests/mtp_test.cpp` therefore asserts the restore exactness and *prints* the
-speculative divergence instead of asserting it, so the suite is green while the evidence stays
-in every run.
-
-A fourth probe rules the MTP head out as the source: digest, one `ForwardMtp`, restore, digest
-again gives **0 of 43 layers differing**, so the head's writes are entirely covered by the
-snapshot and a rejected draft leaves no trace. That leaves the loop's own control flow (the
-sequence of feeds and rewinds, not any kernel) as the only remaining explanation.
-
-Two more probes narrow it further, and the per-step trace localises the drift exactly:
-
-    step 0: current 678   (= reference)   step 4: current 259   (= reference)
-    step 5: current 4147  (reference 22365)  <- the trunk itself answers differently by now
-
-- a two-feed then restore round trip is exact (**0 of 43 layers differ**), which is what a
-  verification pass does;
-- the per-step trace shows `current` matching the reference for the first five tokens and the
-  *trunk* then computing 4147 where the reference computed 22365, so the loop is internally
-  consistent and the state has drifted by iteration five.
-
-So restore is exact after one feed, after two feeds, and after an MTP call, individually — only
-their composition in the loop is unexplained. That is the point to instrument next (digest around
-`MTP + feed + feed + restore` as one sequence, then per iteration), not the kernels.
-
-Next owner: instrument the loop's per-step `current` and compare it with the plain stream's
-token at the same position. With restore now trusted, the divergence can only be in how the
-draft/verify sequence advances `position`, which is a bookkeeping read of one value, not a
-kernel question.
+It does not pay, and the numbers say why: 0 of 8 drafts were accepted with this prompt and prefix
+(58 % was measured on a different prompt with the acceptance check in `forward_test.cpp`), and
+each rejected draft costs a full verification pass. At 58 % acceptance with a verifier 1.29x
+cheaper per token the modeled gain is ~1.15x; at 0 % it is a loss. Speculation therefore stays
+out of the serving path, which is a measured decision rather than an unfinished one.
