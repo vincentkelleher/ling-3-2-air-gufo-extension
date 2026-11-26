@@ -167,3 +167,41 @@ checking:
    whether the shared expert is scaled).
 4. MLA: whether `attn_v_b` applies to the latent output per head (current) or
    after concatenation.
+
+## Stage-by-stage verification (2026-11-26, position 0)
+
+Every stage of the forward now matches a numpy reference built from the GGUF
+(with `gguf.quants.dequantize`), using dumps written by `LING3_DUMP=1`:
+
+| stage | max abs diff |
+| --- | --- |
+| token embedding row | 0 (bit-exact) |
+| Q8_0 projection GEMV (attn_q @ h) | 1.4e-6 |
+| conv1d + SiLU, layout `[kernel,1,channels]` | 6e-8 |
+| L2 norm per head | 1.2e-7 |
+| KDA delta rule (state zero) | 3.3e-10 |
+| KDA per-head RMSNorm | 3.7e-9 |
+| KDA attn output projection | 1.5e-8 |
+| residual + ffn_norm wiring | 7e-7 |
+| MLA q split / kv latent norm | 0 / 1.2e-7 |
+| MLA q absorb (attn_k_b, Q8_0) | 1.1e-6 |
+| MLA scores (q_abs·latent + q_pe·k_pe, /sqrt192) | 1e-7 |
+| MLA value absorb + gate (attn_v_b) | 4.2e-7 |
+| MoE router ids / weights | exact |
+| MoE shared expert increment | 1.2e-7 |
+
+So the whole single-token forward is numerically correct stage by stage. What is
+still missing is the *end-to-end* comparison against llama.cpp logits, which is
+also the `engine-assembly` contract. The earlier attempt failed on setup, not on
+the engine:
+
+- `llama-tokenize -f prompt.txt` and the reference tokenizer produce the same 25
+  ids, so tokenization is not the issue.
+- `llama-perplexity --save-all-logits` writes a file whose rows are not plain
+  `n_vocab` float rows (4,401,412 bytes for 7 rows of 628,736 = +260 bytes), so
+  it needs its header decoded before comparing.
+- Do not compare across positions: a 3-step run's `d5_scores` is a 3-key softmax
+  input, not the position-0 value (this produced one false alarm).
+
+Next: dump logits at every prefill position (`dump_raw` in the prefill loop) and
+align them with the perplexity file's rows; report RMS and argmax agreement.

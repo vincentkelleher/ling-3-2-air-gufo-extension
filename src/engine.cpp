@@ -504,6 +504,10 @@ bool Engine::ForwardToken(std::int32_t token, std::uint32_t position,
       }
       hip::LaunchGemv(dev(layer.kda_out), Storage(layer.kda_out.type), n_embd,
                       kda_inner, m.qn, m.attn_out, stream);
+      if (il == 0) {
+        dump_raw("/work/d0_onorm_gated.bin", m.qn, kda_inner);
+        dump_raw("/work/d0_attnout.bin", m.attn_out, n_embd);
+      }
       if (il >= 28) {
         report_buf("kda attn", m.attn_out, n_embd);
       }
@@ -523,9 +527,23 @@ bool Engine::ForwardToken(std::int32_t token, std::uint32_t position,
                            latent, c.n_rot, stream);
       hip::LaunchGemv(dev(layer.mla_gate), Storage(layer.mla_gate.type), heads,
                       n_embd, m.h, m.beta_pre, stream);
+      if (il == 5) {
+        dump_raw("/work/d5_h.bin", m.h, n_embd);
+        dump_raw("/work/d5_q.bin", m.q, q_dim);
+        dump_raw("/work/d5_kvq.bin", m.kvq, latent + c.n_rot);
+        dump_raw("/work/d5_latnorm.bin", m.latent, latent);
+        dump_raw("/work/d5_gate.bin", m.beta_pre, heads);
+      }
       hip::LaunchMlaAbsorbQ(m.qn, m.k_absorb[il], m.q_abs, heads, stream);
+      if (il == 5) {
+        dump_raw("/work/d5_qabs.bin", m.q_abs, heads * latent);
+        dump_raw("/work/d5_cache.bin", m.mla_cache[il], latent + c.n_rot);
+      }
       hip::LaunchMlaScores(m.q_abs, m.q_pe, m.mla_cache[il], heads, position + 1,
                            m.scores, stream);
+      if (il == 5) {
+        dump_raw("/work/d5_scores.bin", m.scores, heads * (position + 1));
+      }
       hip::LaunchMlaSoftmax(m.scores, heads, position + 1, stream);
       hip::LaunchMlaLatentSum(m.scores, m.mla_cache[il], heads, position + 1,
                               m.latent, stream);
@@ -536,6 +554,11 @@ bool Engine::ForwardToken(std::int32_t token, std::uint32_t position,
       }
       hip::LaunchMlaValueAbsorb(m.latent, m.v_absorb[il], m.beta_pre, m.mla_out,
                                 heads, stream);
+      if (il == 5) {
+        dump_raw("/work/d5_qnope.bin", m.qn, heads * c.NopeDim());
+        dump_raw("/work/d5_qpe.bin", m.q_pe, heads * c.n_rot);
+        dump_raw("/work/d5_mlaout.bin", m.mla_out, v_dim);
+      }
       if (il == 5) {
         report_buf("mla out", m.mla_out, v_dim);
       }
@@ -601,6 +624,10 @@ bool Engine::ForwardToken(std::int32_t token, std::uint32_t position,
       if (il == 31) {
         report_buf("x after shared", m.x, n_embd);
       }
+    }
+    if (il == 0) {
+      dump_raw("/work/d0_xout.bin", m.x, n_embd);
+      dump_raw("/work/d0_ffnh.bin", m.ffn_h, n_embd);
     }
     report("block", il);
   }
