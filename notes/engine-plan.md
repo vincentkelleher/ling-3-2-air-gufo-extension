@@ -485,3 +485,20 @@ not what the code reads like at call time. Next step: dump, inside the conv
 kernel for `channels` 0..3, the four window values it actually multiplies and the
 four weights, for the q, k and v launches of block 0 at position 0. Four floats
 each; that ends the guessing.
+
+### Fixed: the conv state was indexed out of bounds for k and v
+
+`LaunchConv1dStep` indexes `state[c]`, `state[channels + c]`, `state[2*channels + c]`,
+but the k and v calls passed a pointer already offset by `kda_inner` and
+`2*kda_inner`. With a `3 * channels` allocation that reads (and writes) up to
+`4*channels` and `5*channels` past the base — out of bounds for k and v, in bounds
+only for q. That is exactly the asymmetry measured (q exact, k/v wrong).
+
+The kernel now takes a `slot` (0/1/2) and the base pointer, so all three slices
+are addressed correctly. Logits changed (top-5 went from 65522/4279/... to
+16/17/1018/351/64) but the model still emits newlines, so this was a real bug and
+not the only one.
+
+Next: re-run the block-0 numpy comparison (block 0 was corr 0.9898 before this
+fix) — if it is now exact, move to block 1 and continue block by block; if not,
+diff the conv window as described above.

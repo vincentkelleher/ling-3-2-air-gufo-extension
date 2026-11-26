@@ -11,12 +11,13 @@ namespace {
 constexpr int kThreads = 256;
 
 __global__ void Conv1dStepKernel(const float* x, const float* weight,
-                                float* state, float* out, int channels) {
+                                float* state, float* out, int channels, int slot) {
   const int c = blockIdx.x * blockDim.x + threadIdx.x;
   if (c >= channels) {
     return;
   }
-  const float window[4] = {state[c], state[channels + c], state[2 * channels + c],
+  float* slice = state + static_cast<std::size_t>(slot) * channels;
+  const float window[4] = {slice[c], slice[channels + c], slice[2 * channels + c],
                            x[c]};
   // The GGUF stores ssm_conv1d_*.weight as [kernel, 1, channels]: the kernel
   // index is the fastest-varying one, so channel c owns the four consecutive
@@ -26,9 +27,9 @@ __global__ void Conv1dStepKernel(const float* x, const float* weight,
     sum += weight[c * 4 + k] * window[k];
   }
   out[c] = sum;
-  state[c] = window[1];
-  state[channels + c] = window[2];
-  state[2 * channels + c] = window[3];
+  slice[c] = window[1];
+  slice[channels + c] = window[2];
+  slice[2 * channels + c] = window[3];
 }
 
 __global__ void L2NormKernel(const float* x, float* y, int heads, int head_dim,
@@ -177,10 +178,11 @@ __global__ void AxpyKernel(float* y, const float* z, float scale, std::size_t co
 }  // namespace
 
 void LaunchConv1dStep(const float* x, const float* weight, float* state,
-                      float* out, std::size_t channels, hipStream_t stream) {
+                      std::size_t channels, std::size_t slot, float* out,
+                      hipStream_t stream) {
   const int blocks = static_cast<int>((channels + kThreads - 1) / kThreads);
-  Conv1dStepKernel<<<blocks, kThreads, 0, stream>>>(x, weight, state, out,
-                                                   static_cast<int>(channels));
+  Conv1dStepKernel<<<blocks, kThreads, 0, stream>>>(
+      x, weight, state, out, static_cast<int>(channels), static_cast<int>(slot));
 }
 
 void LaunchL2Norm(const float* x, float* y, std::size_t heads,

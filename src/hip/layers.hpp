@@ -15,8 +15,11 @@ namespace gufo::ext::ling3_air::hip {
 /// with `window = [state0, state1, state2, x]`, then the state shifts left and
 /// `x` becomes the newest column. `state` holds `3 * channels` floats and is
 /// updated in place. SiLU is applied by the caller.
+/// `slot` selects one of three state slices inside `state` (`3 * channels`
+/// floats); the pointers are not offset by the caller.
 void LaunchConv1dStep(const float* x, const float* weight, float* state,
-                      float* out, std::size_t channels, hipStream_t stream);
+                      std::size_t channels, std::size_t slot, float* out,
+                      hipStream_t stream);
 
 /// L2 normalisation over each `head_dim` slice of a `[heads][head_dim]` row:
 /// `y = x / max(||x||_2, eps)`.
