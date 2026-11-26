@@ -476,6 +476,11 @@ bool Engine::ForwardToken(std::int32_t token, std::uint32_t position,
         dump("/work/ling3_q0.bin", m.q, kda_inner);
         dump("/work/ling3_h0.bin", m.h, n_embd);
       }
+      if (il == 0) {
+        dump_at("/work/p_qproj_%u.bin", m.q, kda_inner, position);
+        dump_at("/work/p_kproj_%u.bin", m.k, kda_inner, position);
+        dump_at("/work/p_vproj_%u.bin", m.v, kda_inner, position);
+      }
       hip::LaunchConv1dStep(m.q, static_cast<const float*>(dev(layer.kda_conv_q)),
                             m.conv_state[il], m.cq, kda_inner, stream);
       hip::LaunchSilu(m.cq, m.cq, kda_inner, stream);

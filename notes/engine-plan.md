@@ -445,3 +445,22 @@ suspects are the weight mapping for `kda_k`/`kda_v` and the conv weight tensors
 Next: dump `m.q`, `m.k`, `m.v` (projections) at position 0 and compare each with
 `W@h` in numpy. That splits "projection mapped to the wrong tensor" from "conv
 weight misread", and the fix is one of the two.
+
+### Projections are exact; the k/v conv is the remaining difference
+
+`m.q`, `m.k`, `m.v` all match `W@h` in numpy to **1e-6** (rms identical), so the
+projection and the tensor mapping are right. With `qn` exact as well, the only
+stage that differs in block 0 is the conv output for k and v (`cv` 7.1e-2,
+`kn` 7.5e-1) — the same kernel whose q path is exact.
+
+Inverting `silu` to recover the effective conv weights was a dead end: it divides
+by `v[j]`, which is often near zero, so the recovered values blow up (up to 4.7e5)
+and mean nothing. Don't repeat that.
+
+Next step, precisely: dump `dev(layer.kda_conv_k)` and `dev(layer.kda_conv_v)`
+(the first 8 floats) at load and compare with
+`f32('blk.0.ssm_conv1d_k.weight')[:8]` / `..._v`. If they match, the conv weights
+are right and the difference must come from the *input* or an aliasing/ordering
+problem — in that case dump the conv input (`m.k`, `m.v`) and the output in the
+same call and compare them against the dumped projection, which catches a buffer
+being reused between the two launches.
