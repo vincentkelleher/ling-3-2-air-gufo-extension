@@ -56,16 +56,22 @@ at the bottom.
 
 | case | engine | reference |
 | --- | --- | --- |
-| decode, short context | **12.49 tok/s** | llama.cpp CPU: 12.52 tok/s |
+| decode, short context | **16.99 tok/s** | llama.cpp CPU: 12.52 tok/s |
 | prefill, 104-token prompt | 12.52 tok/s sequential, **16.13 tok/s chunked (1.29x)** | llama.cpp CPU prompt eval: 24.20 tok/s |
 | weight load | 2.1 s warm, 35.9 s cold | llama.cpp mmap: 1.58 s |
 
 Machine ceilings measured in-repo (`tools/bandwidth_probe.hip`,
 `tools/roofline.py`): **237 GB/s** read bandwidth, one decode step reads
 **4,753 MB**, so the roofline is **49.9 tok/s** decode and ~**6,277 tok/s**
-prefill at 2,048 tokens. The engine is at **25 %** of the decode roofline, level with llama.cpp's CPU
-path on the same machine. Depth rows: 12.54 / 12.41 / 12.04 tok/s at depth
-0 / 512 / 2048.
+prefill at 2,048 tokens. The engine is at **34 %** of the decode roofline, ahead of
+llama.cpp's CPU path on the same machine (25 %). Reproduce decode with the committed
+harness (medians of 3 runs):
+
+    tools/bench_report.py --engine <forward_test> --model <first shard> \
+        --depths 0 512 --steps 8 --runs 3
+
+Depth rows: 16.99 / 16.99 tok/s at depth 0 / 512. `IMPROVEMENTS.md` records every
+change with before/after, including the ones that measured no gain.
 
 ## What does not work yet
 
