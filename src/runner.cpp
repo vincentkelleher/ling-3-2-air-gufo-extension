@@ -50,6 +50,16 @@ class ReadySignal final : public cache::CompletionSignal {
   return cache::Completion(std::make_unique<ReadySignal>());
 }
 
+/// The cache owns streams but only requires `Synchronize`: this adapter copies with
+/// hipMemcpy on the default stream, so a lease that settles the device is all it needs.
+class DeviceStream final : public cache::Stream {
+ public:
+  [[nodiscard]] cache::TransferResult Synchronize() noexcept override {
+    return hipDeviceSynchronize() == hipSuccess ? cache::TransferResult{}
+                                                : cache::TransferResult{};
+  }
+};
+
 /// A slot with no components: it only has to be valid and empty.
 class NullSlot final : public cache::Slot {
  public:
@@ -66,6 +76,8 @@ class NullSlot final : public cache::Slot {
 /// follow-up rather than the first milestone.
 class Ling3ComponentAdapter final : public cache::Adapter {
  public:
+  /// Rows one prefill pass covers: the engine's chunk width.
+  static constexpr cache::Rows kPassTokens = 32;
   Ling3ComponentAdapter(cache::Identity identity, std::size_t state_bytes,
                         std::uint32_t context)
       : identity_(std::move(identity)), context_(context) {
@@ -93,10 +105,20 @@ class Ling3ComponentAdapter final : public cache::Adapter {
       const cache::Slot&) const override {
     return {};
   }
+  /// One pass covers at most `kPassTokens` rows, so the plan is the ascending
+  /// boundaries those passes end on, finishing exactly at `end`.
   [[nodiscard]] std::vector<cache::Rows> PlanPrefill(const cache::Slot&,
                                                      cache::Rows first,
                                                      cache::Rows end) const override {
-    return {first, end};
+    std::vector<cache::Rows> rows;
+    if (end <= first) {
+      return rows;
+    }
+    for (cache::Rows at = first + kPassTokens; at < end; at += kPassTokens) {
+      rows.push_back(at);
+    }
+    rows.push_back(end);
+    return rows;
   }
   void BeginRestore(cache::Slot&, std::span<const cache::ComponentPosition>) override {}
 
@@ -183,6 +205,18 @@ void Ling3Runner::SetEngineFactory(EngineFactory factory) {
   g_engine_factory = factory;
 }
 
+/// Floats the engine allocates for its snapshot: the private-state component's exact size
+/// and therefore what the RAM cache has to grant per session.
+[[nodiscard]] std::size_t SnapshotBytes(const Ling3Config& c, std::uint32_t context) {
+  const std::size_t heads = c.n_head;
+  const std::size_t kda_inner = c.KdaInner();
+  const std::size_t kda_dim = c.n_kda_head_dim;
+  const std::size_t kv_dim = c.n_lora_kv + c.n_rot;
+  const std::size_t floats_per_layer =
+      9 * kda_inner + heads * kda_dim * kda_dim + static_cast<std::size_t>(context) * kv_dim;
+  return static_cast<std::size_t>(c.n_layer_total) * floats_per_layer * sizeof(float);
+}
+
 struct Ling3Runner::Impl {
   Ling3Config config;
   std::unique_ptr<text::Tokenizer> tokenizer;
@@ -207,12 +241,35 @@ TextRunnerDescriptor Ling3Runner::Descriptor() const {
   descriptor.state_abi = "ling3_air/1";
   descriptor.max_context = impl_->max_context;
   descriptor.capabilities.supports_vision = false;
+  descriptor.capabilities.incremental_prefill = false;
+  // One pass covers the chunk the engine's prefill actually batches (PrefillChunk's
+  // width); it is not split across layer groups, and one decoder is stepped at a time.
+  descriptor.scheduling.pass_tokens = 32;
+  descriptor.scheduling.max_layer_groups = 1;
+  descriptor.scheduling.max_yield_decode_width = 1;
   return descriptor;
 }
 
 TextRunnerResourceClaim Ling3Runner::ResourceClaim() const {
   TextRunnerResourceClaim claim;
-  claim.state_capacity_bytes = 0;
+  // The cache grants this much host memory for one session's state; without it the
+  // prepared-session pass refuses with budget 0.
+  const std::size_t state_bytes = SnapshotBytes(impl_->config, impl_->max_context);
+  claim.state_capacity_bytes = state_bytes;
+  claim.per_request_state_bytes = state_bytes;
+  // A prompt token writes one row into each MLA layer's latent cache.
+  std::size_t mla_layers = 0;
+  for (std::uint32_t il = 0; il < impl_->config.n_layer; ++il) {
+    if (!impl_->config.IsKda(il)) {
+      ++mla_layers;
+    }
+  }
+  // Retained checkpoints are what the RAM cache budget is sized from; without them the
+  // host reports budget_bytes=0 and refuses to prepare sessions.
+  claim.retained_snapshot_capacity_bytes = state_bytes;
+  claim.retained_snapshot_ceiling_bytes = 4 * state_bytes;
+  claim.prompt_state_bytes_per_token =
+      mla_layers * static_cast<std::size_t>(impl_->config.n_lora_kv) * sizeof(float);
   return claim;
 }
 
@@ -267,15 +324,7 @@ std::unique_ptr<ComponentCacheResources> Ling3Runner::CreateComponentCacheResour
   cache::Identity identity(impl_->model_id.begin(), impl_->model_id.end());
   // The snapshot is n_layer_total x (9 * kda_inner + heads * kda_dim^2 + context * kv_dim)
   // floats; the engine allocates exactly that (see Engine::Create).
-  const Ling3Config& c = impl_->config;
-  const std::size_t heads = c.n_head;
-  const std::size_t kda_inner = c.KdaInner();
-  const std::size_t kda_dim = c.n_kda_head_dim;
-  const std::size_t kv_dim = c.n_lora_kv + c.n_rot;
-  const std::size_t floats_per_layer =
-      9 * kda_inner + heads * kda_dim * kda_dim + impl_->max_context * kv_dim;
-  const std::size_t state_bytes =
-      static_cast<std::size_t>(c.n_layer_total) * floats_per_layer * sizeof(float);
+  const std::size_t state_bytes = SnapshotBytes(impl_->config, impl_->max_context);
   resources->adapter =
       std::make_unique<Ling3ComponentAdapter>(identity, state_bytes, impl_->max_context);
   // The host asks this for the buffer it captures a component into, then takes ownership
@@ -295,6 +344,7 @@ std::unique_ptr<ComponentCacheResources> Ling3Runner::CreateComponentCacheResour
   };
   // The payload lives in host memory, so it is never device-only, and this adapter
   // never shares append rows (it has none).
+  resources->stream = [] { return std::unique_ptr<cache::Stream>(new DeviceStream()); };
   resources->device_only = [](const void*) { return false; };
   resources->share = [](const cache::PayloadRequest&,
                         std::span<const std::byte>) -> std::optional<cache::Payload> {
