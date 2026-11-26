@@ -74,6 +74,10 @@ int main(int argc, char** argv) {
   check(weights.layers[config.n_layer].nextn_eh_proj.Valid(),
         "the MTP block has its nextn tensors");
   check(!weights.layers[config.n_layer].dense, "the MTP block is MoE");
+  check(config.sampling_top_k == 20, "top_k 20");
+  check(config.sampling_temperature > 0.99f && config.sampling_temperature < 1.01f,
+        "temperature 1.0");
+  check(config.sampling_top_p > 0.94f && config.sampling_top_p < 0.96f, "top_p 0.95");
   check(weights.total_bytes > 70ull * 1024 * 1024 * 1024,
         "the mapped weights are the full model (>70 GiB)");
 

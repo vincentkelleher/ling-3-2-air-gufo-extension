@@ -258,6 +258,17 @@ bool ParseConfig(const core::GgufReader& reader, Ling3Config* config,
     }
   }
 
+  // Sampling defaults live under general.sampling.*, not the architecture prefix.
+  if (const auto value = reader.GetMetadataFloat32("general.sampling.temp")) {
+    out.sampling_temperature = *value;
+  }
+  if (const auto value = reader.GetMetadataUint32("general.sampling.top_k")) {
+    out.sampling_top_k = *value;
+  }
+  if (const auto value = reader.GetMetadataFloat32("general.sampling.top_p")) {
+    out.sampling_top_p = *value;
+  }
+
   if (!in.FloatArray("swiglu_clamp_exp", &out.swiglu_clamp_exp, false) ||
       !in.FloatArray("swiglu_clamp_shexp", &out.swiglu_clamp_shexp, false)) {
     return false;

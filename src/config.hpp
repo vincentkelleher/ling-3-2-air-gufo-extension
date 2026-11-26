@@ -64,6 +64,13 @@ struct Ling3Config {
   bool expert_weights_norm{false};
   float expert_weights_scale{1.0f};
 
+  // Recommended sampling, read from general.sampling.* (the model card's
+  // defaults: temperature 1.0, top_k 20, top_p 0.95). The runner will hand these
+  // to Gufo as TextSamplingDefaults once it exists.
+  float sampling_temperature{1.0f};
+  std::uint32_t sampling_top_k{20};
+  float sampling_top_p{0.95f};
+
   // SwiGLU clamps, per layer (0 disables). The GGUF stores one entry per block,
   // including the MTP block.
   std::vector<float> swiglu_clamp_exp;
