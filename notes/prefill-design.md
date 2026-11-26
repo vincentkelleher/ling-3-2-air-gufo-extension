@@ -256,3 +256,30 @@ The remaining unverified part is the per-token loop (conv, delta, MLA attention)
 and the MoE/shared-expert tail. Stage 3 should therefore be: block 0 only, chunked,
 with `m.bx` dumped and compared against the numpy block-0 reference already built
 for the single-token path (which matched at 7e-07).
+
+## Chunked forward works, 2026-11-27
+
+`Engine::PrefillChunk` runs M tokens per block pass: the projections, the out
+projection, the dense FFN and the shared expert are `LaunchGemm` over the chunk;
+KDA conv/delta, MLA attention and the routed MoE stay per token. Two bugs were
+fixed to get here:
+
+- `bk` must hold `kda_inner` (4096) per row for KDA blocks even though the MLA
+  branch needs only 576 -- sizing it by `kv_row` wrote past the buffer (the
+  `HSA_STATUS_ERROR_MEMORY_FAULT`).
+- KDA blocks keep their output projection in `kda_out`, not `mla_out`; using the
+  MLA field dereferenced a null tensor (the earlier aperture violation).
+
+Validation and measurement on the pinned 25-token prompt:
+
+| path | time | rate | argmax |
+| --- | --- | --- | --- |
+| sequential (one token per pass) | 1.918 s | 12.51 tok/s | 678 (`The`) |
+| chunked (8-token chunks) | 1.622 s | **15.41 tok/s** | **678 (`The`)** |
+
+So the chunked path is **1.23x** faster and produces the same decision, which is
+what the design projected for batching only the dense stages (~1.3x).
+
+Next, in order: raise the chunk size to 256-512 (buffers are sized for 32 today)
+and group the routed MoE by expert across the chunk, which is where the 4-8x lives;
+then the MTP accept loop, which needs this same verifier.

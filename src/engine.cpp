@@ -737,6 +737,199 @@ bool Engine::ForwardToken(std::int32_t token, std::uint32_t position,
   return true;
 }
 
+bool Engine::PrefillChunk(const std::int32_t* tokens, std::size_t count,
+                          std::uint32_t start_position,
+                          std::int32_t stop_after_block, std::string* error) {
+  Impl& m = *impl_;
+  const Ling3Config& c = m.config;
+  const auto& weights = m.weights;
+  hipStream_t stream = m.queue;
+  const std::size_t n_embd = c.n_embd;
+  const std::size_t heads = c.n_head;
+  const std::size_t latent = c.n_lora_kv;
+  const std::size_t kda_dim = c.n_kda_head_dim;
+  const std::size_t kda_inner = c.KdaInner();
+  const std::size_t q_dim = heads * c.n_head_dim_mla;
+  const std::size_t v_dim = heads * c.n_head_dim_v_mla;
+  const std::size_t kv_row = latent + c.n_rot;
+  const float eps = c.rms_eps;
+  auto dev = [&m](const Tensor& tensor) { return m.Dev(tensor); };
+  const int M = static_cast<int>(count);
+  if (count == 0 || count > 32) {
+    if (error != nullptr) *error = "engine: chunk size out of range";
+    return false;
+  }
+
+  for (int i = 0; i < M; ++i) {
+    hip::LaunchEmbeddingRow(dev(weights.token_embd),
+                            RawType(weights.token_embd.type), c.n_vocab, n_embd,
+                            tokens[i], m.bx + static_cast<std::size_t>(i) * n_embd,
+                            stream);
+  }
+
+  for (std::uint32_t il = 0; il < c.n_layer; ++il) {
+    const LayerWeights& layer = weights.layers[il];
+    const bool kda = c.IsKda(il);
+    hip::LaunchRmsNorm(m.bx, static_cast<const float*>(dev(layer.attn_norm)), m.bh, M,
+                       n_embd, eps, stream);
+    if (kda) {
+      hip::LaunchGemm(dev(layer.kda_q), Storage(layer.kda_q.type), kda_inner, n_embd,
+                      m.bh, M, n_embd, m.bq, kda_inner, stream);
+      hip::LaunchGemm(dev(layer.kda_k), Storage(layer.kda_k.type), kda_inner, n_embd,
+                      m.bh, M, n_embd, m.bk, kda_inner, stream);
+      hip::LaunchGemm(dev(layer.kda_v), Storage(layer.kda_v.type), kda_inner, n_embd,
+                      m.bh, M, n_embd, m.bv, kda_inner, stream);
+    } else {
+      hip::LaunchGemm(dev(layer.mla_q), Storage(layer.mla_q.type), q_dim, n_embd, m.bh,
+                      M, n_embd, m.bq, q_dim, stream);
+      hip::LaunchGemm(dev(layer.mla_kv_a), Storage(layer.mla_kv_a.type), kv_row, n_embd,
+                      m.bh, M, n_embd, m.bk, kv_row, stream);
+    }
+
+    for (int i = 0; i < M; ++i) {
+      const std::size_t row = static_cast<std::size_t>(i) * n_embd;
+      const std::uint32_t position = start_position + static_cast<std::uint32_t>(i);
+      if (kda) {
+        const float* q_row = m.bq + static_cast<std::size_t>(i) * kda_inner;
+        const float* k_row = m.bk + static_cast<std::size_t>(i) * kda_inner;
+        const float* v_row = m.bv + static_cast<std::size_t>(i) * kda_inner;
+        hip::LaunchConv1dStep(q_row, static_cast<const float*>(dev(layer.kda_conv_q)),
+                              m.conv_state[il], kda_inner, 0, m.cq, stream);
+        hip::LaunchSilu(m.cq, m.cq, kda_inner, stream);
+        hip::LaunchConv1dStep(k_row, static_cast<const float*>(dev(layer.kda_conv_k)),
+                              m.conv_state[il], kda_inner, 1, m.ck, stream);
+        hip::LaunchSilu(m.ck, m.ck, kda_inner, stream);
+        hip::LaunchConv1dStep(v_row, static_cast<const float*>(dev(layer.kda_conv_v)),
+                              m.conv_state[il], kda_inner, 2, m.cv, stream);
+        hip::LaunchSilu(m.cv, m.cv, kda_inner, stream);
+        hip::LaunchGemv(dev(layer.kda_f_a), Storage(layer.kda_f_a.type), kda_inner,
+                        n_embd, m.bh + row, m.gate_pre, stream);
+        hip::LaunchKdaGate(m.gate_pre, static_cast<const float*>(dev(layer.kda_dt)),
+                           static_cast<const float*>(dev(layer.kda_a)), m.kda_gate,
+                           kda_inner, kda_dim, c.kda_gate_lower_bound, stream);
+        hip::LaunchGemv(dev(layer.kda_beta), Storage(layer.kda_beta.type), heads, n_embd,
+                        m.bh + row, m.beta_pre, stream);
+        hip::LaunchSigmoid(m.beta_pre, m.beta, heads, stream);
+        hip::LaunchL2Norm(m.cq, m.qn, heads, kda_dim, eps, stream);
+        hip::LaunchL2Norm(m.ck, m.kn, heads, kda_dim, eps, stream);
+        hip::LaunchDeltaRuleStep(m.qn, m.kn, m.cv, m.kda_gate, m.beta,
+                                 m.delta_state[il], m.cq, heads, kda_dim, stream);
+        hip::LaunchRmsNorm(m.cq, static_cast<const float*>(dev(layer.kda_o_norm)), m.qn,
+                           heads, kda_dim, eps, stream);
+        hip::LaunchGemv(dev(layer.kda_g_a), Storage(layer.kda_g_a.type), kda_inner,
+                        n_embd, m.bh + row, m.gate_pre, stream);
+        hip::LaunchMulSigmoid(m.qn, m.gate_pre, kda_inner, stream);
+        hipMemcpyAsync(m.bgated + static_cast<std::size_t>(i) * kda_inner, m.qn,
+                       kda_inner * sizeof(float), hipMemcpyDeviceToDevice, stream);
+      } else {
+        const float* q_row = m.bq + static_cast<std::size_t>(i) * q_dim;
+        float* kv_ptr = m.bk + static_cast<std::size_t>(i) * kv_row;
+        hip::LaunchSplitQ(q_row, m.qn, m.q_pe, heads, c.NopeDim(), c.n_rot, stream);
+        hip::LaunchRmsNorm(kv_ptr, static_cast<const float*>(dev(layer.mla_kv_a_norm)),
+                           m.latent, 1, latent, eps, stream);
+        hip::LaunchRope(m.q_pe, heads, c.n_rot, c.n_rot, position, c.rope_freq_base, true,
+                        stream);
+        hip::LaunchRope(kv_ptr + latent, 1, c.n_rot, c.n_rot, position,
+                        c.rope_freq_base, true, stream);
+        hip::LaunchMlaAppend(m.latent, kv_ptr + latent, m.mla_cache[il], position, latent,
+                             c.n_rot, stream);
+        hip::LaunchGemv(dev(layer.mla_gate), Storage(layer.mla_gate.type), heads, n_embd,
+                        m.bh + row, m.beta_pre, stream);
+        hip::LaunchMlaAbsorbQ(m.qn, m.k_absorb[il], m.q_abs, heads, stream);
+        hip::LaunchMlaScores(m.q_abs, m.q_pe, m.mla_cache[il], heads, position + 1,
+                             m.scores, stream);
+        hip::LaunchMlaSoftmax(m.scores, heads, position + 1, stream);
+        hip::LaunchMlaLatentSum(m.scores, m.mla_cache[il], heads, position + 1, m.latent,
+                                stream);
+        hip::LaunchMlaValueAbsorb(m.latent, m.v_absorb[il], m.beta_pre, m.mla_out, heads,
+                                  stream);
+        hipMemcpyAsync(m.bgated + static_cast<std::size_t>(i) * v_dim, m.mla_out,
+                       v_dim * sizeof(float), hipMemcpyDeviceToDevice, stream);
+      }
+    }
+
+    const Tensor& out_weight = kda ? layer.kda_out : layer.mla_out;
+    const std::size_t inner = kda ? kda_inner : v_dim;
+    hip::LaunchGemm(dev(out_weight), Storage(out_weight.type), n_embd, inner, m.bgated,
+                    M, inner, m.battn, n_embd, stream);
+    for (int i = 0; i < M; ++i) {
+      const std::size_t row = static_cast<std::size_t>(i) * n_embd;
+      hip::LaunchAxpy(m.bx + row, m.battn + row, 1.0f, n_embd, stream);
+    }
+    if (stop_after_block >= 0 && static_cast<std::int32_t>(il) == stop_after_block) {
+      hipStreamSynchronize(stream);
+      return true;
+    }
+    hip::LaunchRmsNorm(m.bx, static_cast<const float*>(dev(layer.ffn_norm)), m.bffnh, M,
+                       n_embd, eps, stream);
+    if (layer.dense) {
+      hip::LaunchGemm(dev(layer.ffn_gate), Storage(layer.ffn_gate.type), c.n_ff, n_embd,
+                      m.bffnh, M, n_embd, m.bffa, c.n_ff, stream);
+      hip::LaunchGemm(dev(layer.ffn_up), Storage(layer.ffn_up.type), c.n_ff, n_embd,
+                      m.bffnh, M, n_embd, m.bffb, c.n_ff, stream);
+      hip::LaunchSilu(m.bffa, m.bffa, M * c.n_ff, stream);
+      hip::LaunchMulInto(m.bffa, m.bffb, m.bffa, M * c.n_ff, stream);
+      hip::LaunchGemm(dev(layer.ffn_down), Storage(layer.ffn_down.type), n_embd, c.n_ff,
+                      m.bffa, M, c.n_ff, m.bffout, n_embd, stream);
+      for (int i = 0; i < M; ++i) {
+        const std::size_t row = static_cast<std::size_t>(i) * n_embd;
+        hip::LaunchAxpy(m.bx + row, m.bffout + row, 1.0f, n_embd, stream);
+      }
+    } else {
+      for (int i = 0; i < M; ++i) {
+        const std::size_t row = static_cast<std::size_t>(i) * n_embd;
+        hipMemcpyAsync(m.ffn_h, m.bffnh + row, n_embd * sizeof(float),
+                       hipMemcpyDeviceToDevice, stream);
+        hip::LaunchGemv(dev(layer.gate_inp), Storage(layer.gate_inp.type), c.n_expert,
+                        n_embd, m.ffn_h, m.moe_logits, stream);
+        hip::LaunchRouterSelect(m.moe_logits,
+                                static_cast<const float*>(dev(layer.exp_probs_b)),
+                                c.n_expert, c.n_group, c.n_group_used, c.n_expert_used,
+                                c.expert_weights_scale, m.moe_ids, m.moe_weights, stream);
+        hip::LaunchMoeGather(dev(layer.gate_exps), Storage(layer.gate_exps.type),
+                             dev(layer.up_exps), Storage(layer.up_exps.type),
+                             dev(layer.down_exps), Storage(layer.down_exps.type), n_embd,
+                             c.n_ff_exp, m.ffn_h, m.moe_ids, m.moe_weights,
+                             c.n_expert_used, m.bx + row, m.expert_gate, m.expert_up,
+                             m.expert_down, stream);
+      }
+      hip::LaunchGemm(dev(layer.gate_shexp), Storage(layer.gate_shexp.type),
+                      c.n_ff_shexp, n_embd, m.bffnh, M, n_embd, m.bffa, c.n_ff_shexp,
+                      stream);
+      hip::LaunchGemm(dev(layer.up_shexp), Storage(layer.up_shexp.type), c.n_ff_shexp,
+                      n_embd, m.bffnh, M, n_embd, m.bffb, c.n_ff_shexp, stream);
+      hip::LaunchSilu(m.bffa, m.bffa, M * c.n_ff_shexp, stream);
+      hip::LaunchMulInto(m.bffa, m.bffb, m.bffa, M * c.n_ff_shexp, stream);
+      hip::LaunchGemm(dev(layer.down_shexp), Storage(layer.down_shexp.type), n_embd,
+                      c.n_ff_shexp, m.bffa, M, c.n_ff_shexp, m.bffout, n_embd, stream);
+      for (int i = 0; i < M; ++i) {
+        const std::size_t row = static_cast<std::size_t>(i) * n_embd;
+        hip::LaunchAxpy(m.bx + row, m.bffout + row, 1.0f, n_embd, stream);
+      }
+    }
+  }
+
+  const std::size_t last = static_cast<std::size_t>(M - 1) * n_embd;
+  hip::LaunchRmsNorm(m.bx + last, static_cast<const float*>(dev(weights.output_norm)),
+                     m.h, 1, n_embd, eps, stream);
+  hip::LaunchGemv(dev(weights.output), Storage(weights.output.type), c.n_vocab, n_embd,
+                  m.h, m.logits, stream);
+  hip::LaunchArgmax(m.logits, c.n_vocab, m.argmax, stream);
+  const hipError_t status = hipStreamSynchronize(stream);
+  if (status != hipSuccess) {
+    if (error != nullptr) {
+      *error = std::string("engine: chunked prefill failed: ") + hipGetErrorString(status);
+    }
+    return false;
+  }
+  return true;
+}
+
+void Engine::ReadChunkActivations(std::size_t rows, float* host_rows) {
+  hipMemcpy(host_rows, impl_->bx, rows * impl_->config.n_embd * sizeof(float),
+            hipMemcpyDeviceToHost);
+}
+
 bool Engine::ForwardMtp(std::int32_t token, std::uint32_t position,
                         std::string* error) {
   Impl& m = *impl_;

@@ -170,6 +170,55 @@ int main(int argc, char** argv) {
     return (worst <= 1e-5 && projection <= 1e-4) ? 0 : 1;
   }
 
+  // Bisect hook: run the chunked path up to block N and dump its activations, so
+  // they can be compared with the sequential path's per-block dumps.
+  if (use_prompt && std::getenv("LING3_CHUNK_BLOCK") != nullptr) {
+    const std::int32_t block = std::atoi(std::getenv("LING3_CHUNK_BLOCK"));
+    // Chunk the whole prompt so the last-token logits are comparable with the
+    // sequential run (except in the bisect case, which stops inside one chunk).
+    const auto chunk_start = std::chrono::steady_clock::now();
+    const std::size_t chunk_size = prompt_tokens.size() < 8 ? prompt_tokens.size() : 8;
+    std::vector<std::int32_t> ids(chunk_size);
+    std::size_t consumed = 0;
+    std::size_t chunk = 0;
+    while (consumed < prompt_tokens.size()) {
+      chunk = prompt_tokens.size() - consumed < chunk_size ? prompt_tokens.size() - consumed
+                                                          : chunk_size;
+      for (std::size_t i = 0; i < chunk; ++i) {
+        ids[i] = static_cast<std::int32_t>(prompt_tokens[consumed + i]);
+      }
+      if (!engine->PrefillChunk(ids.data(), chunk,
+                                static_cast<std::uint32_t>(consumed), block, &error)) {
+        std::fprintf(stderr, "chunk: %s\n", error.c_str());
+        return 1;
+      }
+      consumed += chunk;
+      if (block >= 0) break;  // bisect mode only runs the first chunk
+    }
+    std::vector<float> rows(chunk * config.n_embd);
+    engine->ReadChunkActivations(chunk, rows.data());
+    FILE* file = std::fopen("/work/chunk_x.bin", "wb");
+    if (file != nullptr) {
+      std::fwrite(rows.data(), sizeof(float), rows.size(), file);
+      std::fclose(file);
+    }
+    if (block < 0) {
+      const double seconds = std::chrono::duration<double>(
+                                 std::chrono::steady_clock::now() - chunk_start)
+                                 .count();
+      std::printf("chunk full: %zu tokens in %.3f s = %.2f tok/s, argmax %d\n",
+                  consumed, seconds, consumed / seconds,
+                  static_cast<int>(engine->Argmax()));
+      std::vector<float> logits(engine->VocabSize());
+      engine->ReadLogits(logits.data());
+      std::printf("chunk logits: max %.3f\n",
+                  *std::max_element(logits.begin(), logits.end()));
+      return 0;
+    }
+    std::printf("chunk block %d: %zu rows dumped\n", block, chunk);
+    return 0;
+  }
+
   std::int32_t token = use_prompt ? prompt_tokens.front() : 156891;
   std::vector<ling::text::TokenId> produced;
   std::size_t position = 0;

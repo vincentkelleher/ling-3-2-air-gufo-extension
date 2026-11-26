@@ -47,6 +47,18 @@ class Engine {
   /// absolute difference between the two.
   float DebugChunkProjectionDiff(std::size_t rows);
 
+  /// Runs `count` tokens (up to 32) in one pass per block: projections, dense FFN
+  /// and shared expert are GEMMs over the chunk; KDA conv/delta, MLA attention and
+  /// routed MoE stay per token. With `stop_after_block` set it stops after that
+  /// block and leaves the chunk activations in the chunk buffer (for bisecting).
+  [[nodiscard]] bool PrefillChunk(const std::int32_t* tokens, std::size_t count,
+                                  std::uint32_t start_position,
+                                  std::int32_t stop_after_block,
+                                  std::string* error);
+
+  /// Copies `rows` rows of the chunk activation buffer out (debug/bisect).
+  void ReadChunkActivations(std::size_t rows, float* host_rows);
+
   /// MTP: predicts the token after `token` given the base model's final hidden
   /// state (the one produced by the last ForwardToken). Mirrors llama.cpp's
   /// graph_mtp: eh_proj(concat(token embedding, hidden)) -> block 42 -> head.
