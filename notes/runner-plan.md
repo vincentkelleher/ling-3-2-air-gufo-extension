@@ -350,3 +350,21 @@ no crash at all (`fatal_signal` count 0 in the server log).
 Lesson worth keeping: when the host reports a null pointer that "cannot be ours", check
 whether an earlier call of ours silently returned null. The `bad_function_call` chain had
 the same shape — each one was a hook we had left empty rather than a host bug.
+
+## Concurrent sessions hang: the MoE scratch is process-wide (2026-11-27)
+
+`gufo serve llm --sessions 2` with two concurrent requests **hangs** (no completion after an
+hour; the test had to be killed). The cause is in this extension, not the host:
+`src/hip/moe.hip`'s `ScratchFor` is a function-local `static` holding the quantised
+activation for the MoE dot. One engine is fine, but two sessions run two engines on two
+threads and share that buffer, so one session quantises into it while the other reads — a
+data race that also re-allocates the buffer mid-flight (`ScratchFor` resizes when a wider
+call arrives).
+
+So the supported mode is **one session**: requests queue and run one at a time, which is
+what all the verified numbers above were measured with (`sessions=1`, `batch_width=1`).
+
+The fix is mechanical and well scoped: move the scratch into the `Engine` (allocate with
+the other scratch in `Engine::Create`) and pass it to `LaunchMoeGather`, which also removes
+the `static` and its resize path. Until then `--sessions` > 1 must not be advertised, and
+`docs/quality.md` says session isolation is not exercised.
