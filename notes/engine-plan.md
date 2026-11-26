@@ -949,3 +949,27 @@ described above (real rows, gguf.quants reference, deterministic input), so a
 kernel can be checked in one command; the correct nibble order (low nibbles are
 values 0..15, high nibbles 16..31) is recorded; and the measured numbers above are
 the starting point.
+
+### Q4_0 third attempt: warp reduction fixed, still wrong, reverted, 2026-11-27
+
+The decisive facts, now measured rather than assumed:
+
+- `gguf.quants` dequantizes a real blk.42 row with **low nibbles as values 0..15
+  and high nibbles as 16..31** (0.000000 difference), so the layout note stands
+  and the reference is trustworthy.
+- A python emulation of the intended kernel formula reproduces the reference
+  (0.4545 vs 0.4540 on row 0, -0.3511 vs -0.3531 on row 1), so the *algorithm* is
+  right.
+- The device kernel returns 1/32 of the value when its branch forgets `WarpSum`
+  (0.0226 = 0.454/32), which is what happened first. With `WarpSum` restored it
+  reports 0.3856 vs 0.4540, -0.4380 vs -0.3531, -0.1354 vs 1.6623 and **0.0000**
+  on row 3.
+
+So the device path still differs from its own formula, and a row that comes out
+exactly zero points at the row/warp mapping or the fixture's row stride inside the
+kernel. Reverted again: Q4_0 only unlocks the MTP block, and MTP needs a block
+forward, a draft loop and exactness validation on top of this.
+
+Next attempt should test a **single row** (rows = 1) first: if one row matches, the
+defect is the multi-row mapping; if it does not, dump the kernel's per-block
+partials for row 0 and compare with the python emulation block by block.
