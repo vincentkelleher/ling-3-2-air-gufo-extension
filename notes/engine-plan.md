@@ -1,5 +1,42 @@
 # Text-engine plan
 
+## Current status (2026-11-27, read this first)
+
+**What runs**: `tests/forward_test.cpp` loads the model zero-copy (80 GiB in ~2 s
+warm) and decodes on the GPU at **12.49 tok/s** — level with llama.cpp's CPU path
+(12.52) and 25 % of the measured 49.9 tok/s roofline. Deterministic (hash-equal
+across runs), coherent, and **identical to llama.cpp for the first eight tokens**
+of the pinned prompt, then a split decided by a 0.022 logit margin.
+
+**Verified numerically** (numpy reference from the GGUF, stage by stage): token
+embedding (bit-exact), Q8_0/Q4_K/Q5_K/Q6_K dequantization (14/14 against Gufo's
+`quant::Dot`), conv1d (6e-8), L2 norm (1.2e-7), KDA delta rule (3.3e-10 at
+position 0, state write 1.9e-9), per-head norm (3.7e-9), MLA q-split (0), latent
+norm (1.2e-7), q-absorb (1.1e-6), scores (1e-7), value absorb (4.2e-7), router
+ids/weights (exact), shared expert (1.2e-7).
+
+**Fixed bugs worth remembering**: Q5_K read as float (all-NaN logits); conv1d
+weights transposed; conv state slots `channels` apart instead of `3*channels`
+(q's history leaked into k and v — this was *the* reason the model babbled);
+`atomicAdd` float reductions making runs non-deterministic; MLA absorb matrices
+needing dequantization.
+
+**Not done yet, in dependency order**:
+1. Batched prefill — `notes/prefill-design.md` is the executable plan; this is
+   the largest performance lever and the reason prefill currently equals decode.
+2. `TextModelRunner`: component cache adapter + HTTP serving (`gufo serve llm`),
+   continuation, streaming, cancellation.
+3. MTP speculative decoding (the MTP block is mapped but unused).
+4. Vision: mmproj encoder + image path (the projector is downloaded).
+5. Token-for-token parity: the integer dots already match llama.cpp, so the
+   residual is elsewhere; the last attempts are logged below.
+6. The 60 %/70 % roofline gates.
+
+**Don't repeat** (all measured, all in the log below): Q8_K activation rounding at
+the dot level, double accumulation, block-per-row GEMV, hoisted activation
+quantization, `sdot4`, f16 KV rounding, fused-expert gather (3 % slower today).
+
+
 Everything the runner needs, with the exact tensor names and the reference code
 to consult. Written to be resumed from cold: the operator layer is already done
 and tested (see the end).
