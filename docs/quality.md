@@ -89,4 +89,4 @@ equality is **not** claimed; the deviation is recorded with its index and margin
 | MTP speculative decoding | block runs, **58 % acceptance measured (18/31)**; not wired into serving because the modeled gain at 58 % with a 1.29x-cheaper verifier is ~1.15x |
 | Vision (mmproj) | **implemented and verified** at the engine level (numpy reference 3.2e-06, llama.cpp parity 0.04 %); the `gufo prompt --image` flag path is written but **unverified** |
 | Token-for-token equality | **not met**; one-token deviation at a 0.048 margin, documented above |
-| Roofline gates | decode **25.1 %** of 49.9 tok/s; prefill **0.26 %** of 6,277 tok/s (16.13 tok/s chunked) — both far from 60 %/70 % |
+| Roofline gates | decode **33.9 %** of 49.9 tok/s; prefill **0.26 %** of 6,277 tok/s (16.13 tok/s chunked) — both far from 60 %/70 % |

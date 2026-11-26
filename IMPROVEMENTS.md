@@ -154,12 +154,13 @@ when the weights stream at 237 GB/s.
 | group | ms/token | share |
 | --- | --- | --- |
 | attention (35 KDA + 7 MLA: projections, conv/delta, MLA absorb) | 28.07 | 46 % |
-| FFN / 512-expert MoE | 32.20 | 53 % |
+| FFN / 512-expert MoE | ~29.0 | 50 % |
 | norms, residuals, rope and the rest | 0.40 | 0.7 % |
 | total in the layer loop | 60.66 | |
 
-Session total: decode **12.45 → 16.00 tok/s** (+28.5 %), i.e. 25.1 % → 32.1 % of the
-49.9 tok/s bandwidth roofline at depth 0, with the greedy tokens unchanged.
+Session total: decode **12.45 → 16.91 tok/s** (+35.8 %), i.e. 25.1 % → 33.9 % of the
+49.9 tok/s bandwidth roofline at depth 0, with the documented golden-set comparison
+unchanged.
 
 The MoE now moves ~1.5 GB of expert weights per token in 35.33 ms, which is 42 GB/s
 effective against a 237 GB/s box: still 5.6x below the bound, so the quantised dot has

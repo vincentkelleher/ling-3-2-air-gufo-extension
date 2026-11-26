@@ -29,7 +29,7 @@ at the bottom.
   are registered zero-copy from the reader's mapping, so an 80 GiB model loads in
   ~2 s warm.
 - **Usable from the CLI**: `gufo prompt`, `gufo chat` and `gufo bench` run the
-  model (chunked prefill 16.8 tok/s, decode 12.45 tok/s on this box). The HTTP
+  model (chunked prefill 16.8 tok/s, decode 16.9 tok/s on this box). The HTTP
   server still needs the runner below.
 - **Coherent output**: `The capital of France is` continues with the same
   sentence as llama.cpp; the two agree for 53 characters before a near-tie

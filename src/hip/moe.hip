@@ -336,9 +336,9 @@ void LaunchMoeGather(const void* gate_exps, StorageType gate_type,
   ActivationScratch& slots = ScratchFor(n_ff, n_selected);
   LaunchQuantizeActivationBatch(expert_gate, n_ff, n_selected, slots.q, slots.scales,
                                 slots.sums, stream);
-  LaunchGemvExpertsPreSlots(down_exps, down_type, ids, n_selected, n_embd, n_ff,
-                            expert_gate, slots.q, slots.scales, slots.sums, expert_down,
-                            /*out_stride=*/n_embd, stream);
+  LaunchGemvExpertsPreSlotsWide(down_exps, down_type, ids, n_selected, n_embd, n_ff,
+                                expert_gate, slots.q, slots.scales, slots.sums,
+                                expert_down, /*out_stride=*/n_embd, stream);
   const int blocks = static_cast<int>((n_embd + kThreads - 1) / kThreads);
   MoeCombineKernel<<<blocks, kThreads, 0, stream>>>(
       expert_down, weights, static_cast<int>(n_selected), static_cast<int>(n_embd), out);

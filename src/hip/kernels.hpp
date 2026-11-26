@@ -65,6 +65,14 @@ void LaunchGemvExpertsPreWide(const void* weights, StorageType type,
                               const int* sums, float* y, std::size_t out_stride,
                               hipStream_t stream);
 
+/// As LaunchGemvExpertsPreSlots, with the dot's items spread across the warp.
+void LaunchGemvExpertsPreSlotsWide(const void* weights, StorageType type,
+                                   const std::int32_t* ids, std::size_t experts,
+                                   std::size_t rows_per_expert, std::size_t cols,
+                                   const float* x, const std::int8_t* q,
+                                   const float* scales, const int* sums, float* y,
+                                   std::size_t out_stride, hipStream_t stream);
+
 /// Expert GEMV where each slot has its own quantised activation (the down matmul).
 /// Non-Q4_K storages fall back to the float activation with a per-slot stride.
 void LaunchGemvExpertsPreSlots(const void* weights, StorageType type,
