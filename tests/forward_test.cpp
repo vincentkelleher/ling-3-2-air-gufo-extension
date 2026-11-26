@@ -177,7 +177,12 @@ int main(int argc, char** argv) {
     // Chunk the whole prompt so the last-token logits are comparable with the
     // sequential run (except in the bisect case, which stops inside one chunk).
     const auto chunk_start = std::chrono::steady_clock::now();
-    const std::size_t chunk_size = prompt_tokens.size() < 8 ? prompt_tokens.size() : 8;
+    std::size_t chunk_size = 8;
+    if (const char* env = std::getenv("LING3_CHUNK_SIZE")) {
+      chunk_size = static_cast<std::size_t>(std::atoi(env));
+    }
+    if (chunk_size == 0) chunk_size = 8;
+    if (prompt_tokens.size() < chunk_size) chunk_size = prompt_tokens.size();
     std::vector<std::int32_t> ids(chunk_size);
     std::size_t consumed = 0;
     std::size_t chunk = 0;

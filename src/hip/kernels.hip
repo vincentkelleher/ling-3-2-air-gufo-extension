@@ -734,16 +734,24 @@ void LaunchGemvExperts(const void* weights, StorageType type,
 }
 
 void LaunchGemm(const void* weights, StorageType type, std::size_t rows,
-                std::size_t cols, const float* x, std::size_t batch,
-                std::size_t x_stride, float* y, std::size_t y_stride,
+                std::size_t cols, const float* x_block, std::size_t batch,
+                std::size_t x_stride, float* y_block, std::size_t y_stride,
                 hipStream_t stream) {
   const int row_bytes = static_cast<int>(RowBytes(type, cols));
   const auto* data = static_cast<const std::uint8_t*>(weights);
   const int rows_int = static_cast<int>(rows);
   const int cols_int = static_cast<int>(cols);
-  const int batch_int = static_cast<int>(batch);
   const int x_int = static_cast<int>(x_stride);
   const int y_int = static_cast<int>(y_stride);
+  // The kernel keeps one accumulator per token in registers, so a large chunk is
+  // issued as several slices of at most kMaxGemmBatch tokens.
+  const float* x = x_block;
+  float* y = y_block;
+  for (std::size_t offset = 0; offset < batch; offset += kMaxGemmBatch) {
+    const std::size_t slice = batch - offset < kMaxGemmBatch ? batch - offset : kMaxGemmBatch;
+    const int batch_int = static_cast<int>(slice);
+    x = x_block + offset * x_stride;
+    y = y_block + offset * y_stride;
   switch (type) {
     case kF32:
       GemmKernel<kF32><<<rows_int, kThreads, 0, stream>>>(
@@ -755,6 +763,7 @@ void LaunchGemm(const void* weights, StorageType type, std::size_t rows,
       break;
     default:
       break;  // K-quant batching is not implemented yet (notes/prefill-design.md)
+  }
   }
 }
 

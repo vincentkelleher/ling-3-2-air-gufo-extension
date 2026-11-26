@@ -283,3 +283,21 @@ what the design projected for batching only the dense stages (~1.3x).
 Next, in order: raise the chunk size to 256-512 (buffers are sized for 32 today)
 and group the routed MoE by expert across the chunk, which is where the 4-8x lives;
 then the MTP accept loop, which needs this same verifier.
+
+### Chunked prefill scaling, 2026-11-27
+
+`LaunchGemm` now tiles its batch in slices of 8 (the kernel keeps one accumulator
+per token in registers), so chunk sizes above 8 work; buffers are sized for 256.
+
+104-token prompt, same argmax (678) in every row:
+
+| path | time | rate | vs sequential |
+| --- | --- | --- | --- |
+| sequential | 8.330 s | 12.48 tok/s | 1.00x |
+| chunk 8 | 6.886 s | 15.25 tok/s | 1.22x |
+| chunk 64 | 6.478 s | 16.21 tok/s | **1.30x** |
+
+That is the plateau the profile predicted for batching only the dense stages:
+Q8_0 work is 34 % of a pass, and 2.9x on that share gives ~1.3x overall. The 4-8x
+needs the routed MoE grouped by expert across the chunk (25 % + 17 % of the pass),
+which is the next piece.

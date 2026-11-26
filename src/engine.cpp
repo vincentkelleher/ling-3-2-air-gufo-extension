@@ -103,6 +103,7 @@ struct Engine::Impl {
   float* bffa{nullptr};
   float* bffb{nullptr};
   float* bffout{nullptr};
+  static constexpr int kMaxChunk = 256;
   hipStream_t queue{nullptr};
   float* kernel_debug{nullptr};
 
@@ -316,13 +317,13 @@ std::unique_ptr<Engine> Engine::Create(const core::GgufReader& reader,
       alloc_int(&m.moe_ids, config.n_expert_used) &&
       alloc(&m.moe_weights, config.n_expert_used) && alloc_int(&m.argmax, 1) &&
       alloc(&m.kernel_debug, 8 * kda_dim) &&
-      alloc(&m.bx, 32 * n_embd) && alloc(&m.bh, 32 * n_embd) &&
-      alloc(&m.bq, 32 * q_dim) &&
-      alloc(&m.bk, 32 * (kda_inner > kv_dim ? kda_inner : kv_dim)) &&
-      alloc(&m.bv, 32 * kda_inner) && alloc(&m.bgated, 32 * q_dim) &&
-      alloc(&m.battn, 32 * n_embd) && alloc(&m.bffnh, 32 * n_embd) &&
-      alloc(&m.bffa, 32 * config.n_ff) && alloc(&m.bffb, 32 * config.n_ff) &&
-      alloc(&m.bffout, 32 * n_embd);
+      alloc(&m.bx, Impl::kMaxChunk * n_embd) && alloc(&m.bh, Impl::kMaxChunk * n_embd) &&
+      alloc(&m.bq, Impl::kMaxChunk * q_dim) &&
+      alloc(&m.bk, Impl::kMaxChunk * (kda_inner > kv_dim ? kda_inner : kv_dim)) &&
+      alloc(&m.bv, Impl::kMaxChunk * kda_inner) && alloc(&m.bgated, Impl::kMaxChunk * q_dim) &&
+      alloc(&m.battn, Impl::kMaxChunk * n_embd) && alloc(&m.bffnh, Impl::kMaxChunk * n_embd) &&
+      alloc(&m.bffa, Impl::kMaxChunk * config.n_ff) && alloc(&m.bffb, Impl::kMaxChunk * config.n_ff) &&
+      alloc(&m.bffout, Impl::kMaxChunk * n_embd);
   if (!ok) {
     return fail("engine: device scratch allocation failed");
   }
@@ -755,7 +756,7 @@ bool Engine::PrefillChunk(const std::int32_t* tokens, std::size_t count,
   const float eps = c.rms_eps;
   auto dev = [&m](const Tensor& tensor) { return m.Dev(tensor); };
   const int M = static_cast<int>(count);
-  if (count == 0 || count > 32) {
+  if (count == 0 || count > static_cast<std::size_t>(Impl::kMaxChunk)) {
     if (error != nullptr) *error = "engine: chunk size out of range";
     return false;
   }
