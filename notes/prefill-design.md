@@ -360,3 +360,32 @@ Correct shape for the next attempt:
    prefix so the state matches the emitted sequence.
 5. Check the simplest invariant first: with K = 0, the loop must reproduce plain
    greedy byte for byte. Only then raise K.
+
+## Why the MTP accept loop cannot pay yet (2026-11-27, arithmetic)
+
+Speculative decoding spends, per iteration: one trunk step to commit the last
+token, K-1 MTP block forwards to draft, and one verification pass over K tokens.
+With K = 4 and the rates measured on this engine:
+
+| piece | cost |
+| --- | --- |
+| trunk step (decode) | 80 ms |
+| MTP block (one block of 42, per draft) | ~10 ms x 3 |
+| verify 4 tokens, chunked | 4 / 16.2 tok/s = 247 ms |
+| total per iteration | ~357 ms |
+| tokens produced if 3 of 4 draft tokens are accepted | 3 |
+| effective | **119 ms/token, worse than the 80 ms of plain decode** |
+
+The reason is structural: verification is only cheap when a K-token pass costs
+about what one token costs, because the weights (4.75 GB per token) are read once
+either way. Today a 4-token chunked pass costs 4/1.3 = 3.1 token-equivalents, so
+verification has no advantage and the drafts are pure overhead.
+
+The fix is the same work the prefill gate needs: a K-quant GEMM as efficient as the
+GEMV path and a grouped MoE whose per-expert loop runs on the device, so an M-token
+pass approaches one token's weight traffic. At that point the table above turns
+over: verify 4 tokens for ~1 token-equivalent, accept ~3, and the loop is worth
+running.
+
+So the order stands as recorded earlier, but for a sharper reason: **batching is
+not just a prefill optimisation, it is what makes speculation possible at all.**
