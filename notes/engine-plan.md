@@ -703,3 +703,15 @@ The useful conclusion is that this kernel is dequantization-bound, not
 parallelism-bound: each lane walks whole 256-weight blocks. The next attempt
 should reduce per-weight work (vectorised loads, 8-bit path with a resident
 activation scale, or a fused Q6_K+Q4_K expert kernel) rather than add threads.
+
+## Fused expert GEMV: attempted, reverted (2026-11-27)
+
+The MoE path issues 24 GEMV launches per layer (960 per token), so fusing each
+expert group into one device-indexed launch looked like the next win. Two bugs
+surfaced (a template line and a `threadIdx.x == 0` write instead of lane 0) and
+the result was still wrong and slower (11.9 vs 12.48 tok/s), so it was reverted.
+
+The design is sound -- `LaunchGemvExperts` with a device id list, batched
+activation slices for the down projection, then a weighted accumulate -- but it
+needs its own GPU unit test first (as `tests/operator_gpu_test.cpp` has for the
+per-expert path) rather than being validated through the language model.
