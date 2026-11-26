@@ -14,6 +14,13 @@ copy 204.3 GB/s, write 198.4 GB/s.
 experts 26.6 %, LM head 9.0 %, shared expert 5.3 %, router 4.4 %).
 Prefill roofline at 2,048 tokens (every expert touched once): ~**6,277 tok/s**.
 
+Reproduce the rows below with one command:
+
+```sh
+tools/bench_report.py --engine <binary-or-wrapper> --model <gguf> \
+  --roofline-model <host path to the gguf> --depths 0 512 2048 --steps 16
+```
+
 ## This engine vs the references
 
 | case | measured | % of roofline | reference |
