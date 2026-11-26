@@ -703,18 +703,6 @@ bool Engine::ForwardToken(std::int32_t token, std::uint32_t position,
                               c.n_expert, c.n_group, c.n_group_used,
                               c.n_expert_used, c.expert_weights_scale, m.moe_ids,
                               m.moe_weights, stream);
-      if (il == 31) {
-        std::int32_t ids[8] = {0};
-        float w[8] = {0};
-        hipMemcpy(ids, m.moe_ids, sizeof(ids), hipMemcpyDeviceToHost);
-        hipMemcpy(w, m.moe_weights, sizeof(w), hipMemcpyDeviceToHost);
-        std::fprintf(stderr, "  router 31: ids %d %d %d %d %d %d %d %d weights %.3f %.3f %.3f %.3f %.3f %.3f %.3f %.3f\n",
-                     ids[0], ids[1], ids[2], ids[3], ids[4], ids[5], ids[6], ids[7],
-                     w[0], w[1], w[2], w[3], w[4], w[5], w[6], w[7]);
-        report_buf("ffn_h", m.ffn_h, n_embd);
-        report_buf("expert_gate", m.expert_gate, c.n_ff_exp);
-        report_buf("expert_down", m.expert_down, n_embd);
-      }
       if (il == 2) {
         dump_raw("/work/d2_ffnh.bin", m.ffn_h, n_embd);
         dump_raw("/work/d2_logits.bin", m.moe_logits, c.n_expert);

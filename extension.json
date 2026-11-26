@@ -19,7 +19,7 @@
       "model_ids": [
         "ling-3.2-air"
       ],
-      "target": "gufo_ling3_air",
+      "target": "gufo_ling3_air_hip",
       "entry": "ling3_air_provider_register"
     }
   ],

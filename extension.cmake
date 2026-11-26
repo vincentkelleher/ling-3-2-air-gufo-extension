@@ -38,6 +38,7 @@ gufo_extension_target(
   NAME gufo_ling3_air_hip
   SOURCES
     src/engine.cpp
+    src/drivers.cpp
   LINK_LIBRARIES
     gufo_ling3_air
     gufo_ext_runtime

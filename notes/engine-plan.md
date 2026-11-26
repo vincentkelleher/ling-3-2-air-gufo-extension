@@ -1035,3 +1035,30 @@ Next: the accept loop (draft K tokens, verify the prefix with one trunk pass,
 accept the matching prefix), then exactness (accepted output must equal plain
 greedy) and a speed measurement, which is what `engine-assembly`'s MTP half and the
 goal's criterion 3 ask for.
+
+## CLI drivers work, 2026-11-27
+
+`src/drivers.cpp` registers the provider with `prompt_driver`, `chat_driver` and
+`bench_driver` (no `create`: the `TextModelRunner` is still to come). That makes the
+extension usable from the Gufo CLI without the component cache:
+
+    $ gufo prompt --model <shard 1> --prompt "The capital of France is" --temperature 0
+    <role>SYSTEM</role>detailed thinking on<|role_end|>...<role>ASSISTANT</role>
+     thinkingThe user is asking a simple factual question: "The capital of France is"
+    prefill 16.81 tok/s, decode 12.45 tok/s (25 prompt, 16 generated)
+
+The drivers reuse the engine directly: chunked `PrefillChunk` for the prompt (32-token
+chunks), `ForwardToken` per decoded token, and host-side sampling (greedy when the
+temperature is 0, otherwise temperature with top-k and top-p) from the logits
+`ReadLogits` copies back.
+
+Two things this changes:
+
+- The provider's manifest entry now targets the HIP library, since the drivers need
+  the engine; `src/extension.cpp` keeps only the unconditional extension entry.
+- Decode through the CLI (12.45 tok/s) matches the test harness (12.49), which is a
+  useful cross-check that the harness measures what a user sees.
+
+Still missing for criterion 3: `TextModelRunner` (so `gufo serve llm` works with
+caching, streaming and sessions), tool dialect registration, vision and MTP in the
+served path.
