@@ -35,14 +35,16 @@ at the bottom.
 
 | case | engine | reference |
 | --- | --- | --- |
-| decode, short context | 7.08 tok/s | llama.cpp CPU: 12.52 tok/s |
-| prefill | 7.1 tok/s (token by token) | llama.cpp CPU prompt eval: 24.20 tok/s |
+| decode, short context | **12.49 tok/s** | llama.cpp CPU: 12.52 tok/s |
+| prefill | 12.5 tok/s (token by token) | llama.cpp CPU prompt eval: 24.20 tok/s |
 | weight load | 2.1 s warm, 35.9 s cold | llama.cpp mmap: 1.58 s |
 
 Machine ceilings measured in-repo (`tools/bandwidth_probe.hip`,
 `tools/roofline.py`): **237 GB/s** read bandwidth, one decode step reads
 **4,753 MB**, so the roofline is **49.9 tok/s** decode and ~**6,277 tok/s**
-prefill at 2,048 tokens. The engine is at **14.2 %** of the decode roofline.
+prefill at 2,048 tokens. The engine is at **25 %** of the decode roofline, level with llama.cpp's CPU
+path on the same machine. Depth rows: 12.54 / 12.41 / 12.04 tok/s at depth
+0 / 512 / 2048.
 
 ## What does not work yet
 
@@ -50,7 +52,8 @@ prefill at 2,048 tokens. The engine is at **14.2 %** of the decode roofline.
   contract yet, so `gufo serve llm --model ling-3.2-air` cannot use it. The
   component cache, continuation and streaming are therefore absent.
 - **No batched prefill**: prompt tokens are fed one at a time, which is why
-  prefill equals decode speed.
+  prefill equals decode speed (12.5 tok/s, against a 6,277 tok/s roofline at
+  2,048 tokens). `notes/prefill-design.md` is the plan for fixing that.
 - **Not token-for-token with llama.cpp**: the streams agree for eight tokens and
   then diverge where the top-2 logit margin is 0.022 (a 0.1 % difference), and
   another prompt diverges at token 0. Same meaning, same final answer.
