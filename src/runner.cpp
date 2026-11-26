@@ -109,7 +109,13 @@ class Ling3ComponentAdapter final : public cache::Adapter,
     return *raw;
   }
 
-  [[nodiscard]] cache::Capabilities GetCapabilities() const override { return {}; }
+  /// `continuation` tells the host this adapter can restore a padded prefix, which is what
+  /// the private-state component makes true: the snapshot holds the whole trunk state.
+  [[nodiscard]] cache::Capabilities GetCapabilities() const override {
+    cache::Capabilities capabilities;
+    capabilities.continuation = true;
+    return capabilities;
+  }
   [[nodiscard]] std::span<const cache::ComponentDescriptor> Components()
       const override {
     return {&component_, 1};
@@ -436,7 +442,12 @@ std::unique_ptr<TextRunnerState> Ling3Runner::BindComponentState(
   return state;
 }
 
-void Ling3Runner::ReconcileComponentState(TextRunnerState&, std::size_t) const {}
+void Ling3Runner::ReconcileComponentState(TextRunnerState& state,
+                                         std::size_t position) const {
+  // After the cache restores rows into a slot, the runner must believe it stands where the
+  // checkpoint was taken; otherwise it prefills from the wrong place.
+  static_cast<Ling3RunnerState&>(state).set_position(position);
+}
 
 TextPrefillStep Ling3Runner::Prefill(TextRunnerState& state,
                                      std::span<const TextRunnerToken> prompt,
