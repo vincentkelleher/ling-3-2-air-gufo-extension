@@ -274,3 +274,33 @@ tests.
 
 So the ladder is now: empty components (rejected) → one private-state component (accepted,
 `allocate`/`device_only`/`share` needed) → stream lease + async copies → server test suite.
+
+## Serving: what works, and the one crash left (2026-11-27)
+
+Verified through `gufo serve llm` (installed module, no Gufo changes):
+
+| case | result |
+| --- | --- |
+| one completion request | 200, `text=".\nA.Paris\nB.L"`, 5 prompt / 8 completion tokens, prefill 15.2 tok/s, decode 12.6 tok/s |
+| 406-token prompt, `stream=true` | SSE chunks delivered; the client's `head -c` closed the pipe and the server finished it as `finish=cancelled` — cancellation works |
+| two sequential requests | both complete, `cache_reuse=none` |
+| second request's frontier capture | **crash** |
+
+The crash is precise: after the first request the cache tries a frontier capture and
+refuses with `frontier_capture_refused reason=empty ledger handle`, then the process takes
+SIGSEGV. The cause is in our `ComponentCacheResources::allocate`: it hands back host
+storage but builds the `Payload` with a default-constructed `ResourceCharge`, so the
+capture has no ledger handle to charge. The fix is to allocate against the ledger the host
+passes to `CreateComponentCacheResources`:
+
+    ResourceLedger::Reserve(ResourceCategory, bytes) -> ResourceReservation
+    // then turn the reservation into a ResourceCharge for Payload::Committed
+
+`ResourceCharge` is only constructible through the ledger (`ResourceCharge() = default`
+gives exactly the empty handle that crashes), so `Reserve(...)`'s completion step is the
+one API left to read. Everything else in the serving path is in place:
+positions reported per slot, prefill clamped to the engine's chunk width (a 330-token pass
+used to overflow the 256-row chunk buffer and produced "invalid interrupted prefill
+frontier"), engines owned for the process so shutdown cannot free them after the HIP
+context, and a stream lease whose `Synchronize` does nothing because every copy is already
+synchronous.

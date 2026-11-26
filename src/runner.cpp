@@ -8,6 +8,7 @@
 #include "src/cache/component_resources.hpp"
 
 #include <algorithm>
+#include <cstdio>
 #include <cstring>
 #include <map>
 #include <vector>
@@ -46,6 +47,11 @@ class ReadySignal final : public cache::CompletionSignal {
   return "HUMAN";
 }
 
+bool Trace() {
+  static const bool enabled = std::getenv("LING3_RUNNER_TRACE") != nullptr;
+  return enabled;
+}
+
 [[nodiscard]] cache::Completion Ready() {
   return cache::Completion(std::make_unique<ReadySignal>());
 }
@@ -54,10 +60,10 @@ class ReadySignal final : public cache::CompletionSignal {
 /// hipMemcpy on the default stream, so a lease that settles the device is all it needs.
 class DeviceStream final : public cache::Stream {
  public:
-  [[nodiscard]] cache::TransferResult Synchronize() noexcept override {
-    return hipDeviceSynchronize() == hipSuccess ? cache::TransferResult{}
-                                                : cache::TransferResult{};
-  }
+  /// Nothing to wait for: this adapter's copies are synchronous `hipMemcpy` calls, so
+  /// they are already complete when their `Completion` is returned. Touching the device
+  /// here also crashed the server on shutdown, when the HIP context may already be gone.
+  [[nodiscard]] cache::TransferResult Synchronize() noexcept override { return {}; }
 };
 
 /// A slot with no components: it only has to be valid and empty.
@@ -74,7 +80,8 @@ class NullSlot final : public cache::Slot {
 /// Copies are synchronous on the default stream. That is correct but serialised; the
 /// asynchronous form needs the device stream type behind `cache::Stream`, which is the
 /// follow-up rather than the first milestone.
-class Ling3ComponentAdapter final : public cache::Adapter {
+class Ling3ComponentAdapter final : public cache::Adapter,
+                                   public Ling3RunnerState::PositionSink {
  public:
   /// Rows one prefill pass covers: the engine's chunk width.
   static constexpr cache::Rows kPassTokens = 32;
@@ -87,7 +94,11 @@ class Ling3ComponentAdapter final : public cache::Adapter {
     component_.state_bytes = state_bytes;
   }
 
-  void Register(cache::Slot* slot, Engine* engine) { engines_[slot] = engine; }
+  Engine& Adopt(cache::Slot* slot, std::unique_ptr<Engine> engine) {
+    Engine* raw = engine.release();
+    engines_[slot] = raw;
+    return *raw;
+  }
 
   [[nodiscard]] cache::Capabilities GetCapabilities() const override { return {}; }
   [[nodiscard]] std::span<const cache::ComponentDescriptor> Components()
@@ -101,9 +112,19 @@ class Ling3ComponentAdapter final : public cache::Adapter {
       cache::MutationGuard&) override {
     return std::make_unique<NullSlot>();
   }
+  /// A private component reports its logical execution boundary: the position this
+  /// slot's state has prefilled to. An empty vector is "incomplete capture positions".
   [[nodiscard]] std::vector<cache::ComponentPosition> Positions(
-      const cache::Slot&) const override {
-    return {};
+      const cache::Slot& slot) const override {
+    cache::ComponentPosition position;
+    position.id = component_.id;
+    const auto found = positions_.find(const_cast<cache::Slot*>(&slot));
+    position.valid_rows = found == positions_.end() ? 0 : found->second;
+    return {position};
+  }
+
+  void OnPosition(void* slot, std::size_t position) override {
+    positions_[static_cast<cache::Slot*>(slot)] = position;
   }
   /// One pass covers at most `kPassTokens` rows, so the plan is the ascending
   /// boundaries those passes end on, finishing exactly at `end`.
@@ -126,6 +147,10 @@ class Ling3ComponentAdapter final : public cache::Adapter {
                                                  cache::ComponentId,
                                                  std::span<std::byte> payload,
                                                  cache::Stream&) override {
+    if (Trace()) {
+      std::fprintf(stderr, "[runner] capture slot %p size %zu\n", static_cast<const void*>(&slot),
+                   payload.size());
+    }
     Engine* engine = EngineFor(slot);
     if (engine == nullptr || payload.size() < component_.state_bytes) {
       return Ready();
@@ -172,20 +197,26 @@ class Ling3ComponentAdapter final : public cache::Adapter {
   cache::Identity identity_;
   std::uint32_t context_{0};
   cache::ComponentDescriptor component_{};
+  /// Engines live for the process. The host may tear down sessions (and the HIP context)
+  /// in any order at shutdown, and freeing an engine after its context has gone is what
+  /// crashed the server on SIGTERM, so ownership is deliberately not returned here.
   std::map<cache::Slot*, Engine*> engines_;
+  std::map<cache::Slot*, cache::Rows> positions_;
 };
 
 }  // namespace
 
 struct Ling3RunnerState::Impl {
-  std::unique_ptr<Engine> engine;
+  Engine* engine{nullptr};
   Ling3Config config;
   std::size_t position{0};
+  Ling3RunnerState::PositionSink* sink{nullptr};
+  void* slot{nullptr};
 };
 
-Ling3RunnerState::Ling3RunnerState(std::unique_ptr<Engine> engine, Ling3Config config)
+Ling3RunnerState::Ling3RunnerState(Engine& engine, Ling3Config config)
     : impl_(std::make_unique<Impl>()) {
-  impl_->engine = std::move(engine);
+  impl_->engine = &engine;
   impl_->config = config;
 }
 
@@ -197,8 +228,16 @@ Engine& Ling3RunnerState::engine() { return *impl_->engine; }
 
 std::size_t Ling3RunnerState::position() const { return impl_->position; }
 
+void Ling3RunnerState::Attach(PositionSink* sink, void* slot) {
+  impl_->sink = sink;
+  impl_->slot = slot;
+}
+
 void Ling3RunnerState::set_position(std::size_t position) {
   impl_->position = position;
+  if (impl_->sink != nullptr) {
+    impl_->sink->OnPosition(impl_->slot, position);
+  }
 }
 
 void Ling3Runner::SetEngineFactory(EngineFactory factory) {
@@ -360,12 +399,18 @@ std::unique_ptr<TextRunnerState> Ling3Runner::BindComponentState(
   if (engine == nullptr) {
     return nullptr;
   }
-  auto state = std::make_unique<Ling3RunnerState>(std::move(engine), impl_->config);
-  // The adapter copies this slot's snapshot, so it needs the engine that owns it.
-  auto* components = dynamic_cast<Ling3ComponentAdapter*>(&adapter);
-  if (components != nullptr) {
-    components->Register(&slot, &state->engine());
+  if (Trace()) {
+    std::fprintf(stderr, "[runner] bind slot %p\n", static_cast<const void*>(&slot));
   }
+  auto* components = dynamic_cast<Ling3ComponentAdapter*>(&adapter);
+  if (components == nullptr) {
+    return nullptr;
+  }
+  // The adapter takes ownership so that its snapshot copies always have a live engine,
+  // whatever order the host destroys states in.
+  Engine& owned = components->Adopt(&slot, std::move(engine));
+  auto state = std::make_unique<Ling3RunnerState>(owned, impl_->config);
+  state->Attach(components, &slot);
   return state;
 }
 
@@ -377,7 +422,15 @@ TextPrefillStep Ling3Runner::Prefill(TextRunnerState& state,
                                      std::size_t max_input_tokens) const {
   TextPrefillStep step;
   auto& runner_state = static_cast<Ling3RunnerState&>(state);
-  const std::size_t end = std::min(prompt.size(), offset + max_input_tokens);
+  if (Trace()) {
+    std::fprintf(stderr, "[runner] prefill offset %zu max %zu prompt %zu pos %zu\n", offset,
+                 max_input_tokens, prompt.size(), runner_state.position());
+  }
+  // The engine's chunked pass has a fixed width (Engine::PrefillChunk's buffer); a
+  // larger request would run past it. Clamping here also gives the host the frontier it
+  // expects: it simply asks for the next pass.
+  const std::size_t limit = std::min<std::size_t>(max_input_tokens, 32);
+  const std::size_t end = std::min(prompt.size(), offset + limit);
   std::vector<std::int32_t> ids(prompt.begin() + offset, prompt.begin() + end);
   std::string error;
   if (!ids.empty() &&
@@ -404,6 +457,9 @@ TextDecodeSelection Ling3Runner::SelectNext(TextRunnerState& state,
 }
 
 void Ling3Runner::Advance(TextRunnerState& state, TextRunnerToken token) const {
+  if (Trace()) {
+    std::fprintf(stderr, "[runner] advance token %u\n", static_cast<unsigned>(token));
+  }
   auto& runner_state = static_cast<Ling3RunnerState&>(state);
   std::string error;
   runner_state.engine().ForwardToken(static_cast<std::int32_t>(token),

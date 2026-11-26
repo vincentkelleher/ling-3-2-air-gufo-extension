@@ -29,12 +29,23 @@ struct Ling3RunnerOptions;
 /// Owns the engine and the position the runner has prefilled to.
 class Ling3RunnerState final : public TextRunnerState {
  public:
-  Ling3RunnerState(std::unique_ptr<Engine> engine, Ling3Config config);
+  /// The engine is owned by the cache adapter, which outlives every state bound to a
+  /// slot; the state only borrows it, so a destroyed state cannot leave a dangling
+  /// pointer behind in the adapter.
+  Ling3RunnerState(Engine& engine, Ling3Config config);
   ~Ling3RunnerState() override;
 
   [[nodiscard]] Engine& engine();
   [[nodiscard]] std::size_t position() const;
   void set_position(std::size_t position);
+
+  /// The cache asks the adapter for this slot's frontier, so the state reports where it
+  /// has prefilled to.
+  struct PositionSink {
+    virtual ~PositionSink() = default;
+    virtual void OnPosition(void* slot, std::size_t position) = 0;
+  };
+  void Attach(PositionSink* sink, void* slot);
   void Invalidate() noexcept override;
 
  private:
