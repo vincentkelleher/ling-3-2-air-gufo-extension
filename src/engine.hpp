@@ -37,6 +37,13 @@ class Engine {
   [[nodiscard]] bool ForwardToken(std::int32_t token, std::uint32_t position,
                                   std::string* error);
 
+  /// Runs one step from a caller-supplied embedding (`n_embd` floats, host) instead
+  /// of a token id. This is how vision rows enter the trunk: everything after the
+  /// embedding lookup is shared with ForwardToken, so positions, caches and logits
+  /// behave identically.
+  [[nodiscard]] bool ForwardEmbedding(const float* embedding, std::uint32_t position,
+                                      std::string* error);
+
   /// Chunked-path stage 1 (debug): embed `count` tokens into the chunk buffer,
   /// apply block 0's attention RMSNorm over all rows, and copy both out.
   void DebugChunkStage1(const std::int32_t* tokens, std::size_t count, float* host_x,
@@ -89,6 +96,9 @@ class Engine {
   [[nodiscard]] std::size_t DeviceBytes() const;
 
  private:
+  /// The shared trunk step: assumes `m.x` already holds this step's embedding.
+  [[nodiscard]] bool ForwardFromEmbedded(std::uint32_t position, std::string* error);
+
   Engine() = default;
   struct Impl;
   std::unique_ptr<Impl> impl_;

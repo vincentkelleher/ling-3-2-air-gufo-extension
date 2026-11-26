@@ -47,13 +47,15 @@ class VisionEncoder {
 
   /// Runs one encoder block over `tokens` rows of `x` (device, `[tokens][dim]`),
   /// in place.
+  /// `grid_cols` is the patch-grid width used by the vision RoPE (0 treats each row
+  /// as its own column, which is only meaningful for single-row test inputs).
   [[nodiscard]] bool RunBlock(std::uint32_t block, float* x, std::size_t tokens,
-                              std::string* error);
+                              std::string* error, std::uint32_t grid_cols = 0);
 
   /// Runs every block in sequence (or the first `max_blocks` when non-negative), in
   /// place.
   [[nodiscard]] bool RunAll(std::size_t tokens, float* x, std::string* error,
-                            int max_blocks = -1);
+                            int max_blocks = -1, std::uint32_t grid_cols = 0);
 
   /// Full image path: `chw` is `grid_h*patch x grid_w*patch x 3` floats, planar RGB
   /// and already normalised with the mmproj's mean/std. Writes one embedding row of

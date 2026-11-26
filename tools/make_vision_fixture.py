@@ -49,10 +49,41 @@ def tensor(reader, name):
     return values.reshape(shape) if shape else values
 
 
+def matrix(reader, name, out_dim, in_dim):
+    """A weight as [out][in]. ggml stores a tensor's slowest dimension last, so a
+    weight of shape [in, out] lies in memory as [out][in] (one row per output)."""
+    values = tensor(reader, name)
+    if values.size != out_dim * in_dim:
+        raise SystemExit(f'{name}: {values.size} values, expected {out_dim}x{in_dim}')
+    return np.asarray(values, dtype=np.float64).reshape(out_dim, in_dim)
+
+
 def layer_norm(x, weight, bias, eps=1e-6):
     mean = x.mean(axis=-1, keepdims=True)
     var = x.var(axis=-1, keepdims=True)
     return (x - mean) / np.sqrt(var + eps) * weight + bias
+
+
+def vision_rope(q_heads_kv, rows, cols, head_dim=72):
+    """llama.cpp's vision M-RoPE: pairs (i, i+half); row position for the first
+    section, column for the next; frequency 10000^(-2*index/half) reset per section."""
+    half = head_dim // 2
+    section = half // 2
+    for t in range(rows):
+        row, col = divmod(t, cols)
+        for i in range(half):
+            position = row if i < section else col
+            index = i if i < section else i - section
+            angle = position * (10000.0 ** (-2.0 * index / half))
+            c, s = np.cos(angle), np.sin(angle)
+            for tensor in q_heads_kv:
+                # Layout is (heads, tokens, head_dim): rotate one token across all
+                # heads. Copies, because views would be updated in place and the
+                # second output would use the rotated values instead of the originals.
+                lo = tensor[:, t, i].copy()
+                hi = tensor[:, t, i + half].copy()
+                tensor[:, t, i] = lo * c - hi * s
+                tensor[:, t, i + half] = lo * s + hi * c
 
 
 def gelu(x):
@@ -86,32 +117,33 @@ def main():
     bias = tensor(reader, 'v.patch_embd.bias')      # [1152]
     patch0 = rng.standard_normal(16 * 16 * 3).astype(np.float32)
     patch1 = rng.standard_normal(16 * 16 * 3).astype(np.float32)
-    flat0 = w0.reshape(-1, dim)
-    flat1 = w1.reshape(-1, dim)
-    embed = patch0 @ flat0 + patch1 @ flat1 + bias
+    flat0 = w0.reshape(dim, 768)
+    flat1 = w1.reshape(dim, 768)
+    embed = patch0 @ flat0.T + patch1 @ flat1.T + bias
 
     # One encoder block on `tokens` patch rows (position embeddings omitted here).
     ln1w, ln1b = tensor(reader, 'v.blk.0.ln1.weight'), tensor(reader, 'v.blk.0.ln1.bias')
     ln2w, ln2b = tensor(reader, 'v.blk.0.ln2.weight'), tensor(reader, 'v.blk.0.ln2.bias')
-    qkv_w, qkv_b = tensor(reader, 'v.blk.0.attn_qkv.weight'), tensor(reader, 'v.blk.0.attn_qkv.bias')
-    out_w, out_b = tensor(reader, 'v.blk.0.attn_out.weight'), tensor(reader, 'v.blk.0.attn_out.bias')
-    up_w, up_b = tensor(reader, 'v.blk.0.ffn_up.weight'), tensor(reader, 'v.blk.0.ffn_up.bias')
-    down_w, down_b = tensor(reader, 'v.blk.0.ffn_down.weight'), tensor(reader, 'v.blk.0.ffn_down.bias')
+    qkv_w, qkv_b = matrix(reader, 'v.blk.0.attn_qkv.weight', 3 * dim, dim), tensor(reader, 'v.blk.0.attn_qkv.bias')
+    out_w, out_b = matrix(reader, 'v.blk.0.attn_out.weight', dim, dim), tensor(reader, 'v.blk.0.attn_out.bias')
+    up_w, up_b = matrix(reader, 'v.blk.0.ffn_up.weight', ffn, dim), tensor(reader, 'v.blk.0.ffn_up.bias')
+    down_w, down_b = matrix(reader, 'v.blk.0.ffn_down.weight', dim, ffn), tensor(reader, 'v.blk.0.ffn_down.bias')
 
     h = layer_norm(x, ln1w, ln1b, eps)
-    qkv = h @ qkv_w + qkv_b                      # [tokens, 3*dim]
+    qkv = h @ qkv_w.T + qkv_b                    # [tokens, 3*dim]
     q, k, v = np.split(qkv, 3, axis=-1)
     q = q.reshape(tokens, heads, head_dim).transpose(1, 0, 2)
     k = k.reshape(tokens, heads, head_dim).transpose(1, 0, 2)
     v = v.reshape(tokens, heads, head_dim).transpose(1, 0, 2)
+    vision_rope([q, k], tokens, tokens, head_dim)
     scores = (q @ k.transpose(0, 2, 1)) / np.sqrt(head_dim)
     weights = np.exp(scores - scores.max(axis=-1, keepdims=True))
     weights /= weights.sum(axis=-1, keepdims=True)
     attn = (weights @ v).transpose(1, 0, 2).reshape(tokens, dim)
-    x = x + attn @ out_w + out_b
+    x = x + attn @ out_w.T + out_b
 
     h = layer_norm(x, ln2w, ln2b, eps)
-    x = x + gelu(h @ up_w + up_b) @ down_w + down_b
+    x = x + gelu(h @ up_w.T + up_b) @ down_w.T + down_b
 
     # Full image path on a small grid (2x2 patches = a 32x32 image): patchify with a
     # duplicated temporal frame, cropped position embeddings, every block, the 2x2
@@ -129,12 +161,26 @@ def main():
             block_px = image[:, gh * 16:(gh + 1) * 16, gw * 16:(gw + 1) * 16].reshape(-1)
             patches[row, :768] = block_px
             patches[row, 768:] = block_px
-    w0 = tensor(reader, 'v.patch_embd.weight').reshape(-1, dim)
-    w1 = tensor(reader, 'v.patch_embd.weight.1').reshape(-1, dim)
-    h = patches[:, :768] @ w0 + patches[:, 768:] @ w1 + bias
+    w0 = tensor(reader, 'v.patch_embd.weight').reshape(dim, 768)
+    w1 = tensor(reader, 'v.patch_embd.weight.1').reshape(dim, 768)
+    h = patches[:, :768] @ w0.T + patches[:, 768:] @ w1.T + bias
     embed_img0 = h[0].copy()
+
+    def resized_pos(row, col):
+        """Bilinear, corner-aligned resample of the 48x48 grid to the patch grid, as
+        llama.cpp's UPSCALE does (identity for the model's own 48x48)."""
+        grid_in = 48
+        sy = row * (grid_in - 1) / (grid - 1) if grid > 1 else 0.0
+        sx = col * (grid_in - 1) / (grid - 1) if grid > 1 else 0.0
+        y0, x0 = int(sy), int(sx)
+        y1, x1 = min(y0 + 1, grid_in - 1), min(x0 + 1, grid_in - 1)
+        fy, fx = sy - y0, sx - x0
+        at = lambda y, x: pos[y * grid_in + x]
+        return ((at(y0, x0) * (1 - fx) + at(y0, x1) * fx) * (1 - fy) +
+                (at(y1, x0) * (1 - fx) + at(y1, x1) * fx) * fy)
+
     for t in range(rows):
-        h[t] += pos[(t // grid) * 48 + (t % grid)]
+        h[t] += resized_pos(t // grid, t % grid)
     before_blocks = h.copy()
     traces = []
     nb = int(reader.fields['clip.vision.block_count'].contents())
@@ -142,23 +188,24 @@ def main():
         prefix = f'v.blk.{b}.'
         ln1w, ln1b = tensor(reader, prefix + 'ln1.weight'), tensor(reader, prefix + 'ln1.bias')
         ln2w, ln2b = tensor(reader, prefix + 'ln2.weight'), tensor(reader, prefix + 'ln2.bias')
-        qkv_w, qkv_b = tensor(reader, prefix + 'attn_qkv.weight'), tensor(reader, prefix + 'attn_qkv.bias')
-        out_w, out_b = tensor(reader, prefix + 'attn_out.weight'), tensor(reader, prefix + 'attn_out.bias')
-        up_w, up_b = tensor(reader, prefix + 'ffn_up.weight'), tensor(reader, prefix + 'ffn_up.bias')
-        down_w, down_b = tensor(reader, prefix + 'ffn_down.weight'), tensor(reader, prefix + 'ffn_down.bias')
+        qkv_w, qkv_b = matrix(reader, prefix + 'attn_qkv.weight', 3 * dim, dim), tensor(reader, prefix + 'attn_qkv.bias')
+        out_w, out_b = matrix(reader, prefix + 'attn_out.weight', dim, dim), tensor(reader, prefix + 'attn_out.bias')
+        up_w, up_b = matrix(reader, prefix + 'ffn_up.weight', ffn, dim), tensor(reader, prefix + 'ffn_up.bias')
+        down_w, down_b = matrix(reader, prefix + 'ffn_down.weight', dim, ffn), tensor(reader, prefix + 'ffn_down.bias')
         hh = layer_norm(h, ln1w, ln1b, eps)
-        qkv = hh @ qkv_w + qkv_b
+        qkv = hh @ qkv_w.T + qkv_b
         q, k, v = np.split(qkv, 3, axis=-1)
         q = q.reshape(rows, heads, head_dim).transpose(1, 0, 2)
         k = k.reshape(rows, heads, head_dim).transpose(1, 0, 2)
         v = v.reshape(rows, heads, head_dim).transpose(1, 0, 2)
+        vision_rope([q, k], rows, grid, head_dim)
         sc = (q @ k.transpose(0, 2, 1)) / np.sqrt(head_dim)
         w = np.exp(sc - sc.max(axis=-1, keepdims=True))
         w /= w.sum(axis=-1, keepdims=True)
         attn = (w @ v).transpose(1, 0, 2).reshape(rows, dim)
-        h = h + attn @ out_w + out_b
+        h = h + attn @ out_w.T + out_b
         hh = layer_norm(h, ln2w, ln2b, eps)
-        h = h + gelu(hh @ up_w + up_b) @ down_w + down_b
+        h = h + gelu(hh @ up_w.T + up_b) @ down_w.T + down_b
         if b in (0, 1, 2, 3, nb - 1):
             traces.append((b, h.copy()))
     tower_out = h.copy()
@@ -166,9 +213,10 @@ def main():
     # mm.input_norm is `dim`-wide: it normalises each patch before the 2x2 merge.
     h = layer_norm(h, norm_w, norm_b, eps)
     merged = np.concatenate([h[0], h[1], h[grid], h[grid + 1]]).astype(np.float32)
-    mm0w, mm0b = tensor(reader, 'mm.0.weight'), tensor(reader, 'mm.0.bias')
-    mm2w, mm2b = tensor(reader, 'mm.2.weight'), tensor(reader, 'mm.2.bias')
-    embedding = gelu(merged @ mm0w + mm0b) @ mm2w + mm2b
+    text_dim = int(reader.fields['clip.vision.projection_dim'].contents()) if 'clip.vision.projection_dim' in reader.fields else 2560
+    mm0w, mm0b = matrix(reader, 'mm.0.weight', text_dim, 4 * dim), tensor(reader, 'mm.0.bias')
+    mm2w, mm2b = matrix(reader, 'mm.2.weight', text_dim, text_dim), tensor(reader, 'mm.2.bias')
+    embedding = gelu(merged @ mm0w.T + mm0b) @ mm2w.T + mm2b
 
     with open(args.out, 'wb') as handle:
         handle.write(struct.pack('<iiiiii', tokens, dim, heads, head_dim, ffn, 1))

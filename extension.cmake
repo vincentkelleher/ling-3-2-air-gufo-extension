@@ -154,6 +154,23 @@ if(TARGET ling3_air_preprocess_test)
   set_tests_properties(ling3_air.preprocess PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 300)
 endif()
 
+# Image conditioning end to end (preprocess -> tower -> trunk).
+gufo_extension_target(
+  NAME ling3_air_image_forward_test
+  SOURCES
+    tests/image_forward_test.cpp
+  LINK_LIBRARIES
+    gufo_ling3_air_hip
+    gufo_ling3_air
+    gufo_ext_runtime
+    gufo_ext_core
+    gufo_ext_hip
+)
+if(TARGET ling3_air_image_forward_test)
+  add_test(NAME ling3_air.image_forward COMMAND ling3_air_image_forward_test)
+  set_tests_properties(ling3_air.image_forward PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 3600)
+endif()
+
 # Config and weight-map validation against a real GGUF.
 gufo_extension_target(
   NAME ling3_air_config_test

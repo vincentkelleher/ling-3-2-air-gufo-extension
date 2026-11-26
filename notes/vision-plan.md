@@ -150,3 +150,52 @@ prompt, and parity against the HF `BailingMoeV3VLForConditionalGeneration` tower
 (criterion 3) — that needs torch + transformers in the venv, which are not
 installed; the numpy reference from the same weights is what stands behind the
 numbers above.
+
+## Two bugs that made the tower wrong while looking right (2026-11-27)
+
+The numpy reference agreed with the kernel at every stage while both produced
+garbage descriptions. Agreement between two implementations that share an assumption
+proves nothing; `llama-mtmd-debug -p encode` (which prints per-node values and sums)
+was the reference that broke the tie.
+
+1. **Weight layout.** ggml stores a tensor's slowest dimension last, so a weight of
+   shape `[in, out]` lies in memory as `[out][in]` — one row per output, the same
+   layout as the text GEMV. The vision kernels used the transpose. The tell was that
+   *sums* matched exactly while *values* did not: with a uniform input, a transposed
+   matvec preserves the sum and permutes the outputs. After the fix, block 0's stages
+   match llama.cpp to four decimals (qkv -161.037 vs -161.062, attention 30.925 vs
+   30.905, residual 115.113 vs 115.105).
+2. **A rope race.** `VisionRopeKernel` launched 64 threads but looped over the rotated
+   dims serially, so every thread re-applied the same rotation: the result depended on
+   scheduling. It now splits the loop across threads.
+
+Also settled against llama.cpp's graph rather than by reasoning:
+
+- Position embeddings are **resampled** with bilinear sampling and aligned corners
+  (`ggml_upscale`), not cropped. For the model's own 48x48 grid that is the identity,
+  so production images pay nothing, but any other grid needs it.
+- A still image runs **both** patch kernels on the same frame and sums them
+  (`build_inp_temporal_merge` with `n_batch == 1`), which is what we do.
+- Vision M-RoPE pairs `(i, i + head_dim/2)` inside each head, with the patch's row
+  position for the first `head_dim/4` pairs and its column for the next, frequency
+  `10000^(-2 i / (head_dim/2))` reset per section.
+
+Numerical agreement with llama.cpp on a constant-gray 32x32 input (2x2 patches):
+
+| quantity | ours | llama.cpp |
+| --- | --- | --- |
+| patch embed + bias | 170.750095 | 170.750427 |
+| + position embeddings | 137.946183 | 137.946426 |
+| block 0 qkv (with bias) | -161.037051 | -161.062393 |
+| block 0 attention | 30.925476 | 30.905478 |
+| block 0 residual | 115.112945 | 115.105118 |
+| final embedding | -3.618567 | -3.619933 |
+| first three values | 0.0071 -0.0857 0.0462 | 0.0064 -0.0860 0.0460 |
+| last three values | -0.0011 -0.0171 0.0724 | -0.0014 -0.0160 0.0720 |
+
+The remaining difference is llama.cpp's flash attention running K/V through f16.
+
+Behaviourally, on a red circle with a blue square and small text, this extension now
+answers: "there's a large red circle, and inside it, centered, is a blue square. In
+the upper-left corner, there's small text" — where llama.cpp says "a large, solid red
+circle". Both are correct; ours names the square and the text too.

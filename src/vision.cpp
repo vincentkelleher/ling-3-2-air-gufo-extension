@@ -4,7 +4,10 @@
 
 #include <gufo/ext/gguf_reader.hpp>
 
+#include <algorithm>
 #include <cmath>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <string>
 #include <vector>
@@ -19,13 +22,16 @@ using hip::LaunchAddPosEmb;
 using hip::LaunchMerge2x2;
 using hip::LaunchGelu;
 using hip::LaunchLayerNorm;
-using hip::LaunchMatvecInMajor;
-using hip::LaunchMatvecInMajorBatch;
+using hip::LaunchMatvecOutMajor;
+using hip::LaunchMatvecOutMajorBatch;
 using hip::LaunchVisionAttention;
+using hip::LaunchVisionRope;
 
 struct TensorRef {
   float* device{nullptr};
   std::size_t count{0};
+  /// Host copy, kept for tensors that are resampled per image (position embeddings).
+  std::vector<float> host;
 };
 
 /// Copies one mmproj tensor to the device as F32, converting BF16 and F32.
@@ -70,6 +76,62 @@ bool Upload(const core::GgufReader& reader, const std::string& name,
   }
   out->count = count;
   return true;
+}
+
+/// Same as Upload, keeping the host values for later resampling.
+bool UploadWithHost(const core::GgufReader& reader, const std::string& name,
+                    TensorRef* out, std::string* error) {
+  if (!Upload(reader, name, out, error)) {
+    return false;
+  }
+  out->host.resize(out->count);
+  if (hipMemcpy(out->host.data(), out->device, out->count * sizeof(float),
+                hipMemcpyDeviceToHost) != hipSuccess) {
+    if (error != nullptr) *error = "vision: cannot read back " + name;
+    return false;
+  }
+  return true;
+}
+
+/// Debug aide: `LING3_VISION_SUMS=1` prints a stage's total, so a divergence can be
+/// bisected against llama-mtmd-debug's per-node sums on the same input.
+bool SumsEnabled() {
+  static const bool enabled = std::getenv("LING3_VISION_SUMS") != nullptr;
+  return enabled;
+}
+
+/// Sums the q, k and v thirds of a packed qkv buffer (debug aide).
+void ReportQkvSums(const float* device, std::size_t tokens, std::size_t dim,
+                   std::uint32_t block, bool after_rope) {
+  if (!SumsEnabled()) {
+    return;
+  }
+  std::vector<float> host(tokens * 3 * dim);
+  hipMemcpy(host.data(), device, host.size() * sizeof(float), hipMemcpyDeviceToHost);
+  double sums[3] = {0, 0, 0};
+  for (std::size_t t = 0; t < tokens; ++t) {
+    for (std::size_t part = 0; part < 3; ++part) {
+      for (std::size_t d = 0; d < dim; ++d) {
+        sums[part] += host[(t * 3 + part) * dim + d];
+      }
+    }
+  }
+  std::fprintf(stderr, "vision[%u] %s q %.6f k %.6f v %.6f\n", block,
+               after_rope ? "rope(q,k)" : "pre-rope  ", sums[0], sums[1], sums[2]);
+}
+
+void ReportSum(const char* label, std::uint32_t block, const float* device,
+               std::size_t count) {
+  if (!SumsEnabled()) {
+    return;
+  }
+  std::vector<float> host(count);
+  hipMemcpy(host.data(), device, count * sizeof(float), hipMemcpyDeviceToHost);
+  double total = 0.0;
+  for (const float value : host) {
+    total += value;
+  }
+  std::fprintf(stderr, "vision[%u] %-14s sum %.6f\n", block, label, total);
 }
 
 struct BlockWeights {
@@ -211,7 +273,7 @@ std::unique_ptr<VisionEncoder> VisionEncoder::Create(const core::GgufReader& mmp
     }
   }
   const bool projector_ok =
-      Upload(mmproj, "v.position_embd.weight", &m.pos_embd, &local) &&
+      UploadWithHost(mmproj, "v.position_embd.weight", &m.pos_embd, &local) &&
       Upload(mmproj, "mm.input_norm.weight", &m.input_norm_w, &local) &&
       Upload(mmproj, "mm.input_norm.bias", &m.input_norm_b, &local) &&
       Upload(mmproj, "mm.0.weight", &m.mm0_w, &local) &&
@@ -259,8 +321,8 @@ bool VisionEncoder::PatchEmbed(const float* patch0, const float* patch1, float* 
   }
   hipMemcpy(device_p0, patch0, in * sizeof(float), hipMemcpyHostToDevice);
   hipMemcpy(device_p1, patch1, in * sizeof(float), hipMemcpyHostToDevice);
-  LaunchMatvecInMajor(device_p0, m.patch0.device, nullptr, device_a, in, dim, nullptr);
-  LaunchMatvecInMajor(device_p1, m.patch1.device, m.patch_bias.device, device_b, in, dim,
+  LaunchMatvecOutMajor(device_p0, m.patch0.device, nullptr, device_a, in, dim, nullptr);
+  LaunchMatvecOutMajor(device_p1, m.patch1.device, m.patch_bias.device, device_b, in, dim,
                       nullptr);
   LaunchAddInto(device_a, device_a, device_b, dim, nullptr);
   hipStreamSynchronize(nullptr);
@@ -273,7 +335,7 @@ bool VisionEncoder::PatchEmbed(const float* patch0, const float* patch1, float* 
 }
 
 bool VisionEncoder::RunBlock(std::uint32_t block, float* x, std::size_t tokens,
-                             std::string* error) {
+                             std::string* error, std::uint32_t grid_cols) {
   Impl& m = *impl_;
   if (block >= m.blocks.size()) {
     if (error != nullptr) *error = "vision: block out of range";
@@ -290,20 +352,28 @@ bool VisionEncoder::RunBlock(std::uint32_t block, float* x, std::size_t tokens,
 
   LaunchLayerNorm(m.x, w.ln1_w.device, w.ln1_b.device, m.h, tokens, dim, m.config.eps,
                   nullptr);
-  LaunchMatvecInMajorBatch(m.h, w.qkv_w.device, w.qkv_b.device, m.qkv, tokens, dim,
+  LaunchMatvecOutMajorBatch(m.h, w.qkv_w.device, w.qkv_b.device, m.qkv, tokens, dim,
                            3 * dim, nullptr);
+  ReportSum("qkv", block, m.qkv, tokens * 3 * dim);
+  ReportQkvSums(m.qkv, tokens, dim, block, false);
+  LaunchVisionRope(m.qkv, tokens, m.config.heads, m.config.HeadDim(), grid_cols,
+                   nullptr);
+  ReportQkvSums(m.qkv, tokens, dim, block, true);
   LaunchVisionAttention(m.qkv, m.attn, tokens, m.config.heads, m.config.HeadDim(),
                         nullptr);
-  LaunchMatvecInMajorBatch(m.attn, w.out_w.device, w.out_b.device, m.h, tokens, dim, dim,
+  ReportSum("attn_raw", block, m.attn, tokens * dim);
+  LaunchMatvecOutMajorBatch(m.attn, w.out_w.device, w.out_b.device, m.h, tokens, dim, dim,
                            nullptr);
+  ReportSum("attn_out", block, m.h, rows);
   LaunchAddInto(m.x, m.x, m.h, rows, nullptr);
+  ReportSum("block_out", block, m.x, rows);
 
   LaunchLayerNorm(m.x, w.ln2_w.device, w.ln2_b.device, m.h, tokens, dim, m.config.eps,
                   nullptr);
-  LaunchMatvecInMajorBatch(m.h, w.up_w.device, w.up_b.device, m.ffn, tokens, dim,
+  LaunchMatvecOutMajorBatch(m.h, w.up_w.device, w.up_b.device, m.ffn, tokens, dim,
                            m.config.ffn, nullptr);
   LaunchGelu(m.ffn, m.ffn, tokens * m.config.ffn, nullptr);
-  LaunchMatvecInMajorBatch(m.ffn, w.down_w.device, w.down_b.device, m.h, tokens,
+  LaunchMatvecOutMajorBatch(m.ffn, w.down_w.device, w.down_b.device, m.h, tokens,
                            m.config.ffn, dim, nullptr);
   LaunchAddInto(m.x, m.x, m.h, rows, nullptr);
   if (hipStreamSynchronize(nullptr) != hipSuccess) {
@@ -315,13 +385,13 @@ bool VisionEncoder::RunBlock(std::uint32_t block, float* x, std::size_t tokens,
 }
 
 bool VisionEncoder::RunAll(std::size_t tokens, float* x, std::string* error,
-                           int max_blocks) {
+                           int max_blocks, std::uint32_t grid_cols) {
   const std::uint32_t limit =
       max_blocks < 0 || static_cast<std::uint32_t>(max_blocks) > impl_->config.blocks
           ? impl_->config.blocks
           : static_cast<std::uint32_t>(max_blocks);
   for (std::uint32_t b = 0; b < limit; ++b) {
-    if (!RunBlock(b, x, tokens, error)) {
+    if (!RunBlock(b, x, tokens, error, grid_cols)) {
       return false;
     }
   }
@@ -401,13 +471,55 @@ bool VisionEncoder::EncodeImage(const float* chw, std::uint32_t grid_h,
             hipMemcpyHostToDevice);
 
   // Patch embed: two halves of the temporal kernel, summed, plus bias.
-  LaunchMatvecInMajorBatch(device_patches, m.patch0.device, m.patch_bias.device, hidden,
+  LaunchMatvecOutMajorBatch(device_patches, m.patch0.device, m.patch_bias.device, hidden,
                            tokens, patch_values, dim, nullptr);
-  LaunchMatvecInMajorBatch(device_patches + tokens * patch_values, m.patch1.device,
+  LaunchMatvecOutMajorBatch(device_patches + tokens * patch_values, m.patch1.device,
                            nullptr, second, tokens, patch_values, dim, nullptr);
   LaunchAddInto(hidden, hidden, second, tokens * dim, nullptr);
-  LaunchAddPosEmb(hidden, m.pos_embd.device, tokens, grid_w, m.pos_grid, dim, nullptr);
-  if (!RunAll(tokens, hidden, error, max_blocks)) {
+  ReportSum("patch_embed", 0, hidden, tokens * dim);
+  // Position embeddings are resampled to the patch grid with bilinear sampling and
+  // aligned corners, as llama.cpp's UPSCALE does. For the model's own 48x48 grid this
+  // is the identity, so production images pay nothing extra.
+  {
+    const std::uint32_t grid = m.pos_grid;
+    std::vector<float> rows(tokens * dim);
+    const double scale_y =
+        grid_h > 1 ? static_cast<double>(grid - 1) / (grid_h - 1) : 0.0;
+    const double scale_x =
+        grid_w > 1 ? static_cast<double>(grid - 1) / (grid_w - 1) : 0.0;
+    for (std::uint32_t t = 0; t < tokens; ++t) {
+      const double source_y = (t / grid_w) * scale_y;
+      const double source_x = (t % grid_w) * scale_x;
+      const std::uint32_t y0 = static_cast<std::uint32_t>(source_y);
+      const std::uint32_t x0 = static_cast<std::uint32_t>(source_x);
+      const std::uint32_t y1 = std::min(y0 + 1, grid - 1);
+      const std::uint32_t x1 = std::min(x0 + 1, grid - 1);
+      const double fy = source_y - y0;
+      const double fx = source_x - x0;
+      for (std::uint32_t d = 0; d < dim; ++d) {
+        const auto at = [&](std::uint32_t y, std::uint32_t x) {
+          return static_cast<double>(m.pos_embd.host[(static_cast<std::size_t>(y) * grid + x) * dim + d]);
+        };
+        const double top = at(y0, x0) * (1.0 - fx) + at(y0, x1) * fx;
+        const double bottom = at(y1, x0) * (1.0 - fx) + at(y1, x1) * fx;
+        rows[static_cast<std::size_t>(t) * dim + d] =
+            static_cast<float>(top * (1.0 - fy) + bottom * fy);
+      }
+    }
+    float* device_pos = nullptr;
+    if (hipMalloc(reinterpret_cast<void**>(&device_pos), rows.size() * sizeof(float)) !=
+        hipSuccess) {
+      release();
+      if (error != nullptr) *error = "vision: position buffer failed";
+      return false;
+    }
+    hipMemcpy(device_pos, rows.data(), rows.size() * sizeof(float),
+              hipMemcpyHostToDevice);
+    LaunchAddInto(hidden, hidden, device_pos, tokens * dim, nullptr);
+    hipFree(device_pos);
+  }
+  ReportSum("embed_pos", 0, hidden, tokens * dim);
+  if (!RunAll(tokens, hidden, error, max_blocks, grid_w)) {
     release();
     return false;
   }
@@ -422,10 +534,10 @@ bool VisionEncoder::EncodeImage(const float* chw, std::uint32_t grid_h,
   LaunchMerge2x2(hidden, merged, grid_h, grid_w, dim, nullptr);
   hipMemcpy(normed, merged, merged_rows * merged_dim * sizeof(float),
             hipMemcpyDeviceToDevice);
-  LaunchMatvecInMajorBatch(normed, m.mm0_w.device, m.mm0_b.device, projected,
+  LaunchMatvecOutMajorBatch(normed, m.mm0_w.device, m.mm0_b.device, projected,
                            merged_rows, merged_dim, m.text_dim, nullptr);
   LaunchGelu(projected, projected, merged_rows * m.text_dim, nullptr);
-  LaunchMatvecInMajorBatch(projected, m.mm2_w.device, m.mm2_b.device, normed,
+  LaunchMatvecOutMajorBatch(projected, m.mm2_w.device, m.mm2_b.device, normed,
                            merged_rows, m.text_dim, m.text_dim, nullptr);
   if (hipStreamSynchronize(nullptr) != hipSuccess) {
     release();

@@ -404,6 +404,29 @@ std::unique_ptr<Engine> Engine::Create(const core::GgufReader& reader,
 bool Engine::ForwardToken(std::int32_t token, std::uint32_t position,
                           std::string* error) {
   Impl& m = *impl_;
+  hip::LaunchEmbeddingRow(m.Dev(m.weights.token_embd),
+                          RawType(m.weights.token_embd.type), m.config.n_vocab,
+                          m.config.n_embd, token, m.x, m.queue);
+  return ForwardFromEmbedded(position, error);
+}
+
+bool Engine::ForwardEmbedding(const float* embedding, std::uint32_t position,
+                              std::string* error) {
+  Impl& m = *impl_;
+  if (embedding == nullptr) {
+    if (error != nullptr) *error = "ForwardEmbedding: null embedding";
+    return false;
+  }
+  if (hipMemcpy(m.x, embedding, m.config.n_embd * sizeof(float),
+                hipMemcpyHostToDevice) != hipSuccess) {
+    if (error != nullptr) *error = "ForwardEmbedding: cannot upload the embedding";
+    return false;
+  }
+  return ForwardFromEmbedded(position, error);
+}
+
+bool Engine::ForwardFromEmbedded(std::uint32_t position, std::string* error) {
+  Impl& m = *impl_;
   const Ling3Config& c = m.config;
   const auto& weights = m.weights;
   const float eps = c.rms_eps;
@@ -501,9 +524,6 @@ bool Engine::ForwardToken(std::int32_t token, std::uint32_t position,
     std::fprintf(stderr, "%s %u: rms %.4f max %.4f nan %d\n", label, layer,
                  std::sqrt(sum / n_embd), maximum, nan);
   };
-
-  hip::LaunchEmbeddingRow(dev(weights.token_embd), RawType(weights.token_embd.type),
-                          c.n_vocab, n_embd, token, m.x, stream);
 
   for (std::uint32_t il = 0; il < c.n_layer; ++il) {
     const LayerWeights& layer = weights.layers[il];

@@ -24,25 +24,27 @@ __global__ void MatvecInMajorKernel(const float* x, const float* w, const float*
     return;
   }
   float sum = bias == nullptr ? 0.0f : bias[o];
+  const float* row = w + static_cast<std::size_t>(o) * in;
   for (int i = 0; i < in; ++i) {
-    sum += x[i] * w[static_cast<std::size_t>(i) * out + o];
+    sum += x[i] * row[i];
   }
   y[o] = sum;
 }
 
 /// Batched form: rows tokens share the weight read.
-__global__ void MatvecInMajorBatchKernel(const float* x, const float* w,
-                                         const float* bias, float* y, int tokens,
-                                         int in, int out) {
+__global__ void MatvecOutMajorBatchKernel(const float* x, const float* w,
+                                          const float* bias, float* y, int tokens,
+                                          int in, int out) {
   const int o = blockIdx.x * blockDim.x + threadIdx.x;
   if (o >= out) {
     return;
   }
+  const float* row = w + static_cast<std::size_t>(o) * in;
   for (int t = 0; t < tokens; ++t) {
     float sum = bias == nullptr ? 0.0f : bias[o];
-    const float* row = x + static_cast<std::size_t>(t) * in;
+    const float* x_row = x + static_cast<std::size_t>(t) * in;
     for (int i = 0; i < in; ++i) {
-      sum += row[i] * w[static_cast<std::size_t>(i) * out + o];
+      sum += x_row[i] * row[i];
     }
     y[static_cast<std::size_t>(t) * out + o] = sum;
   }
@@ -114,6 +116,45 @@ __global__ void AddKernel(float* y, const float* a, const float* b, int count) {
   const int i = blockIdx.x * blockDim.x + threadIdx.x;
   if (i < count) {
     y[i] = a[i] + b[i];
+  }
+}
+
+/// Vision M-RoPE, as llama.cpp's ling3vl graph applies it: for a head of `head_dim`
+/// the first `head_dim/2` dims pair with the last `head_dim/2`, the first half of
+/// those pairs rotate by the patch's row position and the second half by its column,
+/// with frequency 10000^(-2 i / (head_dim/2)) reset at each section. Applied to q and
+/// k in place; qkv is laid out [token][3 * dim] with v after k.
+__global__ void VisionRopeKernel(float* qkv, int tokens, int heads, int head_dim,
+                                 int cols) {
+  const int t = blockIdx.x;   // token
+  const int head = blockIdx.y;
+  if (t >= tokens || head >= heads) {
+    return;
+  }
+  const int dim = heads * head_dim;
+  const int half = head_dim / 2;      // 36 for this tower
+  const int section = half / 2;       // 18
+  const int row = cols > 0 ? t / cols : 0;
+  const int col = cols > 0 ? t % cols : t;
+  float* q = qkv + static_cast<std::size_t>(t) * 3 * dim + head * head_dim;
+  float* k = q + dim;
+  // Threads split the rotated dims; without this every thread would re-apply the
+  // whole rotation and the result would depend on scheduling.
+  for (int i = threadIdx.x; i < half; i += blockDim.x) {
+    const int position = i < section ? row : col;
+    const int index = i < section ? i : i - section;
+    const float angle =
+        static_cast<float>(position) * powf(10000.0f, -2.0f * index / half);
+    const float c = cosf(angle);
+    const float s = sinf(angle);
+    const float q0 = q[i];
+    const float q1 = q[i + half];
+    q[i] = q0 * c - q1 * s;
+    q[i + half] = q0 * s + q1 * c;
+    const float k0 = k[i];
+    const float k1 = k[i + half];
+    k[i] = k0 * c - k1 * s;
+    k[i + half] = k0 * s + k1 * c;
   }
 }
 
@@ -246,7 +287,7 @@ void LaunchMerge2x2(const float* x, float* out, std::size_t rows, std::size_t co
                                              static_cast<int>(dim));
 }
 
-void LaunchMatvecInMajor(const float* x, const float* w, const float* bias, float* y,
+void LaunchMatvecOutMajor(const float* x, const float* w, const float* bias, float* y,
                          std::size_t in, std::size_t out, hipStream_t stream) {
   const int blocks = static_cast<int>((out + kThreads - 1) / kThreads);
   MatvecInMajorKernel<<<blocks, kThreads, 0, stream>>>(x, w, bias, y,
@@ -254,11 +295,11 @@ void LaunchMatvecInMajor(const float* x, const float* w, const float* bias, floa
                                                       static_cast<int>(out));
 }
 
-void LaunchMatvecInMajorBatch(const float* x, const float* w, const float* bias,
-                              float* y, std::size_t tokens, std::size_t in,
-                              std::size_t out, hipStream_t stream) {
+void LaunchMatvecOutMajorBatch(const float* x, const float* w, const float* bias,
+                               float* y, std::size_t tokens, std::size_t in,
+                               std::size_t out, hipStream_t stream) {
   const int blocks = static_cast<int>((out + kThreads - 1) / kThreads);
-  MatvecInMajorBatchKernel<<<blocks, kThreads, 0, stream>>>(
+  MatvecOutMajorBatchKernel<<<blocks, kThreads, 0, stream>>>(
       x, w, bias, y, static_cast<int>(tokens), static_cast<int>(in),
       static_cast<int>(out));
 }
@@ -279,6 +320,15 @@ void LaunchAddInto(float* y, const float* a, const float* b, std::size_t count,
                    hipStream_t stream) {
   const int blocks = static_cast<int>((count + kThreads - 1) / kThreads);
   AddKernel<<<blocks, kThreads, 0, stream>>>(y, a, b, static_cast<int>(count));
+}
+
+void LaunchVisionRope(float* qkv, std::size_t tokens, std::size_t heads,
+                      std::size_t head_dim, std::size_t cols, hipStream_t stream) {
+  const dim3 grid(static_cast<unsigned>(tokens), static_cast<unsigned>(heads));
+  VisionRopeKernel<<<grid, 64, 0, stream>>>(qkv, static_cast<int>(tokens),
+                                            static_cast<int>(heads),
+                                            static_cast<int>(head_dim),
+                                            static_cast<int>(cols));
 }
 
 void LaunchVisionAttention(const float* qkv, float* out, std::size_t tokens,

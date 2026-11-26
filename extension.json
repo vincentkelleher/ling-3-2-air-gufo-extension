@@ -117,6 +117,13 @@
         "testing"
       ],
       "role": "test"
+    },
+    "ling3_air_image_forward_test": {
+      "requires": [
+        "hip",
+        "testing"
+      ],
+      "role": "test"
     }
   },
   "licenses": [
