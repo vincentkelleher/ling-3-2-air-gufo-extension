@@ -178,3 +178,42 @@ adapter that reports **no components** (empty `Components()`, `PlanPrefill` retu
 `{end}`), which satisfies the interface without prefix reuse. That skips the row copies,
 private-state capture and borrow views entirely and is worth trying before the full
 adapter: it would make `gufo serve llm` work with full prefill per request.
+
+## The no-component adapter: exact type surface (2026-11-27)
+
+Read from the installed tree (`/work/gufo-src/src/cache/*.hpp`, `src/ext/text.hpp`). With
+`Components()` empty, no row or private-state transfer ever happens, so four adapter
+methods are unreachable in practice — but they still have to compile.
+
+Types:
+
+| name | shape |
+| --- | --- |
+| `cache::Rows` | `using Rows = std::uint64_t;` |
+| `cache::ComponentId` | `{ std::uint32_t value; }` |
+| `cache::ComponentDescriptor` | id, layout_version, kind, row_bytes, rows_per_chunk, state_bytes, window_rows |
+| `cache::MutationGuard` | abstract, non-copyable; `CreateSlot(MutationGuard&)` ignores it |
+| `Completion` | `explicit Completion(std::unique_ptr<CompletionSignal>)` |
+| `CompletionSignal` | abstract (`Ready()` const noexcept, …) — needs a local always-ready subclass |
+| `Stream` | abstract (`Synchronize()` …) — the signatures the stubs accept |
+| `ComponentCacheResources` | **struct**: owner, adapter, stream/restore_stream/background_stream leases, allocate/share/device_only hooks |
+
+Adapter methods that must compile but are unreachable with no components:
+`BeginRestore`, `CapturePrivate(+Piece)`, `LoadPrivate(+Piece)`, `CopyRowsOut/In`,
+`BorrowRowsView`. Stub strategy: an always-ready `CompletionSignal`, `Positions()` →
+empty, `PlanPrefill(first, end)` → one `Rows` range `{first, end}`, `Validate()` → true,
+`Invalidate()` → true, `GetCapabilities()`/`CompatibilityIdentity()` minimal but real
+(model digest from `models.lock.json`, layout constant, context).
+
+Order of work, so each step is independently testable:
+1. `NullAdapter` + `Slot` + ready signal (compiles standalone against `adapter.hpp`).
+2. `Ling3RunnerState : TextRunnerState` holding the `Engine`, position, and prompt.
+3. `Ling3Runner : TextModelRunner`: Descriptor/ResourceClaim/SupportedPlans/Tokenize/
+   RenderAndTokenize/Decode delegate to the existing tokenizer and chat template;
+   Prefill → `PrefillChunk`; SelectNext → sampler; Advance → `ForwardToken`;
+   CheckpointPosition → position; `CreateComponentCacheResources` → owner + NullAdapter;
+   `BindComponentState` → state; `ReconcileComponentState` → no-op.
+4. Register `create` in the provider and run `gufo serve llm` with one request.
+
+Known unknowns left: the `sampling::SamplerState` API for `SelectNext`, and the fields
+`TextRunnerDescriptor` requires (the installed API has no `TextSchedulingProfile`).
