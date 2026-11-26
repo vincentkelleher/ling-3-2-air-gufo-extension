@@ -4,7 +4,11 @@
 
 **What runs**: `tests/forward_test.cpp` loads the model zero-copy (80 GiB in ~2 s
 warm) and decodes on the GPU at **12.49 tok/s** — level with llama.cpp's CPU path
-(12.52) and 25 % of the measured 49.9 tok/s roofline. Deterministic (hash-equal
+(12.52) and 25 % of the measured 49.9 tok/s roofline. `Engine::PrefillChunk` adds a
+chunked path: projections, out-projection, dense FFN and shared expert batched over
+the chunk, giving **16.13 tok/s prefill (1.29x)** at 104 tokens with the same
+argmax. Engine primitives ready but unused: `ForwardMtp` (drafts 7 of 9),
+`VerifyDrafts`/`SnapshotState`/`RestoreState` (unverified). Deterministic (hash-equal
 across runs), coherent, and **identical to llama.cpp for the first eight tokens**
 of the pinned prompt, then a split decided by a 0.048 logit margin (measured with
 the corrected prompt and marker; an earlier 0.022 came from a differently framed
@@ -24,10 +28,12 @@ weights transposed; conv state slots `channels` apart instead of `3*channels`
 needing dequantization.
 
 **Not done yet, in dependency order**:
-1. Batched prefill — `notes/prefill-design.md` is the executable plan; this is
-   the largest performance lever and the reason prefill currently equals decode.
-2. `TextModelRunner`: component cache adapter + HTTP serving (`gufo serve llm`),
-   continuation, streaming, cancellation.
+1. `TextModelRunner` — `notes/runner-plan.md` is the executable plan (methods,
+   per-session memory, cache split, scheduling, five-step order). This is what
+   turns the engine into a served model.
+2. Make a K-token pass cost about one token's weight traffic — the same work lifts
+   prefill past 1.29x and makes the MTP accept loop pay (`notes/prefill-design.md`,
+   including the removed grouped-MoE attempt and its likely cause).
 3. MTP speculative decoding (the MTP block is mapped but unused).
 4. Vision: mmproj encoder + image path (the projector is downloaded).
 5. Token-for-token parity: the integer dots already match llama.cpp, so the
