@@ -208,6 +208,22 @@ int main(int argc, char** argv) {
     if (!rewind()) return 1;
   }
 
+  // 2c. Restore after TWO consecutive feeds, which is what a verify pass does.
+  {
+    const std::vector<double> before = engine->DebugStateDigest();
+    engine->SnapshotState();
+    engine->ForwardToken(engine->Argmax(), start, &error);
+    engine->ForwardToken(engine->Argmax(), start + 1, &error);
+    engine->RestoreState();
+    const std::vector<double> after = engine->DebugStateDigest();
+    std::size_t differing = 0;
+    for (std::size_t i = 0; i < before.size(); ++i) {
+      if (before[i] != after[i]) ++differing;
+    }
+    std::printf("     two-feed restore: %zu of %zu layers differ\n", differing, before.size());
+    if (!rewind()) return 1;
+  }
+
   // 3. Speculation: draft one token with the MTP head, verify trunk + draft in one pass,
   // accept the draft only when the trunk's own token matches, rewind and re-feed exactly what
   // was accepted. VerifyDrafts checkpoints internally, so this loop takes none of its own.
@@ -244,6 +260,11 @@ int main(int argc, char** argv) {
       }
       rows[1] = engine->Argmax();
       const bool took_draft = rows[0] == draft;
+      if (speculative.size() < reference.size()) {
+        std::printf("     step %zu: pos %u current %d draft %d trunk %d reference %d\n",
+                    speculative.size(), position, current, draft, rows[0],
+                    reference[speculative.size()]);
+      }
       speculative.push_back(current);
       if (took_draft) {
         speculative.push_back(draft);

@@ -469,6 +469,21 @@ again gives **0 of 43 layers differing**, so the head's writes are entirely cove
 snapshot and a rejected draft leaves no trace. That leaves the loop's own control flow (the
 sequence of feeds and rewinds, not any kernel) as the only remaining explanation.
 
+Two more probes narrow it further, and the per-step trace localises the drift exactly:
+
+    step 0: current 678   (= reference)   step 4: current 259   (= reference)
+    step 5: current 4147  (reference 22365)  <- the trunk itself answers differently by now
+
+- a two-feed then restore round trip is exact (**0 of 43 layers differ**), which is what a
+  verification pass does;
+- the per-step trace shows `current` matching the reference for the first five tokens and the
+  *trunk* then computing 4147 where the reference computed 22365, so the loop is internally
+  consistent and the state has drifted by iteration five.
+
+So restore is exact after one feed, after two feeds, and after an MTP call, individually — only
+their composition in the loop is unexplained. That is the point to instrument next (digest around
+`MTP + feed + feed + restore` as one sequence, then per iteration), not the kernels.
+
 Next owner: instrument the loop's per-step `current` and compare it with the plain stream's
 token at the same position. With restore now trusted, the divergence can only be in how the
 draft/verify sequence advances `position`, which is a bookkeeping read of one value, not a
