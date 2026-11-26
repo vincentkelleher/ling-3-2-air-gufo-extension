@@ -801,3 +801,29 @@ be measured from this export. The task's argmax clause is met and evidenced
 (engine argmax 678 = `The`, llama.cpp's first generated token for the same
 prompt). If the RMS is required, the practical route is a llama.cpp build that
 prints logits to stdout for one token, not this file.
+
+## K-quant activation hoisting: attempted, broke correctness, reverted (2026-11-27)
+
+Profile after the earlier wins (73.2 ms/token over 3329 launches/token):
+
+| kernel | ms/token | share | launches/token |
+| --- | --- | --- | --- |
+| Q8_0 GEMV (attention) | 24.8 | 34 % | 382 |
+| Q4_K GEMV (expert gate) | 18.1 | 25 % | 768 |
+| Q6_K GEMV (expert up/down) | 12.8 | 17 % | 152 |
+| delta rule | 5.9 | 8 % | 35 |
+| F32 GEMV | 2.9 | 4 % | 82 |
+| router | 2.1 | 3 % | 40 |
+
+Q8_0 runs at ~72 % of peak bandwidth, but the K-quant expert GEMVs are 5-12x off
+it: each lane re-quantizes the same activations 256 times per block. Hoisting
+that into a Q8_K-style per-call buffer (which is what llama.cpp does) looked like
+the obvious next win: measured **15.25 tok/s** -- but the output was empty
+(control tokens) and the operator suite flagged Q4_K and Q6_K rows immediately,
+so it was reverted.
+
+Two bugs were found and fixed on the way (a missing activation scale in the Q5_K
+branch, and the per-block scale being written only by thread 0) without making the
+path correct, so something else differs as well. Do not retry this without
+extending the operator suite to compare *the prepared-activation path* against the
+per-row path directly.
