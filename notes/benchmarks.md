@@ -28,7 +28,7 @@ tools/bench_report.py --engine <binary-or-wrapper> --model <gguf> \
 | decode, short context | **12.48 tok/s** | 25.0 % | llama.cpp CPU `llama-completion`: 12.52 tok/s |
 | prefill, 24-token prompt (sequential) | 12.49 tok/s | 0.20 % | llama.cpp CPU prompt eval: 24.20 tok/s |
 | prefill, 25-token prompt (chunked, 8-token chunks) | 15.41 tok/s | 0.25 % | same reference |
-| prefill, 104-token prompt (sequential / chunk 8 / chunk 64) | 12.48 / 15.25 / **16.21 tok/s** | 0.26 % | same reference |
+| prefill, 104-token prompt (sequential / chunk 8 / chunk 64 / chunk 104) | 12.48 / 15.60 / 16.19 / **16.20 tok/s** | 0.26 % | same reference |
 | weight load | 2.1 s warm / 35.9 s cold | - | llama.cpp mmap load: 1.58 s |
 
 Depth rows (`LING3_DEPTH`, context 4096, 8 decode steps after prefilling the
