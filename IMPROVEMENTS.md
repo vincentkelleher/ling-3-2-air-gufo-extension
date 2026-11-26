@@ -231,30 +231,32 @@ neutral) the conclusion is that this engine's decode sits at **16-17 tok/s (32-3
 a tiled Q4_K matrix-multiply with shared-memory staging (the shape llama.cpp's `mul_mat`
 uses), where a warp cooperatively stages a weight tile instead of walking rows.
 
-### The MoE is at the hardware's scattered-read rate, not at a kernel defect
+### The scattered pattern can do 100 GB/s — the MoE kernel is ~2.5x below it
 
-Six kernel-level hypotheses were measured out, so the remaining question was whether the access
-pattern itself is the limit. `tools/scatter_probe.hip` answers it: it registers 4 GiB the way the
-engine does, then reads eight 1.4 MB windows (one per selected expert) from that mapping,
-contiguous inside a window and scattered across windows.
+Six kernel-level hypotheses were measured out, so the question became whether the access pattern
+itself is the limit. `tools/scatter_probe.hip` registers 4 GiB the way the engine does and reads
+1.4 MB windows from that mapping (one per selected expert, contiguous inside a window, scattered
+across windows):
 
 | pattern | bandwidth |
 | --- | --- |
-| sequential read of the same registered mapping (`tools/bandwidth_probe.hip`) | **237 GB/s** |
-| eight scattered 1.4 MB windows (`tools/scatter_probe.hip`) | **38-52 GB/s** |
+| sequential read of the same mapping (`tools/bandwidth_probe.hip`) | 237 GB/s |
+| 8 windows x 1.4 MB, **8 blocks** | 51.7 GB/s |
+| 8 windows x 4.2 / 14 / 56 MB, 8 blocks | 32.5 / 30.3 / 30.4 GB/s |
+| 32 windows x 1.4 MB, **32 blocks** | **100.1 GB/s** |
 
-The routed MoE moves ~1.2-1.5 GB per token in 32 ms, which is ~40-47 GB/s — exactly the scattered
-window rate. So the MoE is not slow because of launch count, block width, warp shape, lane width,
-load width or instruction width (all measured, `IMPROVEMENTS.md`); it is slow because reading
-eight 1.4 MB windows out of a 50 GiB mapping is a 38-52 GB/s pattern on this box.
+The first run of this probe used one block per window, which is 2 048 threads — too few to
+saturate — and I briefly concluded the MoE was at the hardware's scattered-read rate. The 32-block
+row refutes that: with enough blocks the same pattern reaches **100 GB/s**, and window size does
+not matter (a bigger window at the same block count is *slower*).
 
-**Consequence for the decode gate**: the roofline is computed from *sequential* bandwidth
-(49.9 tok/s), and a routed MoE cannot read its weights sequentially. 60 % of that roofline
-(29.9 tok/s) would require ~120 GB/s from this pattern, which the probe shows the hardware does
-not provide. Reaching the gate needs a different memory strategy — for example a layout that
-groups each expert's three matrices contiguously (3 x 1.4 MB per read instead of three separate
-windows) or a residency scheme for the hot experts — not another kernel tweak. That is the honest
-statement of where the gate sits.
+So the MoE's ~40-47 GB/s is a kernel-efficiency gap of about **2.5x**, not a hardware limit, and
+the decode gate is not out of reach in principle: pulling the expert path from 40 to 100 GB/s
+would take its 32 ms to ~13 ms and decode from ~17 to ~24 tok/s (48 % of the roofline). What is
+still unknown is *why* our expert kernel behaves like the 8-block case rather than the 32-block
+one; it launches ~1 000 blocks of 256 threads, so raw block count is not it, which points at
+per-block work granularity (one warp per output row, 1 440 bytes of weights each) or at the
+integer work in the Q4 unpacking competing with the loads.
 
 ## Where the time goes now (decode, 8 tokens, this box)
 

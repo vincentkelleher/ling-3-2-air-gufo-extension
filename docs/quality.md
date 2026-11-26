@@ -70,15 +70,18 @@ runs hash identically after the `atomicAdd` reduction order was removed.
 **Verdict**: same task, same answer, one token apart at a near-tie. Token-for-token
 equality is **not** claimed; the deviation is recorded with its index and margin.
 
-### Why the decode gate is out of reach for this access pattern
+### Where the decode gate actually stands
 
-`tools/scatter_probe.hip` measures the pattern the routed MoE actually uses: eight 1.4 MB windows
-read from the same registered mapping that decode streams at 237 GB/s sequentially. It runs at
-**38-52 GB/s**, and the MoE's own rate is ~40-47 GB/s, so the expert path is already at the
-hardware's rate for that pattern. The 49.9 tok/s roofline assumes sequential bandwidth, so 60 % of
-it (~30 tok/s) would need ~120 GB/s from scattered windows. The gate therefore needs a memory
-layout or residency change (contiguous per-expert matrices, hot-expert residency), not a kernel
-tuning pass.
+`tools/scatter_probe.hip` reads 1.4 MB windows out of a registered 4 GiB mapping, the pattern the
+routed MoE uses. Its first run used one block per window (2 048 threads, too few) and reported
+30-52 GB/s; with 32 blocks the same pattern reaches **100 GB/s**, and window size does not matter.
+
+The MoE itself runs at ~40-47 GB/s while moving ~1.2-1.5 GB per token, so it is about **2.5x
+below what the pattern supports** — a kernel-efficiency gap, not a hardware limit. At 100 GB/s the
+expert path would take ~13 ms instead of 32 and decode would be ~24 tok/s (48 % of the 49.9 roofline)
+rather than 32-34 %. Closing it needs the expert kernel to behave like the high-block-count case
+in the probe; the next step is to find what makes it equivalent to the low-block-count case
+despite launching ~1 000 blocks.
 
 ### Snapshot restore is inexact, which bounds two claims
 
