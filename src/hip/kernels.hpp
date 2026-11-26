@@ -38,6 +38,41 @@ void LaunchGemvAdd(const void* weights, StorageType type, std::size_t rows,
 
 /// y[slot][row] = dot(weights[ids[slot]][row], x + slot * batch_stride) for every
 /// selected expert, in one launch (batch_stride 0 shares one input).
+/// Quantises one activation vector for the pre-quantised Q4_K dot: a scale per
+/// 256-element block and eight integer group sums. Values match what DotRow<kQ4K>
+/// computes per row, so the dots stay bit-identical.
+void LaunchQuantizeActivation(const float* x, std::size_t cols, std::int8_t* q,
+                              float* scales, int* sums, hipStream_t stream);
+
+/// GEMV against a pre-quantised activation (Q4_K): one quantisation serves every row,
+/// which is what the head and the per-layer projections benefit from. Non-Q4_K
+/// storages fall back to LaunchGemv with the float activation.
+void LaunchGemvPre(const void* weights, StorageType type, std::size_t rows,
+                   std::size_t cols, const float* x, const std::int8_t* q,
+                   const float* scales, const int* sums, float* y, hipStream_t stream);
+
+/// Per-slot quantisation for matmuls whose activation differs per selected expert.
+void LaunchQuantizeActivationBatch(const float* x, std::size_t cols, std::size_t slots,
+                                   std::int8_t* q, float* scales, int* sums,
+                                   hipStream_t stream);
+
+/// Expert GEMV where each slot has its own quantised activation (the MoE's down
+/// matmul). Non-Q4_K storages fall back to the float activation with a per-slot stride.
+void LaunchGemvExpertsPreSlots(const void* weights, StorageType type,
+                               const std::int32_t* ids, std::size_t experts,
+                               std::size_t rows_per_expert, std::size_t cols,
+                               const float* x, const std::int8_t* q, const float* scales,
+                               const int* sums, float* y, std::size_t out_stride,
+                               hipStream_t stream);
+
+/// Expert GEMV against a pre-quantised activation (Q4_K); other storages fall back to
+/// LaunchGemvExperts with the float activation.
+void LaunchGemvExpertsPre(const void* weights, StorageType type,
+                          const std::int32_t* ids, std::size_t experts,
+                          std::size_t rows_per_expert, std::size_t cols, const float* x,
+                          const std::int8_t* q, const float* scales, const int* sums,
+                          float* y, std::size_t out_stride, hipStream_t stream);
+
 void LaunchGemvExperts(const void* weights, StorageType type,
                        const std::int32_t* ids, std::size_t experts,
                        std::size_t rows_per_expert, std::size_t cols,

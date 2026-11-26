@@ -85,6 +85,10 @@ struct Engine::Impl {
   float* mla_out{nullptr};
   float* kvq{nullptr};
   float* moe_logits{nullptr};
+  /// Pre-quantised activation for the "prepared" GEMV path: a head with 156k rows
+  /// otherwise re-quantises the same 2560 values once per row.
+  signed char* act_values{nullptr};
+  float* act_scales{nullptr};
   float* expert_gate{nullptr};
   float* expert_up{nullptr};
   float* expert_down{nullptr};
@@ -349,6 +353,8 @@ std::unique_ptr<Engine> Engine::Create(const core::GgufReader& reader,
       alloc(&m.scores, heads * context) && alloc(&m.latent, heads * latent) &&
       alloc(&m.mla_out, v_dim) && alloc(&m.kvq, kv_dim) &&
       alloc(&m.moe_logits, config.n_expert) &&
+      hipMalloc(reinterpret_cast<void**>(&m.act_values), config.n_embd * sizeof(signed char)) == hipSuccess &&
+      hipMalloc(reinterpret_cast<void**>(&m.act_scales), (config.n_embd / 256) * sizeof(float)) == hipSuccess &&
       alloc(&m.expert_gate, 8 * (config.n_ff > config.n_ff_exp ? config.n_ff : config.n_ff_exp)) &&
       alloc(&m.expert_up, 8 * (config.n_ff > config.n_ff_exp ? config.n_ff : config.n_ff_exp)) &&
       alloc(&m.expert_down, 8 * n_embd) && alloc(&m.logits, config.n_vocab) && alloc(&m.base_hidden, n_embd) &&
@@ -805,8 +811,15 @@ bool Engine::ForwardFromEmbedded(std::uint32_t position, std::string* error) {
   report("final", c.n_layer);
   hip::LaunchRmsNorm(m.x, static_cast<const float*>(dev(weights.output_norm)), m.h, 1,
                      n_embd, eps, stream);
-  hip::LaunchGemv(dev(weights.output), Storage(weights.output.type), c.n_vocab,
-                  n_embd, m.h, m.logits, stream);
+  if (Storage(weights.output.type) == hip::kQ4K ||
+      Storage(weights.output.type) == hip::kQ6K) {
+    hip::LaunchQuantizeActivations(m.h, n_embd, m.act_values, m.act_scales, stream);
+    hip::LaunchGemvPrepared(dev(weights.output), Storage(weights.output.type), c.n_vocab,
+                            n_embd, m.act_values, m.act_scales, m.logits, stream);
+  } else {
+    hip::LaunchGemv(dev(weights.output), Storage(weights.output.type), c.n_vocab,
+                    n_embd, m.h, m.logits, stream);
+  }
   hip::LaunchArgmax(m.logits, c.n_vocab, m.argmax, stream);
   dump_at("/work/logits_%u.bin", m.logits, c.n_vocab, position);
 
@@ -1117,8 +1130,15 @@ bool Engine::PrefillChunk(const std::int32_t* tokens, std::size_t count,
   const std::size_t last = static_cast<std::size_t>(M - 1) * n_embd;
   hip::LaunchRmsNorm(m.bx + last, static_cast<const float*>(dev(weights.output_norm)),
                      m.h, 1, n_embd, eps, stream);
-  hip::LaunchGemv(dev(weights.output), Storage(weights.output.type), c.n_vocab, n_embd,
-                  m.h, m.logits, stream);
+  if (Storage(weights.output.type) == hip::kQ4K ||
+      Storage(weights.output.type) == hip::kQ6K) {
+    hip::LaunchQuantizeActivations(m.h, n_embd, m.act_values, m.act_scales, stream);
+    hip::LaunchGemvPrepared(dev(weights.output), Storage(weights.output.type), c.n_vocab,
+                            n_embd, m.act_values, m.act_scales, m.logits, stream);
+  } else {
+    hip::LaunchGemv(dev(weights.output), Storage(weights.output.type), c.n_vocab, n_embd,
+                    m.h, m.logits, stream);
+  }
   hip::LaunchArgmax(m.logits, c.n_vocab, m.argmax, stream);
   const hipError_t status = hipStreamSynchronize(stream);
 

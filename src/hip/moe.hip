@@ -274,6 +274,38 @@ __global__ void MoeCombineKernel(const float* down, const float* weights, int ex
   out[i] = sum;
 }
 
+namespace {
+
+/// Activation scratch for the pre-quantised Q4_K dot: one vector per token, reused
+/// across every row of every selected expert. Sized on first use and never shrunk;
+/// the engine drives one stream, so this is single-writer.
+struct ActivationScratch {
+  std::int8_t* q{nullptr};
+  float* scales{nullptr};
+  int* sums{nullptr};
+  std::size_t cols{0};
+};
+
+ActivationScratch& ScratchFor(std::size_t cols, std::size_t slots = 1) {
+  static ActivationScratch scratch;
+  const std::size_t needed = cols * slots;
+  if (needed > scratch.cols) {
+    cols = needed;
+    if (scratch.q != nullptr) {
+      hipFree(scratch.q);
+      hipFree(scratch.scales);
+      hipFree(scratch.sums);
+    }
+    hipMalloc(reinterpret_cast<void**>(&scratch.q), cols * sizeof(std::int8_t));
+    hipMalloc(reinterpret_cast<void**>(&scratch.scales), (cols / 256) * sizeof(float));
+    hipMalloc(reinterpret_cast<void**>(&scratch.sums), (cols / 256) * 8 * sizeof(int));
+    scratch.cols = cols;
+  }
+  return scratch;
+}
+
+}  // namespace
+
 void LaunchMoeGather(const void* gate_exps, StorageType gate_type,
                      const void* up_exps, StorageType up_type,
                      const void* down_exps, StorageType down_type,
@@ -286,14 +318,27 @@ void LaunchMoeGather(const void* gate_exps, StorageType gate_type,
   // synchronized the stream on every token, then launched the expert FFNs from a host
   // loop -- 35 synchronizations per token, which is why decode and prefill ran at the
   // same speed.
-  LaunchGemvExperts(gate_exps, gate_type, ids, n_selected, n_ff, n_embd, x,
-                    /*batch_stride=*/0, expert_gate, /*out_stride=*/n_ff, stream);
-  LaunchGemvExperts(up_exps, up_type, ids, n_selected, n_ff, n_embd, x,
-                    /*batch_stride=*/0, expert_up, /*out_stride=*/n_ff, stream);
+  // The activation is the same for every row of every selected expert, so quantise it
+  // once here instead of inside each row's dot (that repetition is what kept the MoE
+  // at ~31 GB/s effective).
+  ActivationScratch& scratch = ScratchFor(n_ff > n_embd ? n_ff : n_embd);
+  LaunchQuantizeActivation(x, n_embd, scratch.q, scratch.scales, scratch.sums, stream);
+  LaunchGemvExpertsPre(gate_exps, gate_type, ids, n_selected, n_ff, n_embd, x, scratch.q,
+                       scratch.scales, scratch.sums, expert_gate, /*out_stride=*/n_ff,
+                       stream);
+  LaunchGemvExpertsPre(up_exps, up_type, ids, n_selected, n_ff, n_embd, x, scratch.q,
+                       scratch.scales, scratch.sums, expert_up, /*out_stride=*/n_ff,
+                       stream);
   LaunchSilu(expert_gate, expert_gate, n_selected * n_ff, stream);
   LaunchMulInto(expert_gate, expert_up, expert_gate, n_selected * n_ff, stream);
-  LaunchGemvExperts(down_exps, down_type, ids, n_selected, n_embd, n_ff, expert_gate,
-                    /*batch_stride=*/n_ff, expert_down, /*out_stride=*/n_embd, stream);
+  // The down matmul's activation differs per slot (each selected expert has its own
+  // gated output), so it needs one quantised vector per slot rather than one per token.
+  ActivationScratch& slots = ScratchFor(n_ff, n_selected);
+  LaunchQuantizeActivationBatch(expert_gate, n_ff, n_selected, slots.q, slots.scales,
+                                slots.sums, stream);
+  LaunchGemvExpertsPreSlots(down_exps, down_type, ids, n_selected, n_embd, n_ff,
+                            expert_gate, slots.q, slots.scales, slots.sums, expert_down,
+                            /*out_stride=*/n_embd, stream);
   const int blocks = static_cast<int>((n_embd + kThreads - 1) / kThreads);
   MoeCombineKernel<<<blocks, kThreads, 0, stream>>>(
       expert_down, weights, static_cast<int>(n_selected), static_cast<int>(n_embd), out);

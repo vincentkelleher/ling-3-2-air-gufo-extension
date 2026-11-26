@@ -186,6 +186,20 @@ __device__ __forceinline__ float QuantizedActivation(float value, float scale) {
   return clipped * scale;
 }
 
+__device__ __forceinline__ int WarpSumInt(int value) {
+  for (int offset = 16; offset > 0; offset >>= 1) {
+    value += __shfl_down(value, offset);
+  }
+  return __shfl(value, 0);
+}
+
+__device__ __forceinline__ float WarpMax(float value) {
+  for (int offset = 16; offset > 0; offset >>= 1) {
+    value = fmaxf(value, __shfl_down(value, offset));
+  }
+  return __shfl(value, 0);
+}
+
 __device__ __forceinline__ float WarpSum(float value) {
   for (int offset = 16; offset > 0; offset >>= 1) {
     value += __shfl_down(value, offset);
@@ -320,6 +334,188 @@ __device__ __forceinline__ float DotRow(const std::uint8_t* row, const float* x,
       sum += inner;
     }
     return WarpSum(sum);
+  }
+}
+
+/// Quantises one activation vector once per token for the Q4_K dot: `scales` holds a
+/// scale per 256-element block and `sums` the eight per-group integer sums that the
+/// Q4_K formula needs. The values are identical to what DotRow<kQ4K> computes per row,
+/// so results stay bit-identical while the work stops being repeated per row.
+__global__ void QuantizeActivationKernel(const float* x, int cols, std::int8_t* q,
+                                         float* scales, int* sums) {
+  const int blocks = cols / 256;
+  const int b = blockIdx.x;
+  if (b >= blocks) {
+    return;
+  }
+  const int lane = threadIdx.x & 31;
+  const float* source = x + static_cast<std::size_t>(b) * 256;
+  float amax = 0.0f;
+  for (int i = lane; i < 256; i += 32) {
+    const float value = fabsf(source[i]);
+    amax = value > amax ? value : amax;
+  }
+  amax = WarpMax(amax);
+  const float scale = amax > 0.0f ? amax / 127.0f : 1.0f;
+  const float inverse = 1.0f / scale;
+  for (int i = lane; i < 256; i += 32) {
+    int a = __float2int_rn(source[i] * inverse);
+    a = a > 127 ? 127 : (a < -127 ? -127 : a);
+    q[static_cast<std::size_t>(b) * 256 + i] = static_cast<std::int8_t>(a);
+  }
+  if (lane == 0) {
+    scales[b] = scale;
+  }
+  // One lane per element of the group, reduced across the warp: the sums must cover
+  // all 32 values, which is what the per-row dot accumulated.
+  for (int g = 0; g < 8; ++g) {
+    const int value =
+        static_cast<int>(q[static_cast<std::size_t>(b) * 256 + g * 32 + lane]);
+    const int total = WarpSumInt(value);
+    if (lane == 0) {
+      sums[b * 8 + g] = total;
+    }
+  }
+}
+
+/// Per-slot quantisation: every selected expert has its own activation, so the MoE's
+/// down matmul needs one quantised vector per slot.
+__global__ void QuantizeActivationBatchKernel(const float* x, int cols, std::int8_t* q,
+                                              float* scales, int* sums) {
+  const int blocks = cols / 256;
+  const int b = blockIdx.x;
+  const int slot = blockIdx.y;
+  if (b >= blocks) {
+    return;
+  }
+  const int lane = threadIdx.x & 31;
+  const float* source = x + static_cast<std::size_t>(slot) * cols + b * 256;
+  std::int8_t* target = q + static_cast<std::size_t>(slot) * cols + b * 256;
+  float amax = 0.0f;
+  for (int i = lane; i < 256; i += 32) {
+    const float value = fabsf(source[i]);
+    amax = value > amax ? value : amax;
+  }
+  amax = WarpMax(amax);
+  const float scale = amax > 0.0f ? amax / 127.0f : 1.0f;
+  const float inverse = 1.0f / scale;
+  for (int i = lane; i < 256; i += 32) {
+    int a = __float2int_rn(source[i] * inverse);
+    a = a > 127 ? 127 : (a < -127 ? -127 : a);
+    target[i] = static_cast<std::int8_t>(a);
+  }
+  const std::size_t scale_index = static_cast<std::size_t>(slot) * blocks + b;
+  if (lane == 0) {
+    scales[scale_index] = scale;
+  }
+  for (int g = 0; g < 8; ++g) {
+    const int value = static_cast<int>(target[g * 32 + lane]);
+    const int total = WarpSumInt(value);
+    if (lane == 0) {
+      sums[scale_index * 8 + g] = total;
+    }
+  }
+}
+
+__device__ __forceinline__ float DotRowQ4KPre(const std::uint8_t* row,
+                                              const std::int8_t* q,
+                                              const float* scales, const int* sums,
+                                              int cols, int blocks_per_slot);
+
+/// One warp per output row against a pre-quantised activation: the same dot as
+/// GemvKernel<kQ4K>, with the per-row re-quantisation hoisted out of the kernel.
+__global__ void GemvQ4KPreKernel(const std::uint8_t* weights, const std::int8_t* q,
+                                 const float* scales, const int* sums, float* y, int rows,
+                                 int cols, int row_bytes) {
+  const int lane = threadIdx.x & 31;
+  const int warp = (blockIdx.x * blockDim.x + threadIdx.x) >> 5;
+  if (warp >= rows) {
+    return;
+  }
+  const std::uint8_t* row = weights + static_cast<std::size_t>(warp) * row_bytes;
+  const float sum = DotRowQ4KPre(row, q, scales, sums, cols, 0);
+  if (lane == 0) {
+    y[warp] = sum;
+  }
+}
+
+/// One warp per (expert, row), each slot reading its own quantised activation.
+__global__ void GemvExpertsQ4KPreSlotKernel(const std::uint8_t* weights,
+                                            const std::int32_t* ids, const std::int8_t* q,
+                                            const float* scales, const int* sums, float* y,
+                                            int rows_per_expert, int cols, int row_bytes,
+                                            int experts, int out_stride) {
+  const int warp = (blockIdx.x * blockDim.x + threadIdx.x) >> 5;
+  if (warp >= experts * rows_per_expert) {
+    return;
+  }
+  const int expert_slot = warp / rows_per_expert;
+  const int row_in_expert = warp - expert_slot * rows_per_expert;
+  const int expert = ids[expert_slot];
+  const std::uint8_t* row = weights + (static_cast<std::size_t>(expert) * rows_per_expert +
+                                      row_in_expert) * row_bytes;
+  const int blocks_per_slot = cols / 256;
+  const auto* slot_q = q + static_cast<std::size_t>(expert_slot) * cols;
+  const auto* slot_scales = scales + static_cast<std::size_t>(expert_slot) * blocks_per_slot;
+  const auto* slot_sums = sums + static_cast<std::size_t>(expert_slot) * blocks_per_slot * 8;
+  const float sum = DotRowQ4KPre(row, slot_q, slot_scales, slot_sums, cols,
+                                 blocks_per_slot);
+  if ((threadIdx.x & 31) == 0) {
+    y[static_cast<std::size_t>(expert_slot) * out_stride + row_in_expert] = sum;
+  }
+}
+
+/// The Q4_K row dot against a pre-quantised activation (see the kernel above).
+__device__ __forceinline__ float DotRowQ4KPre(const std::uint8_t* row,
+                                              const std::int8_t* q,
+                                              const float* scales, const int* sums,
+                                              int cols, int blocks_per_slot) {
+  const auto* blocks = reinterpret_cast<const BlockQ4K*>(row);
+  const int count = cols / 256;
+  float sum = 0.0f;
+  for (int b = threadIdx.x & 31; b < count; b += 32) {
+    const float d = HalfToFloat(blocks[b].d);
+    const float dmin = HalfToFloat(blocks[b].dmin);
+    const float scale = scales[b];
+    const int sums_base = (blocks_per_slot >= 0 ? b : b) * 8;
+    float inner = 0.0f;
+    for (int g = 0; g < 8; ++g) {
+      int sum_qa = 0;
+      for (int i = 0; i < 32; ++i) {
+        const int j = g * 32 + i;
+        sum_qa += Q4Code(blocks[b], j) *
+                  static_cast<int>(q[static_cast<std::size_t>(b) * 256 + j]);
+      }
+      float sc = 0.0f;
+      float m = 0.0f;
+      Q4ScaleMin(g, blocks[b].scales, sc, m);
+      inner += (d * sc * static_cast<float>(sum_qa) -
+                dmin * m * static_cast<float>(sums[sums_base + g])) *
+               scale;
+    }
+    sum += inner;
+  }
+  return WarpSum(sum);
+}
+
+/// One warp per (expert, row) against a pre-quantised activation.
+__global__ void GemvExpertsQ4KPreKernel(const std::uint8_t* weights,
+                                        const std::int32_t* ids, const std::int8_t* q,
+                                        const float* scales, const int* sums, float* y,
+                                        int rows_per_expert, int cols, int row_bytes,
+                                        int experts, int out_stride) {
+  const int warp = (blockIdx.x * blockDim.x + threadIdx.x) >> 5;
+  if (warp >= experts * rows_per_expert) {
+    return;
+  }
+  const int expert_slot = warp / rows_per_expert;
+  const int row_in_expert = warp - expert_slot * rows_per_expert;
+  const int expert = ids[expert_slot];
+  const std::uint8_t* row = weights + (static_cast<std::size_t>(expert) * rows_per_expert +
+                                      row_in_expert) * row_bytes;
+  const float sum = DotRowQ4KPre(row, q, scales, sums, cols, 0);
+  if ((threadIdx.x & 31) == 0) {
+    y[static_cast<std::size_t>(expert_slot) * out_stride + row_in_expert] = sum;
   }
 }
 
@@ -779,6 +975,82 @@ void LaunchGemvAdd(const void* weights, StorageType type, std::size_t rows,
           data, x, bias, y, static_cast<int>(rows), static_cast<int>(cols), row_bytes);
       break;
   }
+}
+
+void LaunchQuantizeActivation(const float* x, std::size_t cols, std::int8_t* q,
+                              float* scales, int* sums, hipStream_t stream) {
+  const int blocks = static_cast<int>(cols / 256);
+  if (blocks == 0) {
+    return;
+  }
+  QuantizeActivationKernel<<<blocks, 32, 0, stream>>>(x, static_cast<int>(cols), q,
+                                                      scales, sums);
+}
+
+void LaunchGemvPre(const void* weights, StorageType type, std::size_t rows,
+                   std::size_t cols, const float* x, const std::int8_t* q,
+                   const float* scales, const int* sums, float* y, hipStream_t stream) {
+  if (type != kQ4K) {
+    LaunchGemv(weights, type, rows, cols, x, y, stream);
+    return;
+  }
+  const int row_bytes = static_cast<int>(RowBytes(type, cols));
+  const int blocks = (static_cast<int>(rows) + kThreads / 32 - 1) / (kThreads / 32);
+  GemvQ4KPreKernel<<<blocks, kThreads, 0, stream>>>(
+      static_cast<const std::uint8_t*>(weights), q, scales, sums, y,
+      static_cast<int>(rows), static_cast<int>(cols), row_bytes);
+}
+
+void LaunchQuantizeActivationBatch(const float* x, std::size_t cols, std::size_t slots,
+                                   std::int8_t* q, float* scales, int* sums,
+                                   hipStream_t stream) {
+  const int blocks = static_cast<int>(cols / 256);
+  if (blocks == 0 || slots == 0) {
+    return;
+  }
+  const dim3 grid(static_cast<unsigned>(blocks), static_cast<unsigned>(slots));
+  QuantizeActivationBatchKernel<<<grid, 32, 0, stream>>>(x, static_cast<int>(cols), q,
+                                                         scales, sums);
+}
+
+void LaunchGemvExpertsPreSlots(const void* weights, StorageType type,
+                               const std::int32_t* ids, std::size_t experts,
+                               std::size_t rows_per_expert, std::size_t cols,
+                               const float* x, const std::int8_t* q, const float* scales,
+                               const int* sums, float* y, std::size_t out_stride,
+                               hipStream_t stream) {
+  if (type != kQ4K) {
+    LaunchGemvExperts(weights, type, ids, experts, rows_per_expert, cols, x,
+                      /*batch_stride=*/cols, y, out_stride, stream);
+    return;
+  }
+  const int row_bytes = static_cast<int>(RowBytes(type, cols));
+  const int total_rows = static_cast<int>(experts * rows_per_expert);
+  const int blocks = (total_rows + kThreads / 32 - 1) / (kThreads / 32);
+  GemvExpertsQ4KPreSlotKernel<<<blocks, kThreads, 0, stream>>>(
+      static_cast<const std::uint8_t*>(weights), ids, q, scales, sums, y,
+      static_cast<int>(rows_per_expert), static_cast<int>(cols), row_bytes,
+      static_cast<int>(experts), static_cast<int>(out_stride));
+}
+
+void LaunchGemvExpertsPre(const void* weights, StorageType type,
+                          const std::int32_t* ids, std::size_t experts,
+                          std::size_t rows_per_expert, std::size_t cols, const float* x,
+                          const std::int8_t* q, const float* scales, const int* sums,
+                          float* y, std::size_t out_stride, hipStream_t stream) {
+  if (type != kQ4K) {
+    // Only Q4_K has the pre-quantised path; other storages keep the float activation.
+    LaunchGemvExperts(weights, type, ids, experts, rows_per_expert, cols, x,
+                      /*batch_stride=*/0, y, out_stride, stream);
+    return;
+  }
+  const int row_bytes = static_cast<int>(RowBytes(type, cols));
+  const int total_rows = static_cast<int>(experts * rows_per_expert);
+  const int blocks = (total_rows + kThreads / 32 - 1) / (kThreads / 32);
+  GemvExpertsQ4KPreKernel<<<blocks, kThreads, 0, stream>>>(
+      static_cast<const std::uint8_t*>(weights), ids, q, scales, sums, y,
+      static_cast<int>(rows_per_expert), static_cast<int>(cols), row_bytes,
+      static_cast<int>(experts), static_cast<int>(out_stride));
 }
 
 void LaunchGemvExperts(const void* weights, StorageType type,
