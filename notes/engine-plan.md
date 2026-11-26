@@ -530,3 +530,16 @@ Result: coherent output. `The capital of France is` now continues with
 "The user is asking a straightforward factual question about the", and
 llama.cpp's answer for the same prompt is "The user is asking" — so the engine is
 at or near token equality. Next: the pinned golden set, then the serving path.
+
+## Assembly check: argmax matches llama.cpp (2026-11-27)
+
+`The capital of France is`, greedy, same 25-token prompt:
+
+- engine: step 0 argmax = **678** = `The`, logits max 25.46, five top-5
+  `678, 1921, 1672, 90833, 480`.
+- llama.cpp (CPU, same file, same prompt): first generated token `The` = 678.
+
+So the first-token contract holds. Remaining for `engine-assembly` before the
+task can be called complete: report the logits RMS against llama.cpp, which needs
+`--save-all-logits`'s header decoded (it is a custom file: `_logits_` header with
+context, n_vocab, counts, then rows that include NaNs at some offsets).
