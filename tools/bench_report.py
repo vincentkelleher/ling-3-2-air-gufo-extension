@@ -41,9 +41,12 @@ def measure(engine, model, prompt, steps, depth, context, chunked_prefill):
     output = subprocess.run(command, env=env, capture_output=True, text=True)
     if output.returncode != 0:
         raise SystemExit(f"{' '.join(command)} failed:\n{output.stderr[-800:]}")
-    match = re.search(r"([0-9.]+) tok/s", output.stdout)
+    # Each rate comes from its own line: the engine prints "prefill: N tokens in ...
+    # = X tok/s" before "X tok/s over M steps". Matching the first "tok/s" in the
+    # output reported the prefill rate as the decode rate.
+    match = re.search(r"([0-9.]+) tok/s over [0-9]+ steps", output.stdout)
     if match is None:
-        raise SystemExit(f"no rate in the engine output:\n{output.stdout[-400:]}")
+        raise SystemExit(f"no decode rate in the engine output:\n{output.stdout[-400:]}")
     prefill = 0.0
     prefill_match = re.search(r"prefill: .* = ([0-9.]+) tok/s", output.stdout)
     if prefill_match is not None:
@@ -55,19 +58,24 @@ def measure(engine, model, prompt, steps, depth, context, chunked_prefill):
     return float(match.group(1)), prefill, text
 
 
-def roofline_tokens_per_second(model, bandwidth, depth):
-    """Decode roofline from the GGUF tensor table (see tools/roofline.py)."""
+def roofline(model, bandwidth, depth, prefill_tokens):
+    """Decode and prefill rooflines from the GGUF tensor table (tools/roofline.py).
+
+    The prefill roofline is the whole weight set read once, spread over the batch:
+    bytes/bandwidth gives steps/s, times the token count.
+    """
     import json
     import subprocess as sp
 
     here = os.path.dirname(os.path.abspath(__file__))
     script = os.path.join(here, "roofline.py")
     output = sp.run([sys.executable, script, "--gguf", model, "--bandwidth",
-                     str(bandwidth), "--depth", str(depth), "--json"],
+                     str(bandwidth), "--depth", str(depth),
+                     "--prefill-tokens", str(prefill_tokens), "--json"],
                     capture_output=True, text=True)
     if output.returncode != 0:
         raise SystemExit(f"roofline.py failed:\n{output.stderr[-800:]}")
-    return json.loads(output.stdout)["roofline_tok_s"]
+    return json.loads(output.stdout)
 
 
 def main():
@@ -85,6 +93,8 @@ def main():
                              "(defaults to --model, which may be a container path)")
     parser.add_argument("--bandwidth", type=float, default=DEFAULT_BANDWIDTH)
     parser.add_argument("--context", type=int, default=4096)
+    parser.add_argument("--prefill-tokens", type=int, default=2048,
+                        help="token count for the prefill roofline")
     parser.add_argument("--chunked-prefill", type=int, default=0,
                         help="ingest the prompt through PrefillChunk with this "
                              "chunk size (0 keeps the sequential path)")
@@ -104,16 +114,20 @@ def main():
             rates.append(rate)
             prefills.append(prefill)
         median = statistics.median(rates)
-        roofline = roofline_tokens_per_second(
-            args.roofline_model or args.model, args.bandwidth, depth)
-        print(f"{depth:>6} {median:>8.2f} {roofline:>9.1f} "
-              f"{100.0 * median / roofline:>9.1f}%  {text[:40]}")
+        model_roofline = roofline(args.roofline_model or args.model, args.bandwidth,
+                                  depth, args.prefill_tokens)
+        decode_roofline = model_roofline["roofline_tok_s"]
+        print(f"{depth:>6} {median:>8.2f} {decode_roofline:>9.1f} "
+              f"{100.0 * median / decode_roofline:>9.1f}%  {text[:40]}")
         if prefills and prefills[0] > 0:
             prefill = statistics.median(prefills)
             mode = (f"chunked, {args.chunked_prefill}-token chunks"
                     if args.chunked_prefill else "token by token")
-            print(f"       prefill {prefill:>6.2f} tok/s ({mode}; the prefill "
-                  f"roofline is ~6,277 tok/s at 2,048 tokens, so both are ~0.2-0.3%)")
+            prefill_roofline = model_roofline["prefill_roofline_tok_s"]
+            print(f"       prefill {prefill:>6.2f} tok/s ({mode}) = "
+                  f"{100.0 * prefill / prefill_roofline:>7.2f}% of the "
+                  f"{prefill_roofline:,.0f} tok/s prefill roofline "
+                  f"({args.prefill_tokens} tokens)")
     print("reference on the same box: llama.cpp CPU decode 12.52 tok/s, "
           "prompt eval 24.20 tok/s")
 
