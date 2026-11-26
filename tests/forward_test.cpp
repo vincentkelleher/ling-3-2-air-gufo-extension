@@ -153,6 +153,13 @@ int main(int argc, char** argv) {
       }
     }
     token = static_cast<std::int32_t>(prompt_tokens.back());
+    const double prefill_seconds =
+        std::chrono::duration<double>(std::chrono::steady_clock::now() - start_time)
+            .count();
+    std::printf("prefill: %zu tokens in %.3f s = %.2f tok/s\n",
+                prompt_tokens.size() - 1, prefill_seconds,
+                prompt_tokens.size() > 1 ? (prompt_tokens.size() - 1) / prefill_seconds
+                                         : 0.0);
   }
   // Optional depth: fill the cache with one repeated token before timing, so
   // decode is measured with a long context already in place.

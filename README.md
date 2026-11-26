@@ -43,7 +43,7 @@ at the bottom.
 | case | engine | reference |
 | --- | --- | --- |
 | decode, short context | **12.49 tok/s** | llama.cpp CPU: 12.52 tok/s |
-| prefill | 12.5 tok/s (token by token) | llama.cpp CPU prompt eval: 24.20 tok/s |
+| prefill, 24-token prompt | 12.49 tok/s (token by token) | llama.cpp CPU prompt eval: 24.20 tok/s |
 | weight load | 2.1 s warm, 35.9 s cold | llama.cpp mmap: 1.58 s |
 
 Machine ceilings measured in-repo (`tools/bandwidth_probe.hip`,

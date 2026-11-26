@@ -41,11 +41,15 @@ def measure(engine, model, prompt, steps, depth, context):
     match = re.search(r"([0-9.]+) tok/s", output.stdout)
     if match is None:
         raise SystemExit(f"no rate in the engine output:\n{output.stdout[-400:]}")
+    prefill = 0.0
+    prefill_match = re.search(r"prefill: .* = ([0-9.]+) tok/s", output.stdout)
+    if prefill_match is not None:
+        prefill = float(prefill_match.group(1))
     text = ""
     for line in output.stdout.splitlines():
         if line.startswith("text:"):
             text = line[len("text:"):].strip()
-    return float(match.group(1)), text
+    return float(match.group(1)), prefill, text
 
 
 def roofline_tokens_per_second(model, bandwidth, depth):
@@ -85,19 +89,23 @@ def main():
     print(f"{'depth':>6} {'tok/s':>8} {'roofline':>9} {'% of roof':>10}  text")
     for depth in args.depths:
         rates = []
+        prefills = []
         text = ""
         for _ in range(args.runs):
-            rate, text = measure(args.engine, args.model, args.prompt, args.steps,
-                                 depth, args.context)
+            rate, prefill, text = measure(args.engine, args.model, args.prompt,
+                                          args.steps, depth, args.context)
             rates.append(rate)
+            prefills.append(prefill)
         median = statistics.median(rates)
         roofline = roofline_tokens_per_second(
             args.roofline_model or args.model, args.bandwidth, depth)
         print(f"{depth:>6} {median:>8.2f} {roofline:>9.1f} "
               f"{100.0 * median / roofline:>9.1f}%  {text[:40]}")
-
-    print("\nprefill: not measured - the engine has no batched pass yet "
-          "(notes/prefill-design.md)")
+        if prefills and prefills[0] > 0:
+            prefill = statistics.median(prefills)
+            print(f"       prefill {prefill:>6.2f} tok/s "
+                  f"(token by token; prompt ingestion has no batched pass yet, so "
+                  f"it costs what decode costs -- notes/prefill-design.md)")
     print("reference on the same box: llama.cpp CPU decode 12.52 tok/s, "
           "prompt eval 24.20 tok/s")
 

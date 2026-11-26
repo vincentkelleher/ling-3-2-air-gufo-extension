@@ -26,7 +26,7 @@ tools/bench_report.py --engine <binary-or-wrapper> --model <gguf> \
 | case | measured | % of roofline | reference |
 | --- | --- | --- | --- |
 | decode, short context | **12.48 tok/s** | 25.0 % | llama.cpp CPU `llama-completion`: 12.52 tok/s |
-| prefill, 25-token prompt | 7.1 tok/s (token by token) | 0.1 % | llama.cpp CPU prompt eval: 24.20 tok/s |
+| prefill, 24-token prompt | **12.49 tok/s** (token by token) | 0.20 % | llama.cpp CPU prompt eval: 24.20 tok/s |
 | weight load | 2.1 s warm / 35.9 s cold | - | llama.cpp mmap load: 1.58 s |
 
 Depth rows (`LING3_DEPTH`, context 4096, 8 decode steps after prefilling the
