@@ -305,8 +305,11 @@ TextRunnerResourceClaim Ling3Runner::ResourceClaim() const {
   }
   // Retained checkpoints are what the RAM cache budget is sized from; without them the
   // host reports budget_bytes=0 and refuses to prepare sessions.
-  claim.retained_snapshot_capacity_bytes = state_bytes;
-  claim.retained_snapshot_ceiling_bytes = 4 * state_bytes;
+  // One capture is a whole snapshot, and the cache may hold a few before evicting, so the
+  // capacity is several snapshots rather than one (a single-snapshot budget made
+  // Reserve() throw bad_alloc on the first capture).
+  claim.retained_snapshot_capacity_bytes = 4 * state_bytes;
+  claim.retained_snapshot_ceiling_bytes = 16 * state_bytes;
   claim.prompt_state_bytes_per_token =
       mla_layers * static_cast<std::size_t>(impl_->config.n_lora_kv) * sizeof(float);
   return claim;
@@ -357,7 +360,7 @@ std::string Ling3Runner::Decode(std::span<const TextRunnerToken> tokens) const {
 }
 
 std::unique_ptr<ComponentCacheResources> Ling3Runner::CreateComponentCacheResources(
-    cache::ResourceLedger&, std::size_t) const {
+    cache::ResourceLedger& ledger, std::size_t) const {
   auto resources = std::make_unique<ComponentCacheResources>();
   // Identity is an opaque byte blob: the model id distinguishes two checkpoints.
   cache::Identity identity(impl_->model_id.begin(), impl_->model_id.end());
@@ -369,15 +372,21 @@ std::unique_ptr<ComponentCacheResources> Ling3Runner::CreateComponentCacheResour
   // The host asks this for the buffer it captures a component into, then takes ownership
   // through `finish`. Host memory is right here: the snapshot is copied device-to-host
   // by the adapter itself.
-  resources->allocate = [](const cache::PayloadRequest& request) {
+  // The capture buffer is charged to the ledger the host hands us: a
+  // default-constructed ResourceCharge carries no ledger handle, and the host crashed on
+  // exactly that ("frontier_capture_refused reason=empty ledger handle").
+  cache::ResourceLedger* ledger_ref = &ledger;
+  resources->allocate = [ledger_ref](const cache::PayloadRequest& request) {
     auto storage = std::make_shared<std::vector<std::byte>>(request.bytes);
+    cache::ResourceReservation reservation =
+        ledger_ref->Reserve(request.category, request.bytes);
+    cache::ResourceCharge charge = reservation.Convert();
     cache::ComponentCaptureBuffer buffer;
     buffer.bytes = std::span<std::byte>(storage->data(), storage->size());
     buffer.allocation = storage->data();
-    buffer.finish = [storage]() {
-      return cache::Payload::Committed(
-          cache::ResourceCharge{},
-          std::static_pointer_cast<const void>(storage));
+    buffer.finish = [storage, charge = std::move(charge)]() mutable {
+      return cache::Payload::Committed(std::move(charge),
+                                       std::static_pointer_cast<const void>(storage));
     };
     return buffer;
   };

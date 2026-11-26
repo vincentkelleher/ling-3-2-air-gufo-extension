@@ -304,3 +304,33 @@ used to overflow the 256-row chunk buffer and produced "invalid interrupted pref
 frontier"), engines owned for the process so shutdown cannot free them after the HIP
 context, and a stream lease whose `Synchronize` does nothing because every copy is already
 synchronous.
+
+## Serving state after the ledger work (2026-11-27)
+
+| case | result |
+| --- | --- |
+| one completion request | 200, coherent text, prefill 15.2 / decode 12.5 tok/s |
+| 406-token streaming prompt | SSE chunks; client disconnect finishes it as `finish=cancelled` (cancellation works) |
+| frontier capture | **succeeds** — `cache_captures=1`, 502 MB captured |
+| next request after a capture | **SIGSEGV inside the host**, no refusal and no log line from this extension |
+
+Fixes that landed on the way, each from a concrete host error:
+
+- `PlanPrefill` returns the ascending boundaries each 32-row pass ends on (returning
+  `{first, end}` was "invalid adapter prefill plan");
+- prefill is clamped to the engine's chunk width — a 330-token pass overflowed the
+  256-row chunk buffer and surfaced as "invalid interrupted prefill frontier";
+- `Positions()` reports the slot's frontier as a private component position (empty was
+  "incomplete capture positions");
+- capture storage is charged through `ResourceLedger::Reserve(category, bytes).Convert()`
+  (a default `ResourceCharge` was "empty ledger handle");
+- the snapshot claim is sized from the **serving** context, not the model's 262,144-token
+  trained context — sizing from the latter claimed 26 GB per session;
+- engines live for the process, and the stream lease's `Synchronize` does nothing because
+  every copy is already synchronous (both removed earlier SIGTERM/SIGSEGV paths).
+
+What remains is not in this extension as far as the logs show: the crash follows a
+successful capture, on the next request, before any adapter call we can observe. Chasing
+it needs a stack trace from the host process (gdb or a coredump backtrace), which this
+environment does not provide, so serving is **single-request verified and multi-request
+unverified**, and is reported that way rather than claimed as working.

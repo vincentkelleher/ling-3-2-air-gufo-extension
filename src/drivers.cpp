@@ -484,13 +484,18 @@ struct ServingContext {
 
 ServingContext g_serving;
 
+/// Context the serving engine is created with, and therefore the only figure the
+/// snapshot sizing may use: sizing from the model's trained context (262,144) claimed
+/// 26 GB per session against an engine that had 4,096.
+constexpr std::uint32_t kServingContext = 4096;
+
 std::unique_ptr<Engine> CreateServingEngine(std::string* error) {
   if (g_serving.reader == nullptr) {
     if (error != nullptr) *error = "ling3_air: no model reader for serving";
     return nullptr;
   }
   EngineOptions options;
-  options.max_context = g_serving.config.n_ctx_train > 0 ? 4096 : 4096;
+  options.max_context = kServingContext;
   return Engine::Create(*g_serving.reader, g_serving.config, g_serving.weights, options,
                         error);
 }
@@ -513,10 +518,8 @@ std::shared_ptr<gufo::ext::TextModelRunner> CreateLing3Runner(
     return nullptr;
   }
   Ling3Runner::SetEngineFactory(&CreateServingEngine);
-  const std::uint32_t context =
-      options.max_context > 0 ? options.max_context : g_serving.config.n_ctx_train;
   return std::make_shared<Ling3Runner>(g_serving.config, std::move(tokenizer),
-                                       options.model_path, context);
+                                       options.model_path, kServingContext);
 }
 
 }  // namespace gufo::ext::ling3_air

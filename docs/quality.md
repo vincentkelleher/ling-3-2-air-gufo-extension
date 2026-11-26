@@ -85,7 +85,7 @@ equality is **not** claimed; the deviation is recorded with its index and margin
 
 | gap | status |
 | --- | --- |
-| HTTP serving, cache, streaming | **not implemented** — `gufo prompt/chat/bench` work through the provider drivers, but `gufo serve llm` needs `TextModelRunner`; `notes/runner-plan.md` is the plan |
+| HTTP serving, cache, streaming | **partly** — `gufo serve llm` answers a single request and streams (cancellation verified), and a frontier capture succeeds (502 MB, `cache_captures=1`); the **next request after a capture crashes inside the host**, so multi-request serving is unverified. `notes/runner-plan.md` has the sequence and the remaining fixes |
 | MTP speculative decoding | block runs, **58 % acceptance measured (18/31)**; not wired into serving because the modeled gain at 58 % with a 1.29x-cheaper verifier is ~1.15x |
 | Vision (mmproj) | **implemented and verified** at the engine level (numpy reference 3.2e-06, llama.cpp parity 0.04 %); the `gufo prompt --image` flag path is written but **unverified** |
 | Token-for-token equality | **not met**; one-token deviation at a 0.048 margin, documented above |
