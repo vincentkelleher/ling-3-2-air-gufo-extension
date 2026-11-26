@@ -85,7 +85,7 @@ equality is **not** claimed; the deviation is recorded with its index and margin
 
 | gap | status |
 | --- | --- |
-| HTTP serving, cache, streaming | **not implemented** — `notes/runner-plan.md` is the plan |
+| HTTP serving, cache, streaming | **not implemented** — `gufo prompt/chat/bench` work through the provider drivers, but `gufo serve llm` needs `TextModelRunner`; `notes/runner-plan.md` is the plan |
 | MTP speculative decoding | block runs, drafts 7/9 correct, **accept loop not finished**; cannot pay until verification is ~K× cheaper than decoding |
 | Vision (mmproj) | **not implemented**; the projector is downloaded, no encoder path |
 | Token-for-token equality | **not met**; one-token deviation at a 0.048 margin, documented above |

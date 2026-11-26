@@ -28,6 +28,9 @@ at the bottom.
   but unused), MoE routing and expert gather, LM head, greedy sampler. Weights
   are registered zero-copy from the reader's mapping, so an 80 GiB model loads in
   ~2 s warm.
+- **Usable from the CLI**: `gufo prompt`, `gufo chat` and `gufo bench` run the
+  model (chunked prefill 16.8 tok/s, decode 12.45 tok/s on this box). The HTTP
+  server still needs the runner below.
 - **Coherent output**: `The capital of France is` continues with the same
   sentence as llama.cpp; the two agree for 53 characters before a near-tie
   (0.048 logit margin) sends them apart, and 1 of 4 pinned cases is
@@ -55,9 +58,10 @@ path on the same machine. Depth rows: 12.54 / 12.41 / 12.04 tok/s at depth
 
 ## What does not work yet
 
-- **No HTTP serving**: the runner does not implement the `TextModelRunner`
-  contract yet, so `gufo serve llm --model ling-3.2-air` cannot use it. The
-  component cache, continuation and streaming are therefore absent.
+- **No HTTP serving**: `gufo prompt/chat/bench` work through the provider's
+  drivers, but `gufo serve llm --model ling-3.2-air` still cannot use it: the
+  `TextModelRunner` contract (component cache, continuation, streaming) is not
+  implemented. `notes/runner-plan.md` is the plan.
 - **Prefill is only partly batched**: `PrefillChunk` batches the projections, the
   out projection, the dense FFN and the shared expert over a chunk, which gives
   **16.13 tok/s against 12.52 sequential (1.29x)** on a 104-token prompt. The
