@@ -504,6 +504,23 @@ bool Engine::ForwardFromEmbedded(std::uint32_t position, std::string* error) {
     std::fprintf(stderr, "  %s: rms %.5f max %.5f nan %d\n", label,
                  std::sqrt(sum / (count == 0 ? 1 : count)), maximum, nan);
   };
+  // `LING3_PROFILE=1` times the per-token groups with events (recorded
+  // asynchronously, resolved after the single stream sync) so optimisation work is
+  // driven by where the time actually goes.
+  const bool profile = std::getenv("LING3_PROFILE") != nullptr;
+  std::vector<hipEvent_t> profile_events;
+  if (profile) {
+    profile_events.resize(static_cast<std::size_t>(c.n_layer) * 4, nullptr);
+    for (auto& event : profile_events) {
+      hipEventCreateWithFlags(&event, hipEventDefault);
+    }
+  }
+  auto mark = [&](std::uint32_t layer, int slot) {
+    if (profile) {
+      hipEventRecord(profile_events[static_cast<std::size_t>(layer) * 4 + slot], stream);
+    }
+  };
+
   auto report = [&](const char* label, std::uint32_t layer) {
     if (!stats) {
       return;
@@ -536,6 +553,7 @@ bool Engine::ForwardFromEmbedded(std::uint32_t position, std::string* error) {
       report_buf("post-norm h", m.h, n_embd);
     }
 
+    mark(il, 0);
     if (c.IsKda(il)) {
       hip::LaunchGemv(dev(layer.kda_q), Storage(layer.kda_q.type), kda_inner, n_embd,
                       m.h, m.q, stream);
@@ -709,6 +727,7 @@ bool Engine::ForwardFromEmbedded(std::uint32_t position, std::string* error) {
     hip::LaunchRmsNorm(m.ffn_inp, static_cast<const float*>(dev(layer.ffn_norm)),
                        m.ffn_h, 1, n_embd, eps, stream);
 
+    mark(il, 1);
     if (layer.dense) {
       hip::LaunchFfn(dev(layer.ffn_gate), Storage(layer.ffn_gate.type),
                      dev(layer.ffn_up), Storage(layer.ffn_up.type),
@@ -767,6 +786,38 @@ bool Engine::ForwardFromEmbedded(std::uint32_t position, std::string* error) {
   dump_at("/work/logits_%u.bin", m.logits, c.n_vocab, position);
 
   const hipError_t status = hipStreamSynchronize(stream);
+  if (profile) {
+    // Attention spans marks 0->1; everything else in the layer (norm, residual, FFN
+    // or MoE, next layer's prologue) spans 1 -> the next layer's mark 0.
+    double attention_ms = 0.0;
+    double rest_ms = 0.0;
+    float elapsed = 0.0f;
+    for (std::uint32_t il = 0; il < c.n_layer; ++il) {
+      hipEventElapsedTime(&elapsed, profile_events[il * 4], profile_events[il * 4 + 1]);
+      attention_ms += elapsed;
+      const hipEvent_t next = il + 1 < c.n_layer ? profile_events[(il + 1) * 4]
+                                                 : profile_events[il * 4 + 1];
+      hipEventElapsedTime(&elapsed, profile_events[il * 4 + 1], next);
+      rest_ms += elapsed;
+    }
+    static long tokens_profiled = 0;
+    static double attention_total = 0.0;
+    static double rest_total = 0.0;
+    ++tokens_profiled;
+    attention_total += attention_ms;
+    rest_total += rest_ms;
+    if (tokens_profiled % 8 == 0) {
+      std::fprintf(stderr,
+                   "profile: %ld tokens, attention %.2f ms/token, rest %.2f ms/token, "
+                   "total %.2f ms/token\n",
+                   tokens_profiled, attention_total / tokens_profiled,
+                   rest_total / tokens_profiled,
+                   (attention_total + rest_total) / tokens_profiled);
+    }
+    for (auto& event : profile_events) {
+      hipEventDestroy(event);
+    }
+  }
   if (status != hipSuccess) {
     if (error != nullptr) {
       *error = std::string("engine: forward failed: ") + hipGetErrorString(status);
@@ -1040,6 +1091,7 @@ bool Engine::PrefillChunk(const std::int32_t* tokens, std::size_t count,
                   m.h, m.logits, stream);
   hip::LaunchArgmax(m.logits, c.n_vocab, m.argmax, stream);
   const hipError_t status = hipStreamSynchronize(stream);
+
   if (status != hipSuccess) {
     if (error != nullptr) {
       *error = std::string("engine: chunked prefill failed: ") + hipGetErrorString(status);
@@ -1142,6 +1194,7 @@ bool Engine::ForwardMtp(std::int32_t token, std::uint32_t position,
                   n_embd, m.h, m.logits, stream);
   hip::LaunchArgmax(m.logits, c.n_vocab, m.argmax, stream);
   const hipError_t status = hipStreamSynchronize(stream);
+
   if (status != hipSuccess) {
     if (error != nullptr) {
       *error = std::string("engine: MTP forward failed: ") + hipGetErrorString(status);
