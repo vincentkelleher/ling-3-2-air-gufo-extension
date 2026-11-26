@@ -23,6 +23,34 @@ text-specific ones:
 | `Descriptor().sampling_defaults` | temperature 1.0, top_k 20, top_p 0.95 (already parsed in `Ling3Config`) |
 | `ToolDialectId()` | a new dialect for `<tool_call>` / `<arg_key>` / `<arg_value>` |
 
+The complete pure-virtual set, read from `src/ext/text.hpp` (anything not listed
+here has a default):
+
+| # | method |
+| --- | --- |
+| 1 | `Descriptor()` |
+| 2 | `ResourceClaim()` |
+| 3 | `SupportedPlans()` |
+| 4 | `Tokenize(...)` |
+| 5 | `RenderAndTokenize(ChatRequest)` |
+| 6 | `Decode(span<TextRunnerToken>)` |
+| 7 | `CreateComponentCacheResources(ResourceLedger&, size_t)` |
+| 8 | `BindComponentState(cache::Adapter&, cache::Slot&)` |
+| 9 | `ReconcileComponentState(TextRunnerState&, size_t)` |
+| 10 | `Prefill(state, prompt, offset, max_input_tokens)` |
+| 11 | `SelectNext(state, sampler)` |
+| 12 | `Advance(state, token)` |
+| 13 | `CheckpointPosition(state)` |
+
+Plus a `TextRunnerState` subclass that declares its buffers in a
+`mem::StateDeclaration`, returns a `mem::StateAccount` from `state_account()`, and
+calls `Ensure` before each write. `DecodeStep`/`DecodeBatch`/`AdvanceBatch` have
+defaults built on `SelectNext`/`Advance`, so a first version needs only the
+single-session path.
+
+`SupportedPlans()` is the field to keep honest: it declares which inputs, batching
+and state features the runner implements, and the server trusts it.
+
 The tool dialect is the one piece with no code today: the chat template writes the
 syntax, but the server needs the dialect to constrain and parse calls.
 
