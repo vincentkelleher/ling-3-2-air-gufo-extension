@@ -78,3 +78,25 @@ Next: wire it into the block forward for the dense projections (attention
 projections, dense FFN, shared expert) and validate that an M-token pass gives
 the same last-token logits as M single-token calls, per
 `notes/prefill-design.md`.
+
+## The GEMM needed element-wise parallelism (2026-11-27)
+
+First version spread one thread per 32-weight block, so only 80 of 256 threads
+worked on a 2560-wide row and per-thread work grew with the batch: batch 8 took
+**8.8x** batch 1 on the same 4096x2560 Q8_0 matrix (11 MB, one attention
+projection) -- no amortisation at all.
+
+Spreading elements across the block instead (`k = threadIdx.x; k += blockDim.x`)
+gives, on that matrix:
+
+| batch | ms/call | weight bandwidth | per-token cost |
+| --- | --- | --- | --- |
+| 1 | 0.099 | 113 GB/s | 0.099 ms |
+| 8 | 0.272 | 41 GB/s | **0.034 ms** |
+
+So a batched pass is worth **2.9x per token** on this shape, and the unit test
+still matches the host reference at 4.8e-07. The kernel is in the operator suite
+(`gemm bench`, printed every run) so any regression shows up immediately.
+
+Next: wire it into the dense projections of the block forward and validate that
+an M-token pass reproduces the sequential last-token logits.

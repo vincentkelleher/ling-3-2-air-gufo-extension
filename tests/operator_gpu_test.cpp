@@ -864,6 +864,47 @@ int main() {
     HIP_CHECK(hipFree(dw)); HIP_CHECK(hipFree(dx)); HIP_CHECK(hipFree(dy));
   }
 
+
+  // Does batching actually pay? Time the same 4096x2560 Q8_0 matrix (11 MB, the
+  // size of one attention projection) at batch 1 and batch 8. The prefill plan
+  // assumes the weight read amortises; this measures it.
+  {
+    const int rows = 4096, cols = 2560, batch = 8;
+    const std::size_t row_bytes = static_cast<std::size_t>(cols) / 32 * 34;
+    void* dw = nullptr;
+    std::vector<float> x(batch * cols, 0.5f), y(static_cast<std::size_t>(batch) * rows, 0.0f);
+    HIP_CHECK(hipMalloc(&dw, row_bytes * rows));
+    HIP_CHECK(hipMemset(dw, 1, row_bytes * rows));
+    float* dx = nullptr;
+    float* dy = nullptr;
+    HIP_CHECK(hipMalloc(&dx, x.size() * sizeof(float)));
+    HIP_CHECK(hipMalloc(&dy, y.size() * sizeof(float)));
+    HIP_CHECK(hipMemcpy(dx, x.data(), x.size() * sizeof(float), hipMemcpyHostToDevice));
+    for (const int m : {1, 8}) {
+      hipEvent_t a, b;
+      hipEventCreate(&a);
+      hipEventCreate(&b);
+      hipk::LaunchGemm(dw, hipk::kQ8_0, rows, cols, dx, m, cols, dy, rows, 0);
+      HIP_CHECK(hipDeviceSynchronize());
+      hipEventRecord(a);
+      for (int r = 0; r < 5; ++r) {
+        hipk::LaunchGemm(dw, hipk::kQ8_0, rows, cols, dx, m, cols, dy, rows, 0);
+      }
+      hipEventRecord(b);
+      HIP_CHECK(hipEventSynchronize(b));
+      float ms = 0.0f;
+      hipEventElapsedTime(&ms, a, b);
+      const double per_call = ms / 5.0;
+      const double gbs = (row_bytes * rows) / (per_call / 1000.0) / 1e9;
+      std::printf("gemm bench: batch %d -> %.3f ms/call, %.1f GB/s of weights (%s)\n",
+                  m, per_call, gbs,
+                  m == 1 ? "one token" : "amortised over 8 tokens");
+      hipEventDestroy(a);
+      hipEventDestroy(b);
+    }
+    HIP_CHECK(hipFree(dw)); HIP_CHECK(hipFree(dx)); HIP_CHECK(hipFree(dy));
+  }
+
   std::printf("operators: %d failures\n", Failures);
   return Failures == 0 ? 0 : 1;
 }

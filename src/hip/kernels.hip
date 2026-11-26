@@ -378,15 +378,16 @@ __global__ void GemmKernel(const std::uint8_t* weights, const float* x, float* y
       }
     }
   } else if constexpr (TYPE == kQ8_0) {
+    // Spread *elements* across the block, not 32-weight blocks: with one thread
+    // per block only 80 of 256 threads worked, so per-thread work grew with the
+    // batch and the weight read never amortised (measured 8.8x for batch 8).
     const auto* blocks = reinterpret_cast<const BlockQ8_0*>(weight_row);
-    for (int b = threadIdx.x; b < cols / 32; b += blockDim.x) {
-      const float d = HalfToFloat(blocks[b].d);
-      for (int j = 0; j < 32; ++j) {
-        const float weight = d * static_cast<float>(blocks[b].qs[j]);
-        const int k = b * 32 + j;
-        for (int m = 0; m < batch; ++m) {
-          accumulator[m] += weight * x[m * x_stride + k];
-        }
+    for (int k = threadIdx.x; k < cols; k += blockDim.x) {
+      const int b = k / 32;
+      const float weight =
+          HalfToFloat(blocks[b].d) * static_cast<float>(blocks[b].qs[k % 32]);
+      for (int m = 0; m < batch; ++m) {
+        accumulator[m] += weight * x[m * x_stride + k];
       }
     }
   } else {
