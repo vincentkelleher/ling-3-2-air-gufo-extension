@@ -283,9 +283,25 @@ streaming ~24 windows, so many blocks hit the same 1.4 MB region at once. The ne
 shape — many blocks per window — and it decides whether a residency/layout change is the only
 remaining lever.
 
-Eight variants have now been measured for this kernel: launch count, activation re-quantisation
-(+15 %, kept), lane-idle wide dot (+11 %, kept), warp shape, load width, instruction width
-(`v_dot4`), block width, per-expert launches and coalescing. Only the first two moved it.
+The next probe tested exactly that concurrency shape, by letting blocks share windows
+(`tools/scatter_probe.hip` now takes a block count):
+
+| shape | bandwidth |
+| --- | --- |
+| 24 blocks over 24 windows (one block per window) | 92.5 GB/s |
+| 1 024 blocks over 24 windows x 1.4 MB (re-reading) | **463.8 GB/s** |
+
+So many blocks streaming the same windows is *fast*, not slow, and concurrency is not the gap
+either.
+
+Nine measured variants now: launch count, activation re-quantisation (+15 %, kept), lane-idle wide
+dot (+11 %, kept), warp shape (-22 %), load width (neutral), instruction width `v_dot4` (neutral),
+block width (neutral), per-expert launches (-4 %), coalesced group reads (neutral). The probes say
+the pattern supports 90-460 GB/s; the kernel sustains ~39 GB/s. **The remaining factor is
+unidentified**, and the honest next step is a profiler (rocprof or HIP's PC sampling) to see
+whether the kernel stalls on memory or on issue — neither is available in this environment, so the
+decode gate is reported as unresolved with a measured 2.4x gap rather than a guess about its
+cause.
 
 ## Where the time goes now (decode, 8 tokens, this box)
 

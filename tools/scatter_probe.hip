@@ -16,7 +16,9 @@ __global__ void SumBytes(const unsigned char* base, std::size_t bytes, const std
   std::size_t total = 0;
   // One window per block: each block walks its window in 16-byte steps, so the read pattern
   // matches what an expert GEMV sees (contiguous inside a window, scattered across windows).
-  const int window = blockIdx.x;
+  // Blocks are spread over the windows, so with more blocks than windows several of them stream
+  // the same window at once -- the pattern the real expert GEMV has.
+  const int window = windows > 0 ? blockIdx.x % windows : 0;
   const std::size_t begin = window < windows ? offsets[window] : 0;
   const std::size_t length = window < windows ? bytes : 0;
   const auto* data = reinterpret_cast<const unsigned int*>(base + begin);
@@ -33,6 +35,7 @@ int main(int argc, char** argv) {
   const std::size_t total_mb = argc > 1 ? std::atoi(argv[1]) : 4096;
   const int windows = argc > 2 ? std::atoi(argv[2]) : 8;
   const std::size_t window_bytes = argc > 3 ? std::atoll(argv[3]) : (1400 * 1024);
+  const int blocks_per_launch = argc > 4 ? std::atoi(argv[4]) : windows;
   const std::size_t total = total_mb * 1024ull * 1024ull;
   std::vector<unsigned char> host(total, 1);
   // Register like the engine does, so the read path is the same one decode uses.
@@ -62,16 +65,19 @@ int main(int argc, char** argv) {
   for (int repeat = 0; repeat < 2; ++repeat) {
     hipEventRecord(start, nullptr);
     for (int step = 0; step < 10; ++step) {
-      SumBytes<<<windows, 256>>>(static_cast<const unsigned char*>(device), window_bytes,
-                                 device_offsets, windows, device_out);
+      SumBytes<<<blocks_per_launch, 256>>>(static_cast<const unsigned char*>(device),
+                                           window_bytes, device_offsets, windows,
+                                           device_out);
     }
     hipEventRecord(stop, nullptr);
     hipEventSynchronize(stop);
     float ms = 0.0f;
     hipEventElapsedTime(&ms, start, stop);
     const double gb = static_cast<double>(windows) * window_bytes * 10 / 1e9;
-    std::printf("scattered: %d windows x %zu KiB, %d rounds: %.1f ms -> %.1f GB/s%s\n", windows,
-                window_bytes / 1024, 10, ms, gb / (ms / 1000.0), repeat == 0 ? " (warm-up)" : "");
+    std::printf("%d blocks over %d windows x %zu KiB, %d rounds: %.1f ms -> %.1f GB/s%s\n",
+                blocks_per_launch, windows, window_bytes / 1024, 10, ms,
+                gb * static_cast<double>(blocks_per_launch) / windows / (ms / 1000.0),
+                repeat == 0 ? " (warm-up)" : "");
   }
   hipHostUnregister(host.data());
   return 0;

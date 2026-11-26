@@ -82,9 +82,11 @@ expert path would take ~13 ms instead of 32 and decode would be ~24 tok/s (48 % 
 rather than 32-34 %. The arithmetic is not the gap: removing the 4-bit unpack and the multiply from the expert dot
 leaves the rate unchanged (16.75 vs 16.93 tok/s), so the path is read-bound. The read pattern is
 the difference — each warp's 32 lanes touch addresses 144 bytes apart, so one load instruction
-spans 32 cache lines, while the probe's threads read adjacent words and reach 100 GB/s. The fix is
-a coalesced expert GEMV (lanes reading adjacent bytes, reduced across the warp), which is the tiled
-design rather than another tuning pass.
+spans 32 cache lines, while the probe's threads read adjacent words and reach 100 GB/s. A coalesced variant was then written and measured (one warp per row, lanes reading adjacent bytes
+per group) and is **neutral** (16.91 vs 16.93 tok/s), and the probe shows concurrency is not the
+limit either: 1 024 blocks over 24 windows reaches 464 GB/s. Nine variants and three probe shapes
+later the gap is real (the pattern supports 90-460 GB/s, the kernel sustains ~39 GB/s) and its
+cause is unidentified without a profiler, which this environment does not provide.
 
 ### Snapshot restore is inexact, which bounds two claims
 
