@@ -543,3 +543,23 @@ So the first-token contract holds. Remaining for `engine-assembly` before the
 task can be called complete: report the logits RMS against llama.cpp, which needs
 `--save-all-logits`'s header decoded (it is a custom file: `_logits_` header with
 context, n_vocab, counts, then rows that include NaNs at some offsets).
+
+## 32-token comparison vs llama.cpp (2026-11-27)
+
+Same prompt, greedy, 32 tokens:
+
+- llama.cpp: `The user is asking a straightforward factual question: "The capital
+  of France is" — this is a well-known fact. The capital of France is Paris.`
+- engine: `The user is asking a straightforward factual question about the
+  capital of France. The answer is Paris.The capital of France is **Paris**.Are
+  you`
+
+Same answer, same first eight tokens, then divergence at the punctuation. So the
+engine is numerically *close* but not bit-identical, and greedy decoding turns
+that into a different sentence. Getting token equality needs the per-token
+logit difference down — likely accumulation-order effects (llama.cpp dots in a
+different order and quantizes activations), not a structural bug.
+
+Next: measure the divergence position and the logit margin at it (how close the
+top-2 are), then reduce error where it matters — for example, keep activations in
+fp32 through the MoE gather and match llama.cpp's `Q8_K` activation quantization.
