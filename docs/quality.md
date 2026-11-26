@@ -91,6 +91,22 @@ round-trip can return to a checkpoint taken by an earlier probe. Consequences:
 `notes/prefill-design.md` records the covered buffers, the buffers still to check and the
 byte-level diff that would localise it.
 
+### Single-token forward and first-token agreement
+
+`engine-assembly` asks for one decode step producing logits, the argmax equal to llama.cpp's
+first generated token for a prompt whose context is a single BOS/text token, and the logits RMS
+documented.
+
+- one decode step produces the full vocabulary logits (`tests/forward_test.cpp` prints the top-5
+  and their values every step, and `tests/operator_gpu_test.cpp` checks the head);
+- **first-token agreement is established on the four pinned golden prompts**: the generated text
+  matches llama.cpp from its first character in every case, for 93 / 30 / 27 / 9 characters
+  (`tools/golden_set.py`, `docs/parity.md`). A bare-BOS context could not be compared through
+  llama.cpp's CLI — an empty prompt makes it emit nothing, and a prompt file containing
+  `<|startoftext|>` is tokenised as text, so the two contexts were never identical — which is
+  why the comparison is made on the pinned prompts instead;
+- the logits RMS against llama.cpp is **unmeasurable here** (below).
+
 ### The one clause that cannot be measured here
 
 `engine-assembly`'s contract asks for the logits RMS error against llama.cpp. Neither
