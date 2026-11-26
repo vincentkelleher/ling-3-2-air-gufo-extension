@@ -99,6 +99,31 @@ int main(int argc, char** argv) {
     return 1;
   }
 
+  // Which layer's state does a snapshot+restore fail to restore?
+  {
+    const std::vector<double> before = engine->DebugStateDigest();
+    engine->SnapshotState();
+    engine->ForwardToken(engine->Argmax(), start, &error);
+    engine->RestoreState();
+    const std::vector<double> after = engine->DebugStateDigest();
+    std::size_t differing = 0;
+    double worst = 0.0;
+    std::size_t worst_layer = 0;
+    for (std::size_t i = 0; i < before.size() && i < after.size(); ++i) {
+      const double delta = std::abs(before[i] - after[i]);
+      if (delta > 0.0) ++differing;
+      if (delta > worst) {
+        worst = delta;
+        worst_layer = i;
+      }
+    }
+    std::printf("state digest: %zu of %zu layers differ, worst %.6g at layer %zu\n",
+                differing, before.size(), worst, worst_layer);
+    engine->RestoreState();
+    engine->ForwardToken(static_cast<std::int32_t>(prompt.back()),
+                         static_cast<std::uint32_t>(prompt.size() - 1), &error);
+  }
+
   // Round-trip check first: the same greedy run after a restore must reproduce the plain
   // stream exactly. If it does not, the snapshot is not exact and no speculation can be.
   engine->RestoreState();

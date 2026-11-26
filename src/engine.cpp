@@ -913,6 +913,34 @@ const float* Engine::SnapshotData() const { return impl_->snapshot; }
 
 std::size_t Engine::SnapshotFloats() const { return impl_->snapshot_floats; }
 
+std::vector<double> Engine::DebugStateDigest() {
+  Impl& m = *impl_;
+  std::vector<double> digest;
+  digest.reserve(m.config.n_layer_total);
+  const auto accumulate = [](const float* device, std::size_t count) {
+    std::vector<float> host(count);
+    hipMemcpy(host.data(), device, count * sizeof(float), hipMemcpyDeviceToHost);
+    double sum = 0.0;
+    for (const float value : host) {
+      sum += static_cast<double>(value) * value;
+    }
+    return sum;
+  };
+  for (std::uint32_t il = 0; il < m.config.n_layer_total; ++il) {
+    if (m.config.IsKda(il)) {
+      const std::size_t conv = 9 * m.config.KdaInner();
+      const std::size_t delta = static_cast<std::size_t>(m.config.n_head) *
+                                m.config.n_kda_head_dim * m.config.n_kda_head_dim;
+      digest.push_back(accumulate(m.conv_state[il], conv) +
+                       accumulate(m.delta_state[il], delta));
+    } else {
+      digest.push_back(accumulate(m.mla_cache[il],
+                                  m.options.max_context * (m.config.n_lora_kv + m.config.n_rot)));
+    }
+  }
+  return digest;
+}
+
 void Engine::SnapshotState() {
   Impl& m = *impl_;
   if (m.snapshot == nullptr) {

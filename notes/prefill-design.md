@@ -501,7 +501,20 @@ list (the snapshot is sized from a formula, so a buffer that is allocated but no
 would still fit); and whether the restore needs the logits/frontier state the snapshot
 deliberately excludes (the test re-warms logits, so only state is at issue).
 
-Next step is a byte-level diff: hash each layer's conv/delta/MLA buffer before and after a
-snapshot+restore round-trip and report the first buffer that differs. That needs a small
-debug accessor on `Engine` and is the cheapest way to localise an inexactness that behaves
-like a slow leak rather than a broken copy.
+**The byte-level diff is done and it clears the state buffers.** `Engine::DebugStateDigest()`
+sums the squares of every layer's conv/delta/MLA state, and the test compares digests across a
+snapshot → one token → restore cycle:
+
+    state digest: 0 of 43 layers differ, worst 0 at layer 0
+    restore round-trip: INEXACT (diverges at 5)
+
+Every layer's state is restored bit-exactly, so the divergence is **not** in restored state. What
+differs between the two runs is only the *scratch* the forward path leaves behind: the plain run
+leaves 8 tokens of scratch (`m.qn`, `m.kn`, `m.cv`, `m.gate_pre`, `m.ffn_inp`, the MLA `m.latent`
+and friends) and the restored run inherits it, because nothing clears scratch between tokens. So
+some kernel reads a scratch buffer before fully writing it — a read-before-write, not a state bug.
+
+That redirects the hunt: instead of auditing snapshot coverage, find the kernel that depends on a
+stale scratch value. The cheap probe is a digest over the scratch set taken before the first
+forward and after each token, comparing the two runs token by token; the first token whose
+scratch differs while state matches names the buffer.

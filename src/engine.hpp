@@ -79,6 +79,11 @@ class Engine {
   /// The snapshot buffer's device address and size in floats: the same bytes
   /// `SnapshotState` writes and `RestoreState` reads. The serving cache captures and
   /// loads exactly this, which is what makes a private-state component possible.
+  /// One number per layer of the state the snapshot is meant to cover, for localising an
+  /// inexact restore: equal before and after a snapshot+restore round-trip means that
+  /// layer's state survived.
+  [[nodiscard]] std::vector<double> DebugStateDigest();
+
   [[nodiscard]] const float* SnapshotData() const;
   [[nodiscard]] std::size_t SnapshotFloats() const;
   void RestoreState();
