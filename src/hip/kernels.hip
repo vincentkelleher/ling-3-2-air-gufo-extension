@@ -85,6 +85,23 @@ __device__ __forceinline__ int Q4Code(const BlockQ4K& block, int index) {
   return (group & 1) ? (packed >> 4) : (packed & 0x0F);
 }
 
+__device__ __forceinline__ int Q6Code(const BlockQ6K& block, int index) {
+  const int half = index / 128;
+  const int within = index % 128;
+  const int segment = within / 32;
+  const int lane = within % 32;
+  const int ql_base = half * 64;
+  const std::uint8_t qh = block.qh[half * 32 + lane];
+  std::uint8_t low = 0, high = 0;
+  switch (segment) {
+    case 0: low = block.ql[ql_base + lane] & 0x0F; high = qh & 0x03; break;
+    case 1: low = block.ql[ql_base + 32 + lane] & 0x0F; high = (qh >> 2) & 0x03; break;
+    case 2: low = block.ql[ql_base + lane] >> 4; high = (qh >> 4) & 0x03; break;
+    default: low = block.ql[ql_base + 32 + lane] >> 4; high = (qh >> 6) & 0x03; break;
+  }
+  return static_cast<int>((high << 4) | low) - 32;
+}
+
 __device__ __forceinline__ float Q5Value(const BlockQ5K& block, int index) {
   const int group = index / 64;
   const int within = index % 64;
@@ -178,11 +195,15 @@ __device__ __forceinline__ float DotRow(const std::uint8_t* row, const float* x,
     const int count = cols / 32;
     float sum = 0.0f;
     for (int b = threadIdx.x % 32; b < count; b += 32) {
-      float inner = 0.0f;
+      float scale = 1.0f;
+      ActivationScale(x + b * 32, 32, scale);
+      int total = 0;
       for (int j = 0; j < 32; ++j) {
-        inner += static_cast<float>(blocks[b].qs[j]) * x[b * 32 + j];
+        const float raw = rintf(x[b * 32 + j] / scale);
+        const int a = static_cast<int>(raw > 127.0f ? 127.0f : (raw < -127.0f ? -127.0f : raw));
+        total += static_cast<int>(blocks[b].qs[j]) * a;
       }
-      sum += HalfToFloat(blocks[b].d) * inner;
+      sum += HalfToFloat(blocks[b].d) * scale * static_cast<float>(total);
     }
     return WarpSum(sum);
   } else if constexpr (TYPE == kQ4K) {
@@ -235,9 +256,17 @@ __device__ __forceinline__ float DotRow(const std::uint8_t* row, const float* x,
     for (int b = threadIdx.x % 32; b < count; b += 32) {
       float scale = 1.0f;
       ActivationScale(x + b * 256, 256, scale);
+      const float d = HalfToFloat(blocks[b].d);
       float inner = 0.0f;
-      for (int j = 0; j < 256; ++j) {
-        inner += Q6Value(blocks[b], j) * QuantizedActivation(x[b * 256 + j], scale);
+      for (int g = 0; g < 16; ++g) {
+        int total = 0;
+        for (int i = 0; i < 16; ++i) {
+          const int j = g * 16 + i;
+          const float raw = rintf(x[b * 256 + j] / scale);
+          const int a = static_cast<int>(raw > 127.0f ? 127.0f : (raw < -127.0f ? -127.0f : raw));
+          total += Q6Code(blocks[b], j) * a;
+        }
+        inner += d * static_cast<float>(blocks[b].scales[g]) * scale * static_cast<float>(total);
       }
       sum += inner;
     }
