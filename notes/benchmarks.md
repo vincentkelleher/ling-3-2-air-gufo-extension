@@ -73,23 +73,24 @@ better access patterns, not less arithmetic:
 4. the router reads 5 MB of F32 weights per block (4.4 % of bytes) - keep it in
    bf16.
 
-## Golden set vs llama.cpp (2026-11-27)
+## Golden set vs llama.cpp (2026-11-27, corrected)
 
-`tools/golden_set.py`, greedy, 24 generated tokens per case, identical prompts
-(the model's own framing) fed to both engines:
+`tools/golden_set.py`, greedy, 24 generated tokens per case, the model's own
+framing fed once to both engines (the first run double-framed the engine's
+prompt -- its files are already framed, so the engine needs
+`LING3_RAW_PROMPT=1`):
 
 | case | common prefix (chars) | engine / llama length | divergence |
 | --- | --- | --- | --- |
-| plain (`The capital of France is`) | 93 | 127 / 110 | `n incomplete sentence th` vs ` well-known fact.` |
+| plain (`The capital of France is`) | 53 | 124 / 110 | ` about the capital of Fr` vs `: "The capital of France` |
 | arithmetic (`What is 17 times 23?`) | 30 | 30 / 30 | **none — full match** |
-| tool-call (AAPL with a `get_stock_price` schema) | 27 | 100 / 102 | `stock price of AAPL. I n` vs `price of AAPL stock. I s` |
-| thinking-on (`Explain why the sky is blue`) | 9 | 131 / 114 | `wants a one-sentence exp` vs `is asking for a one-sentence` |
+| tool-call (AAPL with a `get_stock_price` schema) | 27 | 106 / 102 | `stock price of AAPL. I s` vs `price of AAPL stock. I s` |
+| thinking-on (`Explain why the sky is blue`) | 19 | 141 / 114 | `a classic science questi` vs `for a one-sentence expla` |
 
-So 1 of 4 cases is token-identical end to end, and the others agree for a
-sentence-opening worth of text before a near-tie (top-2 logit margins of
-0.01-0.02, measured earlier) sends them apart. That is the deviation the
-`engine-prefill` contract asks to record: same task, same meaning, different
-wording from the first near-tie onwards.
+1 of 4 cases is token-identical end to end. On the plain case the split is the
+known near-tie at token 8: llama.cpp writes `question: "The capital…`, this engine
+writes `question about the capital…`, and the top-2 logit margin there is 0.022.
+That is the deviation the `engine-prefill` contract asks to record.
 
 Reproduce: `tools/golden_set.py --engine-wrapper <script> --llama-wrapper <script>
 --steps 24`; the engine reads its prompt from `LING3_PROMPT_FILE` so marker

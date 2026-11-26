@@ -95,10 +95,13 @@ int main(int argc, char** argv) {
       std::fprintf(stderr, "tokenizer: %s\n", error.c_str());
       return 1;
     }
-    prompt_tokens = tokenizer->Encode("<role>SYSTEM</role>detailed thinking off<|role_end|>"
-                                      "<role>HUMAN</role>" + prompt +
-                                      "<|role_end|><role>ASSISTANT</role>\n<think>",
-                                      /*parse_special=*/true);
+    const std::string framed =
+        std::getenv("LING3_RAW_PROMPT") != nullptr
+            ? prompt
+            : ("<role>SYSTEM</role>detailed thinking off<|role_end|>"
+               "<role>HUMAN</role>" + prompt +
+               "<|role_end|><role>ASSISTANT</role>\n<think" ">");
+    prompt_tokens = tokenizer->Encode(framed, /*parse_special=*/true);
     std::printf("prompt: %zu tokens\n", prompt_tokens.size());
   }
   // The embedding row is the engine's only custom dequantization path.
