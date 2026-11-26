@@ -63,7 +63,9 @@ path on the same machine. Depth rows: 12.54 / 12.41 / 12.04 tok/s at depth
   **16.20 tok/s against 12.48 sequential (1.30x)** on a 104-token prompt. The
   routed MoE and the attention state are still per token; a correct grouped-MoE
   schedule exists but is opt-in because it needs an efficient K-quant GEMM before
-  it pays (`notes/prefill-design.md`). `notes/prefill-design.md` quantifies why: with top-8 of 512 experts a batch of M
+  it pays (`notes/prefill-design.md`). Chunked ingestion is also opt-in: it sums the
+  same products in a different order, which perturbs greedy output at the 0.01-0.05
+  margins measured here, so any token-for-token claim has to name its prefill path. `notes/prefill-design.md` quantifies why: with top-8 of 512 experts a batch of M
 tokens gives M/64 tokens per expert, so prefill must be **chunked** (M around
 256-512) for the expert weights to amortise; batching only the dense stages would
 buy about 1.3x.
@@ -76,8 +78,10 @@ buy about 1.3x.
   llama.cpp's dot products (`tests/dot_vs_gufo_test.cpp`), so the residual is
   elsewhere.
 - **MTP drafted but not accepted**: the block runs and its drafts are usually
-  right, but verifying K drafts one token at a time costs the same as decoding
-  them, so there is no speedup until verification is batched.
+  right (7 of 9), and a chunked verifier plus state snapshot/restore now exist
+  (`VerifyDrafts`, `SnapshotState`, `RestoreState`), but the accept loop's position
+  bookkeeping is unfinished — the first attempt accepted nothing, and the correct
+  discipline is written down in `notes/prefill-design.md`.
 - **No image input**: the projector is downloaded but no vision path exists.
 - **No sampler beyond greedy**, no reasoning markers, no tool-call dialect.
 
