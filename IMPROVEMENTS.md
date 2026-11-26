@@ -171,6 +171,24 @@ through whole cache lines) and vectorise *inside* the lane — load the 144-byte
 nine 16-byte vectors and extract nibbles from registers — rather than spreading the row
 across more warps.
 
+### Vectorised loads inside the lane — no change, reverted
+
+Following the lesson above, one warp still owns a row, and inside the lane each
+(block, group) item now loads its 32 quantised bytes and its 32 activation bytes as two
+16-byte vectors instead of 64 byte-sized loads:
+
+| | decode |
+| --- | --- |
+| before | 16.88 tok/s |
+| two 16-byte loads per item | 16.90 tok/s |
+
+Identical logits, no speed change: the byte loads were not the limit either. Together
+with the four earlier attempts, the MoE dot has now been shown not to be limited by
+launch count, activation re-quantisation, lane idling, warp shape or load width. What is
+left is integer throughput and occupancy in the `code * a` loop itself — a different kind
+of work (more items in flight per lane, or `__dp4a`-style packed arithmetic) that was not
+attempted.
+
 ## Where the time goes now (decode, 8 tokens, this box)
 
 | group | ms/token | share |
