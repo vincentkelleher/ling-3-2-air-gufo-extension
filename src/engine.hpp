@@ -84,6 +84,10 @@ class Engine {
   /// layer's state survived.
   [[nodiscard]] std::vector<double> DebugStateDigest();
 
+  /// Clears the per-token scratch. Used to test whether a restore's residual difference is
+  /// stale scratch rather than state.
+  void DebugZeroScratch();
+
   [[nodiscard]] const float* SnapshotData() const;
   [[nodiscard]] std::size_t SnapshotFloats() const;
   void RestoreState();

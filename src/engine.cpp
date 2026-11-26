@@ -913,6 +913,30 @@ const float* Engine::SnapshotData() const { return impl_->snapshot; }
 
 std::size_t Engine::SnapshotFloats() const { return impl_->snapshot_floats; }
 
+void Engine::DebugZeroScratch() {
+  Impl& m = *impl_;
+  const std::size_t n_embd = m.config.n_embd;
+  const std::size_t kda_inner = m.config.KdaInner();
+  const std::size_t heads = m.config.n_head;
+  const auto clear = [](float* buffer, std::size_t count) {
+    if (buffer != nullptr) {
+      hipMemset(buffer, 0, count * sizeof(float));
+    }
+  };
+  for (float* buffer : {m.x, m.h, m.attn_out, m.ffn_inp, m.ffn_h}) {
+    clear(buffer, n_embd);
+  }
+  for (float* buffer : {m.q, m.k, m.v, m.cq, m.ck, m.cv, m.qn, m.kn, m.gate_pre, m.kda_gate}) {
+    clear(buffer, kda_inner);
+  }
+  clear(m.beta_pre, heads);
+  clear(m.beta, heads);
+  clear(m.latent, heads * m.config.n_lora_kv);
+  clear(m.mla_out, heads * m.config.n_head_dim_v_mla);
+  clear(m.logits, m.config.n_vocab);
+  hipStreamSynchronize(m.queue);
+}
+
 std::vector<double> Engine::DebugStateDigest() {
   Impl& m = *impl_;
   std::vector<double> digest;

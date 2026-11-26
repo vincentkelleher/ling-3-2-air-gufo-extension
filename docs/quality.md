@@ -75,8 +75,9 @@ equality is **not** claimed; the deviation is recorded with its index and margin
 `SnapshotState`/`RestoreState` round-trips imperfectly: plain greedy re-run after a restore
 diverges from the uninterrupted run at token 5 (reproduced by `tests/mtp_test.cpp`, which
 registers the check regardless of MTP). The state itself is exact — a per-layer digest shows
-**0 of 43 layers differ** across snapshot → token → restore — so the residual difference is
-scratch left between tokens, i.e. a kernel reading a buffer before writing it. Consequences:
+**0 of 43 layers differ** across snapshot → token → restore, and clearing the per-token
+scratch does not change the outcome — so two runs of the same code from the same state produce
+different tokens: **the engine is not bit-reproducible run to run.** Consequences:
 
 - MTP speculative decoding cannot be shown to reproduce plain autogressive output, because
   the verification pass needs a rewind and the rewind itself is lossy;

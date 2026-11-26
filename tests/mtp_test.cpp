@@ -127,6 +127,9 @@ int main(int argc, char** argv) {
   // Round-trip check first: the same greedy run after a restore must reproduce the plain
   // stream exactly. If it does not, the snapshot is not exact and no speculation can be.
   engine->RestoreState();
+  if (std::getenv("LING3_ZERO_SCRATCH") != nullptr) {
+    engine->DebugZeroScratch();
+  }
   if (!engine->ForwardToken(static_cast<std::int32_t>(prompt.back()),
                             static_cast<std::uint32_t>(prompt.size() - 1), &error)) {
     std::fprintf(stderr, "rewarm2: %s\n", error.c_str());

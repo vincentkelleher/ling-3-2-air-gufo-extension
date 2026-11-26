@@ -514,7 +514,28 @@ leaves 8 tokens of scratch (`m.qn`, `m.kn`, `m.cv`, `m.gate_pre`, `m.ffn_inp`, t
 and friends) and the restored run inherits it, because nothing clears scratch between tokens. So
 some kernel reads a scratch buffer before fully writing it — a read-before-write, not a state bug.
 
-That redirects the hunt: instead of auditing snapshot coverage, find the kernel that depends on a
-stale scratch value. The cheap probe is a digest over the scratch set taken before the first
-forward and after each token, comparing the two runs token by token; the first token whose
-scratch differs while state matches names the buffer.
+**Scratch is cleared and it still diverges.** `Engine::DebugZeroScratch()` zeroes the main
+per-token buffers (x, h, q/k/v, cq/ck/cv, qn/kn, gate_pre, kda_gate, beta, latent, mla_out,
+logits) after the restore; the round trip is still INEXACT at index 5:
+
+    restore round-trip: INEXACT (diverges at 5)   [scratch zeroed]
+
+So with state bit-identical and scratch cleared, two runs of the *same* code from the *same*
+state produce different tokens. That is not a restore bug at all: **the engine is not
+bit-reproducible run to run.** The divergence appears at index 5 rather than 0, which is the
+signature of a small numeric difference accumulating, not of a wrong value being read.
+
+Where that can come from in this kernel set, in order of likelihood:
+
+1. a kernel with a non-deterministic reduction (atomics, or a warp/block reduction whose
+   order depends on scheduling);
+2. a buffer read before being written that DebugZeroScratch does not cover (expert_gate/up/
+   down, moe_logits, moe_ids/weights, the chunk scratch m.bx/bh/bq/bgated);
+3. an uninitialised register path that only shows up on some inputs.
+
+The probe is now cheap and precise: run the same 8 greedy steps twice from one snapshot and
+compare the *logits* at each step; the first step whose logits differ locates the kernel (the
+stage dumps behind `LING3_DUMP` already exist per stage and per layer). Until that is fixed,
+neither MTP equivalence nor byte-exact cache restore can be claimed — and this also means the
+golden-set divergence may be partly non-determinism rather than float arithmetic versus the
+CPU reference, which is worth knowing before the next parity attempt.
