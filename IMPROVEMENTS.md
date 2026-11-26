@@ -189,6 +189,28 @@ left is integer throughput and occupancy in the `code * a` loop itself — a dif
 of work (more items in flight per lane, or `__dp4a`-style packed arithmetic) that was not
 attempted.
 
+### `v_dot4_i32_i8` (four int8 products per instruction) — neutral, reverted
+
+The remaining hypothesis was integer throughput in the `code * a` loop, so the wide dot
+unpacks four nibbles from one 32-bit word and accumulates them with a single
+`v_dot4_i32_i8` (inline asm; the clang builtin demands `dot1-insts` on the caller, which
+this translation unit does not enable). Integer sums are order-exact, so the logits came
+out bit-identical — and the speed did not move:
+
+| | decode |
+| --- | --- |
+| scalar `code * a` | 16.88 tok/s |
+| `v_dot4_i32_i8`, four products per instruction | 16.87 tok/s |
+
+**Six attempts now measured:** launch count, activation re-quantisation (the one that
+worked, +15 %), lane idling (wide dot, +11 % combined), warp shape, load width, and
+instruction width. The MoE dot sits at ~40 GB/s effective and none of those moved it, so
+it is limited by how the eight selected experts' weight regions are streamed (scattered
+1.4 MB regions per expert, three matrices each), not by anything inside the loop. The next
+attack would have to change the access pattern — grouping tokens by expert so each expert's
+weights are read once for a batch — which is the batched-MoE work `notes/prefill-design.md`
+describes and is not attempted here.
+
 ## Where the time goes now (decode, 8 tokens, this box)
 
 | group | ms/token | share |
