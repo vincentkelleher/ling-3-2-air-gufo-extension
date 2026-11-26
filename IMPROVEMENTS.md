@@ -267,8 +267,25 @@ So the expert path is **read-bound** and every bit of arithmetic is already hidd
 loads. That rules out the unpacking as the gap and leaves the read pattern: each warp's 32 lanes
 touch addresses 144 bytes apart (one Q4_K block each), so a single load instruction spans 32
 different cache lines, whereas the scatter probe's threads read adjacent 4-byte words and get
-100 GB/s. The fix is therefore a coalesced expert GEMV — lanes reading adjacent bytes of one row
-and reducing across the warp — which is the tiled/shared-memory design, not another tuning pass.
+100 GB/s. The fix therefore looked like a coalesced expert GEMV: one warp per row, lanes reading adjacent
+bytes of each Q4_K group (one 32-byte sector per instruction) and reducing across the warp. Written
+and measured:
+
+| variant | decode |
+| --- | --- |
+| scattered 144-byte block per lane (current) | 16.93 tok/s |
+| coalesced 32-byte group per warp instruction | 16.91 tok/s |
+
+**Neutral.** So coalescing at this granularity is not the gap either, and the read-bound diagnosis
+still stands. The remaining difference from the probe is *concurrency over the same windows*: the
+probe had one block per window (32 blocks, 32 windows), while the real kernel has ~1 000 blocks
+streaming ~24 windows, so many blocks hit the same 1.4 MB region at once. The next probe is that
+shape — many blocks per window — and it decides whether a residency/layout change is the only
+remaining lever.
+
+Eight variants have now been measured for this kernel: launch count, activation re-quantisation
+(+15 %, kept), lane-idle wide dot (+11 %, kept), warp shape, load width, instruction width
+(`v_dot4`), block width, per-expert launches and coalescing. Only the first two moved it.
 
 ## Where the time goes now (decode, 8 tokens, this box)
 
