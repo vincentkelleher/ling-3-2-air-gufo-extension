@@ -372,6 +372,9 @@ Two concurrent sessions **still hang** (bounded run killed at 420 s), so the sta
 was not the whole story. The next suspect is the adapter itself: `Ling3ComponentAdapter`
 keeps `engines_` and `positions_` in `std::map`s that the scheduler threads touch without a
 mutex (`EngineFor`, `OnPosition`, `Existing`, `Adopt`), which is a data race on the very
-path a second session takes. A `std::mutex` around those maps is the next step; if that is
-not enough, the remaining suspicion falls on two engines sharing one HIP device from two
-threads, which would need the host's serialisation rather than ours.
+path a second session takes. The mutex is now in (all four map accesses lock it) and two sessions **still hang**
+(killed at 420 s), so the adapter's maps were not the cause either. What is left is the
+engine itself: two `Engine` instances on two threads against one HIP device — each owns its
+own stream, but the weight mapping, the host-registered ranges and the shared `gpus` are
+process-wide. That needs either host-level serialisation of sessions or a single engine
+shared by all sessions, which is a different design from the one-session-per-slot contract.

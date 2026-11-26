@@ -11,6 +11,7 @@
 #include <cstdio>
 #include <cstring>
 #include <map>
+#include <mutex>
 #include <vector>
 #include <utility>
 
@@ -99,11 +100,13 @@ class Ling3ComponentAdapter final : public cache::Adapter,
   /// refuses an already-registered range, and the pool is then left with no state (which
   /// is the null reservation that crashed Acquire).
   [[nodiscard]] Engine* Existing(cache::Slot* slot) {
+    const std::lock_guard<std::mutex> lock(mutex_);
     const auto found = engines_.find(slot);
     return found == engines_.end() ? nullptr : found->second;
   }
 
   Engine& Adopt(cache::Slot* slot, std::unique_ptr<Engine> engine) {
+    const std::lock_guard<std::mutex> lock(mutex_);
     Engine* raw = engine.release();
     engines_[slot] = raw;
     return *raw;
@@ -139,6 +142,7 @@ class Ling3ComponentAdapter final : public cache::Adapter,
   }
 
   void OnPosition(void* slot, std::size_t position) override {
+    const std::lock_guard<std::mutex> lock(mutex_);
     positions_[static_cast<cache::Slot*>(slot)] = position;
   }
   /// One pass covers at most `kPassTokens` rows, so the plan is the ascending
@@ -205,10 +209,12 @@ class Ling3ComponentAdapter final : public cache::Adapter,
 
  private:
   [[nodiscard]] Engine* EngineFor(const cache::Slot& slot) const {
+    const std::lock_guard<std::mutex> lock(mutex_);
     const auto found = engines_.find(const_cast<cache::Slot*>(&slot));
     return found == engines_.end() ? nullptr : found->second;
   }
 
+  mutable std::mutex mutex_;
   cache::Identity identity_;
   std::uint32_t context_{0};
   cache::ComponentDescriptor component_{};
