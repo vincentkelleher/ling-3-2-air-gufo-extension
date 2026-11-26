@@ -502,3 +502,19 @@ not the only one.
 Next: re-run the block-0 numpy comparison (block 0 was corr 0.9898 before this
 fix) — if it is now exact, move to block 1 and continue block by block; if not,
 diff the conv window as described above.
+
+### The k/v conv still differs with exact inputs, correct mapping and zero state
+
+After the slot fix, block 0 is unchanged (corr 0.9898): `vproj`/`kproj` match
+numpy to 7e-7, `cv` differs by 7.1e-2 (engine rms 1.39e-2 vs numpy 1.31e-2) and
+`kn` by 7.5e-1. The mapping is right (`weights.cpp` maps each `ssm_conv1d_*` to
+its own field, and the calls use the matching fields), the state is memset to zero
+at load, and at position 0 the window must be `[0,0,0,x]`, i.e.
+`out = silu(w[c*4+3]*x)` — exactly what numpy computes. The engine's slightly
+larger rms suggests an extra nonzero window term, i.e. the state is not the slice
+the kernel thinks.
+
+Next (single build): in `Conv1dStepKernel`, for `c < 4`, write the four window
+values, the four weights and the slot index into a debug buffer; dump it for the
+q, k and v launches of block 0 at position 0. Four floats each decide whether the
+window, the weights or the slot is wrong.
