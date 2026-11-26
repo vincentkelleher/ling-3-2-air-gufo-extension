@@ -1009,6 +1009,42 @@ int main() {
     HIP_CHECK(hipFree(dy_prep)); HIP_CHECK(hipFree(dv)); HIP_CHECK(hipFree(ds));
   }
 
+  // Q4_0 against an independent reference (tools/make_q40_fixture.py).
+  if (const char* path = std::getenv("LING3_Q40_FIXTURE")) {
+    FILE* file = std::fopen(path, "rb");
+    if (file != nullptr) {
+      int header[3] = {0, 0, 0};
+      std::fread(header, sizeof(int), 3, file);
+      const int rows = header[0], cols = header[1], row_bytes = header[2];
+      std::vector<std::uint8_t> weights(static_cast<std::size_t>(rows) * row_bytes);
+      std::vector<float> x(cols), expected(rows);
+      std::fread(weights.data(), 1, weights.size(), file);
+      std::fread(x.data(), sizeof(float), cols, file);
+      std::fread(expected.data(), sizeof(float), rows, file);
+      std::fclose(file);
+      void* dw = nullptr;
+      float* dx = nullptr;
+      float* dy = nullptr;
+      HIP_CHECK(hipMalloc(&dw, weights.size()));
+      HIP_CHECK(hipMalloc(&dx, cols * sizeof(float)));
+      HIP_CHECK(hipMalloc(&dy, rows * sizeof(float)));
+      HIP_CHECK(hipMemcpy(dw, weights.data(), weights.size(), hipMemcpyHostToDevice));
+      HIP_CHECK(hipMemcpy(dx, x.data(), cols * sizeof(float), hipMemcpyHostToDevice));
+      hipk::LaunchGemv(dw, hipk::kQ4_0, rows, cols, dx, dy, 0);
+      HIP_CHECK(hipDeviceSynchronize());
+      std::vector<float> actual(rows);
+      HIP_CHECK(hipMemcpy(actual.data(), dy, rows * sizeof(float), hipMemcpyDeviceToHost));
+      double worst = 0.0;
+      for (int i = 0; i < rows; ++i) {
+        const double scale = std::max(1.0, std::fabs(static_cast<double>(expected[i])));
+        worst = std::max(worst, std::fabs(static_cast<double>(actual[i]) - expected[i]) / scale);
+        std::printf("  Q4_0 row %d: engine %.6f reference %.6f\n", i, actual[i], expected[i]);
+      }
+      Check(worst <= 2e-2, "Q4_0 vs python reference", worst, 2e-2);
+      HIP_CHECK(hipFree(dw)); HIP_CHECK(hipFree(dx)); HIP_CHECK(hipFree(dy));
+    }
+  }
+
   std::printf("operators: %d failures\n", Failures);
   return Failures == 0 ? 0 : 1;
 }

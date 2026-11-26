@@ -36,6 +36,8 @@ StorageType Storage(core::GgmlType type) {
       return hip::kQ6K;
     case core::GgmlType::kQ5_K:
       return hip::kQ5K;
+    case core::GgmlType::kQ4_0:
+      return hip::kQ4_0;
     default:
       return hip::kF32;
   }

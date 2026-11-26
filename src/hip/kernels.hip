@@ -26,6 +26,10 @@ struct BlockQ4K {
   std::uint8_t scales[12];
   std::uint8_t qs[128];
 };
+struct BlockQ4_0 {
+  std::uint16_t d;
+  std::uint8_t qs[16];
+};
 struct BlockQ5K {
   std::uint16_t d;
   std::uint16_t dmin;
@@ -45,6 +49,7 @@ static_assert(sizeof(BlockQ8_0) == 34, "Q8_0 block layout");
 static_assert(sizeof(BlockQ4K) == 144, "Q4_K block layout");
 static_assert(sizeof(BlockQ6K) == 210, "Q6_K block layout");
 static_assert(sizeof(BlockQ5K) == 176, "Q5_K block layout");
+static_assert(sizeof(BlockQ4_0) == 18, "Q4_0 block layout");
 
 __device__ __forceinline__ float HalfToFloat(std::uint16_t bits) {
   const __half value = *reinterpret_cast<const __half*>(&bits);
@@ -100,6 +105,14 @@ __device__ __forceinline__ int Q6Code(const BlockQ6K& block, int index) {
     default: low = block.ql[ql_base + 32 + lane] >> 4; high = (qh >> 6) & 0x03; break;
   }
   return static_cast<int>((high << 4) | low) - 32;
+}
+
+/// Q4_0: one fp16 scale per 32 values (which may be negative); a byte holds the
+/// low nibble of value `j` and the high nibble of value `j + 16`.
+__device__ __forceinline__ int Q4_0Code(const BlockQ4_0& block, int index) {
+  const int byte = index & 15;
+  const int nibble = (index < 16) ? (block.qs[byte] & 0x0F) : (block.qs[byte] >> 4);
+  return nibble - 8;
 }
 
 __device__ __forceinline__ float Q5Value(const BlockQ5K& block, int index) {
@@ -203,6 +216,25 @@ __device__ __forceinline__ float DotRow(const std::uint8_t* row, const float* x,
         int a = __float2int_rn(x[b * 32 + j] * inverse);
         a = a > 127 ? 127 : (a < -127 ? -127 : a);
         total += static_cast<int>(blocks[b].qs[j]) * a;
+      }
+      sum += HalfToFloat(blocks[b].d) * scale * static_cast<float>(total);
+    }
+    return WarpSum(sum);
+  } else if constexpr (TYPE == kQ4_0) {
+    const auto* blocks = reinterpret_cast<const BlockQ4_0*>(row);
+    const int count = cols / 32;
+    float sum = 0.0f;
+    // Warp-per-row: stride by LANE, not by threadIdx, or every warp but the
+    // first starts at a shifted block (that was the 0.386/0.000 bug).
+    for (int b = threadIdx.x & 31; b < count; b += 32) {
+      float scale = 1.0f;
+      ActivationScale(x + b * 32, 32, scale);
+      const float inverse = 1.0f / scale;
+      int total = 0;
+      for (int j = 0; j < 32; ++j) {
+        int a = __float2int_rn(x[b * 32 + j] * inverse);
+        a = a > 127 ? 127 : (a < -127 ? -127 : a);
+        total += Q4_0Code(blocks[b], j) * a;
       }
       sum += HalfToFloat(blocks[b].d) * scale * static_cast<float>(total);
     }
@@ -587,6 +619,8 @@ std::size_t RowBytes(StorageType type, std::size_t cols) {
       return cols / 32 * sizeof(BlockQ8_0);
     case kQ4K:
       return cols / 256 * sizeof(BlockQ4K);
+    case kQ4_0:
+      return cols / 32 * sizeof(BlockQ4_0);
     case kQ5K:
       return cols / 256 * sizeof(BlockQ5K);
     case kQ6K:
@@ -613,6 +647,10 @@ void LaunchGemv(const void* weights, StorageType type, std::size_t rows,
       break;
     case kQ4K:
       GemvKernel<kQ4K><<<blocks, kThreads, 0, stream>>>(
+          data, x, y, static_cast<int>(rows), static_cast<int>(cols), row_bytes);
+      break;
+    case kQ4_0:
+      GemvKernel<kQ4_0><<<blocks, kThreads, 0, stream>>>(
           data, x, y, static_cast<int>(rows), static_cast<int>(cols), row_bytes);
       break;
     case kQ5K:

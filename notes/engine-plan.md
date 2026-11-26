@@ -973,3 +973,31 @@ forward, a draft loop and exactness validation on top of this.
 Next attempt should test a **single row** (rows = 1) first: if one row matches, the
 defect is the multi-row mapping; if it does not, dump the kernel's per-block
 partials for row 0 and compare with the python emulation block by block.
+
+### Q4_0 solved, 2026-11-27
+
+The defect was the warp-per-row contract: `DotRow` runs one warp per row, so the
+block loop must stride by **lane** (`threadIdx.x & 31`), not by `threadIdx.x`.
+Iterating from `threadIdx.x` made every warp but the first start at a shifted
+block -- warp 1 began at block 32, so rows 1-3 saw a subset and one came out
+exactly zero. That explains all three earlier attempts: the layout was right (low
+nibbles are values 0..15, high nibbles 16..31, confirmed against gguf.quants to
+0.000000), the algorithm was right (a python emulation matched the reference), and
+only the iteration was wrong.
+
+With the fix, against `tools/make_q40_fixture.py`'s real block-42 rows:
+
+| row | engine | reference |
+| --- | --- | --- |
+| 0 | 0.454542 | 0.453978 |
+| 1 | -0.351130 | -0.353091 |
+| 2 | 1.659593 | 1.662273 |
+| 3 | 0.159846 | 0.157382 |
+
+Max relative error 0.25 % (activation quantization), asserted in the operator
+suite, which is now 28 checks. The MTP block can be read.
+
+Next for MTP, in order: `Engine::ForwardMtp` using the base model's final hidden
+state (`m.h` after the last RMSNorm) plus the candidate token's embedding through
+block 42, then a draft loop, then exactness (drafted output must equal plain
+greedy) and a speed measurement at 12.5 tok/s decode.

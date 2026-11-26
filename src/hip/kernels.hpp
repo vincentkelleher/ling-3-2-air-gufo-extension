@@ -19,6 +19,7 @@ enum StorageType : int {
   kQ4K = 2,
   kQ6K = 3,
   kQ5K = 4,
+  kQ4_0 = 5,
 };
 
 /// Bytes occupied by one row of `cols` weights in `type`.
