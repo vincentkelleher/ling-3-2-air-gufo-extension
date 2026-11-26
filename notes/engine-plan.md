@@ -637,3 +637,13 @@ products per sub-block and applies a single float scale per group, while these
 kernels multiply dequantized floats. That rewrite (Q4_K: 8x32 groups with d*sc
 and dmin*m corrections; Q6_K: 16-element groups) is the next and only change on
 this critical path.
+
+## Attempted integer Q4_K dot: wrong, reverted (2026-11-27)
+
+Rewriting the Q4_K inner product as per-group integer sums (q*a and sum_a with
+`d*sc`/`dmin*m`) produced garbage text, so the unpacking I used is wrong
+(likely the 6-bit scale/min extraction per group, which llama.cpp does with its
+own `get_scale_min_k4` on the 12 packed bytes). Reverted to the dequantizing
+dot, which is correct and coherent. If this is retried, port
+`get_scale_min_k4` exactly and unit-test the integer dot against
+`quant::Dot` per block before touching the engine.
