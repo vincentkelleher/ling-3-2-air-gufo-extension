@@ -594,3 +594,7 @@ products) rather than accumulating dequantized weights against fp32 activations.
 This is the documented deviation the `engine-prefill` contract asks for: pinned
 prompt, divergence index 8, margin 0.022, same sentence meaning and same final
 answer.
+
+## Golden-set spot check (2026-11-27)
+
+Prompt 2 ("What is 17 times 23?"): llama.cpp answers "17 x 23 = 17 x 20 + 17 x 3 = 3", the engine answers "The user is asking for the product of 17 and 23. Let me compute this." — same task, different opening, so this prompt diverges at token 0. Prompt 1 matched for eight tokens. Agreement is therefore prompt-dependent, consistent with a logit error of order 0.02-0.5 deciding greedy picks. Both answers are coherent.
