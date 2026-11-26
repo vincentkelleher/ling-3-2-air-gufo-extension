@@ -414,3 +414,28 @@ loop over 512 experts and the per-expert launch overhead:
    two, then the existing down projection and `LaunchScatterAdd`.
 4. Validation is already in place: the chunked path's argmax must stay 678 at every
    chunk size, and the golden set must not move.
+
+### Grouped MoE removed from the tree, 2026-11-27
+
+The device-side grouped schedule (one warp per expert-row, looping that expert's
+tokens) was written, wired and measured: it **faulted** with
+`HSA_STATUS_ERROR_MEMORY_FAULT`, so it was removed together with its two kernels
+rather than left as a hazard behind a flag. The design and the four-step shape are
+recorded above; nothing else in the tree depended on it.
+
+State after the removal, measured on the 104-token prompt and re-verified:
+
+| path | rate | argmax |
+| --- | --- | --- |
+| chunk 8 | 15.61 tok/s | 678 |
+| chunk 104 | **16.21 tok/s** | 678 |
+| sequential | 12.48 tok/s | 678 |
+
+Operator suite 31 checks / 0 failures, `ctest` 5/5.
+
+What remains for the prefill gate: make a K-token pass cost closer to one token's
+weight traffic. The two levers are the ones already identified -- a K-quant GEMM as
+fast as the GEMV path, and a grouped MoE whose per-expert loop runs on the device
+(the removed attempt; the fault is most likely an expert count or offset mismatch
+between `LaunchBuildExpertLists`' 512-entry tables and the kernel's `experts`
+argument, which should be passed rather than hard-coded).

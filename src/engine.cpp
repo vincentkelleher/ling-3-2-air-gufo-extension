@@ -992,74 +992,22 @@ bool Engine::PrefillChunk(const std::int32_t* tokens, std::size_t count,
         hip::LaunchAxpy(m.bx + row, m.bffout + row, 1.0f, n_embd, stream);
       }
     } else {
-      // The grouped schedule is correct but slower until the K-quant GEMM is as
-      // fast as the GEMV path, so it stays opt-in (notes/prefill-design.md).
-      if (M > 8 && std::getenv("LING3_GROUPED_MOE") != nullptr) {
-      // Grouped MoE: one batched router, then each expert runs once over all the
-      // tokens that selected it, so its weights are read once per chunk instead
-      // of once per token (notes/prefill-design.md).
-      hip::LaunchGemm(dev(layer.gate_inp), Storage(layer.gate_inp.type), c.n_expert,
-                      n_embd, m.bffnh, M, n_embd, m.brooter, c.n_expert, stream);
       for (int i = 0; i < M; ++i) {
-        hip::LaunchRouterSelect(m.brooter + static_cast<std::size_t>(i) * c.n_expert,
+        const std::size_t row = static_cast<std::size_t>(i) * n_embd;
+        hipMemcpyAsync(m.ffn_h, m.bffnh + row, n_embd * sizeof(float),
+                       hipMemcpyDeviceToDevice, stream);
+        hip::LaunchGemv(dev(layer.gate_inp), Storage(layer.gate_inp.type), c.n_expert,
+                        n_embd, m.ffn_h, m.moe_logits, stream);
+        hip::LaunchRouterSelect(m.moe_logits,
                                 static_cast<const float*>(dev(layer.exp_probs_b)),
-                                c.n_expert, c.n_group, c.n_group_used,
-                                c.n_expert_used, c.expert_weights_scale,
-                                m.brouter_ids + static_cast<std::size_t>(i) * c.n_expert_used,
-                                m.brouter_w + static_cast<std::size_t>(i) * c.n_expert_used,
-                                stream);
-      }
-      std::vector<std::int32_t> host_counts, host_offsets;
-      hip::LaunchBuildExpertLists(m.brouter_ids, M, c.n_expert_used, c.n_expert,
-                                  m.bcounts, m.bcursor, m.boffsets, m.bslots, stream,
-                                  &host_counts, &host_offsets);
-      const StorageType gate_type = Storage(layer.gate_exps.type);
-      const StorageType up_type = Storage(layer.up_exps.type);
-      const StorageType down_type = Storage(layer.down_exps.type);
-      const std::size_t gate_row = hip::RowBytes(gate_type, n_embd);
-      const std::size_t up_row = hip::RowBytes(up_type, n_embd);
-      const std::size_t down_row = hip::RowBytes(down_type, c.n_ff_exp);
-      const auto* gate_base = static_cast<const char*>(dev(layer.gate_exps));
-      const auto* up_base = static_cast<const char*>(dev(layer.up_exps));
-      const auto* down_base = static_cast<const char*>(dev(layer.down_exps));
-      for (std::size_t e = 0; e < c.n_expert; ++e) {
-        const std::size_t k = static_cast<std::size_t>(host_counts[e]);
-        if (k == 0) {
-          continue;
-        }
-        const std::int32_t* slots = m.bslots + host_offsets[e];
-        hip::LaunchGatherRows(m.bffnh, slots, k, n_embd, m.bgather, stream,
-                              c.n_expert_used);
-        hip::LaunchGemm(gate_base + e * c.n_ff_exp * gate_row, gate_type, c.n_ff_exp,
-                        n_embd, m.bgather, k, n_embd, m.bgate, c.n_ff_exp, stream);
-        hip::LaunchGemm(up_base + e * c.n_ff_exp * up_row, up_type, c.n_ff_exp, n_embd,
-                        m.bgather, k, n_embd, m.bup, c.n_ff_exp, stream);
-        hip::LaunchSilu(m.bgate, m.bgate, k * c.n_ff_exp, stream);
-        hip::LaunchMulInto(m.bgate, m.bup, m.bgate, k * c.n_ff_exp, stream);
-        hip::LaunchGemm(down_base + e * n_embd * down_row, down_type, n_embd, c.n_ff_exp,
-                        m.bgate, k, c.n_ff_exp, m.bout, n_embd, stream);
-        hip::LaunchScatterAdd(m.bx, slots, m.brouter_w, k, n_embd, m.bout, stream,
-                              c.n_expert_used);
-      }
-      } else {
-        for (int i = 0; i < M; ++i) {
-          const std::size_t row = static_cast<std::size_t>(i) * n_embd;
-          hipMemcpyAsync(m.ffn_h, m.bffnh + row, n_embd * sizeof(float),
-                         hipMemcpyDeviceToDevice, stream);
-          hip::LaunchGemv(dev(layer.gate_inp), Storage(layer.gate_inp.type), c.n_expert,
-                          n_embd, m.ffn_h, m.moe_logits, stream);
-          hip::LaunchRouterSelect(m.moe_logits,
-                                  static_cast<const float*>(dev(layer.exp_probs_b)),
-                                  c.n_expert, c.n_group, c.n_group_used, c.n_expert_used,
-                                  c.expert_weights_scale, m.moe_ids, m.moe_weights,
-                                  stream);
-          hip::LaunchMoeGather(dev(layer.gate_exps), Storage(layer.gate_exps.type),
-                               dev(layer.up_exps), Storage(layer.up_exps.type),
-                               dev(layer.down_exps), Storage(layer.down_exps.type),
-                               n_embd, c.n_ff_exp, m.ffn_h, m.moe_ids, m.moe_weights,
-                               c.n_expert_used, m.bx + row, m.expert_gate, m.expert_up,
-                               m.expert_down, stream);
-        }
+                                c.n_expert, c.n_group, c.n_group_used, c.n_expert_used,
+                                c.expert_weights_scale, m.moe_ids, m.moe_weights, stream);
+        hip::LaunchMoeGather(dev(layer.gate_exps), Storage(layer.gate_exps.type),
+                             dev(layer.up_exps), Storage(layer.up_exps.type),
+                             dev(layer.down_exps), Storage(layer.down_exps.type), n_embd,
+                             c.n_ff_exp, m.ffn_h, m.moe_ids, m.moe_weights,
+                             c.n_expert_used, m.bx + row, m.expert_gate, m.expert_up,
+                             m.expert_down, stream);
       }
       hip::LaunchGemm(dev(layer.gate_shexp), Storage(layer.gate_shexp.type),
                       c.n_ff_shexp, n_embd, m.bffnh, M, n_embd, m.bffa, c.n_ff_shexp,
