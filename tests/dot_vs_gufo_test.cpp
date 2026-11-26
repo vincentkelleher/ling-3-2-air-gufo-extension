@@ -223,6 +223,22 @@ double IntegerQ4Dot(const BlockQ4K& block, const std::vector<float>& x) {
   return inner;
 }
 
+/// Segment-major Q6_K unpacking, the shape the kernel would use: hoist the
+/// nibble/2-bit selection per 16-element group instead of choosing per element.
+int Q6CodeSegmentMajor(const BlockQ6K& block, int index) {
+  const int group = index / 16;
+  const int i = index % 16;
+  const int half = group / 8;
+  const int segment = (group % 8) / 2;
+  const int lane = (group * 16) % 32 + i;
+  const std::uint8_t* ql = block.ql + half * 64 + (segment % 2) * 32;
+  const int ql_shift = (segment / 2) * 4;
+  const int qh_shift = segment * 2;
+  const int low = (ql[lane] >> ql_shift) & 0x0F;
+  const int high = (block.qh[half * 32 + lane] >> qh_shift) & 0x03;
+  return ((high << 4) | low) - 32;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -310,6 +326,41 @@ int main(int argc, char** argv) {
         } else {
           std::printf("integer Q4_K block %d: rel %.4f\n", block, relative);
         }
+      }
+    }
+  }
+
+  {
+    const auto* info = reader->FindTensor("blk.2.ffn_up_exps.weight");
+    if (info != nullptr) {
+      const auto* base = static_cast<const std::uint8_t*>(info->data);
+      int mismatches = 0;
+      for (int block = 0; block < 3; ++block) {
+        const auto* codes = reinterpret_cast<const BlockQ6K*>(base + block * 210);
+        for (int i = 0; i < 256; ++i) {
+          if (Q6CodeSegmentMajor(*codes, i) != static_cast<int>(Q6Value(*codes, i)) + 32 - 32) {
+            const int reference = static_cast<int>(Q6Value(*codes, i));
+            // Q6Value returns the dequantised value; compare codes through it.
+            (void)reference;
+          }
+        }
+        for (int i = 0; i < 256; ++i) {
+          const int mine = Q6CodeSegmentMajor(*codes, i);
+          const float via_value = Q6Value(*codes, i);
+          const float d = Half(codes->d);
+          const int group = i / 16;
+          const float expected = d * static_cast<float>(codes->scales[group]) * mine;
+          if (std::fabs(expected - via_value) > 1e-6f * std::max(1.0f, std::fabs(via_value))) {
+            ++mismatches;
+          }
+        }
+      }
+      ++checked;
+      if (mismatches != 0) {
+        ++failures;
+        std::printf("MISMATCH segment-major Q6_K: %d elements differ\n", mismatches);
+      } else {
+        std::printf("segment-major Q6_K unpacking matches the reference\n");
       }
     }
   }

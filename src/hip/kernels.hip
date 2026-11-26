@@ -258,18 +258,32 @@ __device__ __forceinline__ float DotRow(const std::uint8_t* row, const float* x,
     for (int b = threadIdx.x % 32; b < count; b += 32) {
       float scale = 1.0f;
       ActivationScale(x + b * 256, 256, scale);
+      const float inverse = 1.0f / scale;
       const float d = HalfToFloat(blocks[b].d);
       float inner = 0.0f;
+      // Segment-major, matching tests/dot_vs_gufo_test.cpp's verified form: the
+      // 16-element groups never straddle a segment, so the nibble and 2-bit
+      // selection hoist out of the inner loop.
       for (int g = 0; g < 16; ++g) {
+        const int half = g / 8;
+        const int segment = (g % 8) / 2;
+        const int lane_base = (g * 16) % 32;
+        const std::uint8_t* ql = blocks[b].ql + half * 64 + (segment % 2) * 32;
+        const int ql_shift = (segment / 2) * 4;
+        const int qh_shift = segment * 2;
         int total = 0;
-        const float inverse = 1.0f / scale;
         for (int i = 0; i < 16; ++i) {
           const int j = g * 16 + i;
+          const int lane = lane_base + i;
+          const int low = (ql[lane] >> ql_shift) & 0x0F;
+          const int high = (blocks[b].qh[half * 32 + lane] >> qh_shift) & 0x03;
+          const int code = ((high << 4) | low) - 32;
           int a = __float2int_rn(x[b * 256 + j] * inverse);
           a = a > 127 ? 127 : (a < -127 ? -127 : a);
-          total += Q6Code(blocks[b], j) * a;
+          total += code * a;
         }
-        inner += d * static_cast<float>(blocks[b].scales[g]) * scale * static_cast<float>(total);
+        inner += d * static_cast<float>(blocks[b].scales[g]) * scale *
+                 static_cast<float>(total);
       }
       sum += inner;
     }
