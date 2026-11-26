@@ -52,16 +52,16 @@ __global__ void L2NormKernel(const float* x, float* y, int heads, int head_dim,
   for (int offset = 16; offset > 0; offset >>= 1) {
     sum += __shfl_down(sum, offset);
   }
-  __shared__ float shared;
-  if (threadIdx.x == 0) {
-    shared = 0.0f;
-  }
-  __syncthreads();
+  __shared__ float warp_sums[32];
   if ((threadIdx.x & 31) == 0) {
-    atomicAdd(&shared, sum);
+    warp_sums[threadIdx.x >> 5] = sum;
   }
   __syncthreads();
-  const float norm = sqrtf(shared);
+  float total = 0.0f;
+  for (int w = 0; w < static_cast<int>((blockDim.x + 31) / 32); ++w) {
+    total += warp_sums[w];
+  }
+  const float norm = sqrtf(total);
   const float scale = 1.0f / (norm < eps ? eps : norm);
   for (int i = threadIdx.x; i < head_dim; i += blockDim.x) {
     target[i] = source[i] * scale;

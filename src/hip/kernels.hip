@@ -313,21 +313,24 @@ __global__ void RmsNormKernel(const float* x, const float* weight, float* y,
   }
   const float* source = x + static_cast<std::size_t>(row) * cols;
   float* target = y + static_cast<std::size_t>(row) * cols;
-  __shared__ float shared;
-  if (threadIdx.x == 0) {
-    shared = 0.0f;
-  }
-  __syncthreads();
+  // Deterministic reduction: per-warp sums in shared memory, then a fixed-order
+  // sum by thread 0. atomicAdd made the result depend on warp arrival order,
+  // which flipped tokens at 0.02 logit margins (see notes/engine-plan.md).
+  __shared__ float warp_sums[32];
   float sum = 0.0f;
   for (int i = threadIdx.x; i < cols; i += blockDim.x) {
     sum += source[i] * source[i];
   }
   sum = WarpSum(sum);
   if ((threadIdx.x & 31) == 0) {
-    atomicAdd(&shared, sum);
+    warp_sums[threadIdx.x >> 5] = sum;
   }
   __syncthreads();
-  const float scale = rsqrtf(shared / static_cast<float>(cols) + eps);
+  float total = 0.0f;
+  for (int w = 0; w < static_cast<int>((blockDim.x + 31) / 32); ++w) {
+    total += warp_sums[w];
+  }
+  const float scale = rsqrtf(total / static_cast<float>(cols) + eps);
   for (int i = threadIdx.x; i < cols; i += blockDim.x) {
     target[i] = source[i] * scale * weight[i];
   }

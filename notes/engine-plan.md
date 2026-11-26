@@ -681,3 +681,13 @@ runs, the conv state slots).
 
 Next: run the 12-step case ten times and count outcomes, then bisect by disabling
 paths (conv, MoE gather, MLA) one at a time until the outcome is stable.
+
+## Non-determinism fixed: atomicAdd float reductions (2026-11-27)
+
+Both norm kernels summed with `atomicAdd`, so the float addition order depended on
+warp arrival and the result varied run to run -- enough to flip tokens at 0.01-0.02
+logit margins (one 12-step run in six matched llama.cpp, the rest did not).
+
+Replaced with per-warp sums in shared memory and a fixed-order sum. Eight
+consecutive 12-step runs are now identical (same hash). The engine also got an
+explicit non-blocking stream instead of the implicit one.

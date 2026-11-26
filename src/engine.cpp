@@ -89,6 +89,7 @@ struct Engine::Impl {
   std::int32_t* moe_ids{nullptr};
   float* moe_weights{nullptr};
   std::int32_t* argmax{nullptr};
+  hipStream_t queue{nullptr};
   float* kernel_debug{nullptr};
 
   std::vector<float*> conv_state;
@@ -256,6 +257,13 @@ std::unique_ptr<Engine> Engine::Create(const core::GgufReader& reader,
     }
   }
 
+  // One explicit stream for every kernel and copy: work issued on the implicit
+  // stream mixed with blocking copies was not always ordered, which made
+  // decoding non-deterministic (see notes/engine-plan.md).
+  if (hipStreamCreateWithFlags(&m.queue, hipStreamNonBlocking) != hipSuccess) {
+    return fail("engine: cannot create the compute stream");
+  }
+
   const std::size_t n_embd = config.n_embd;
   const std::size_t heads = config.n_head;
   const std::size_t kda_dim = config.n_kda_head_dim;
@@ -354,7 +362,7 @@ bool Engine::ForwardToken(std::int32_t token, std::uint32_t position,
   const std::size_t q_dim = heads * c.n_head_dim_mla;
   const std::size_t v_dim = heads * c.n_head_dim_v_mla;
   const std::size_t latent = c.n_lora_kv;
-  hipStream_t stream = nullptr;
+  hipStream_t stream = m.queue;
 
   auto dev = [&m](const Tensor& tensor) { return m.Dev(tensor); };
   const bool stats = std::getenv("LING3_STATS") != nullptr;
@@ -713,8 +721,8 @@ void Engine::DebugEmbedding(std::int32_t token, float* host_row) {
   const std::size_t n_embd = m.config.n_embd;
   hip::LaunchEmbeddingRow(m.Dev(m.weights.token_embd),
                           RawType(m.weights.token_embd.type), m.config.n_vocab,
-                          n_embd, token, m.x, nullptr);
-  hipStreamSynchronize(nullptr);
+                          n_embd, token, m.x, m.queue);
+  hipStreamSynchronize(m.queue);
   hipMemcpy(host_row, m.x, n_embd * sizeof(float), hipMemcpyDeviceToHost);
 }
 
