@@ -606,3 +606,18 @@ scale per 256-weight block, values rounded to int8 and clipped to +-127) before
 the dot. Prompt 1 still diverges at the same word ("about" vs ":"), so this alone
 does not flip that token; the remaining error must come from elsewhere (the Q8_0
 dots, the LM head, or accumulation order inside the attention/MoE paths).
+
+## Single-token context: margin 0.013 (2026-11-27)
+
+BOS-only context (token 156891, confirmed by `llama-tokenize -f bos.txt`): the
+engine argmax is 23282 with top-5 `23282=4.529, 128206=4.516, 34775=4.047,
+8010=4.021, 90827=4.002` — a top-2 margin of **0.013**. llama.cpp printed an
+empty first token for the same input (the token is whitespace-only), so the
+argmax comparison for this case is not observable through its text output.
+
+That is the third razor-thin margin measured (0.022 at prompt 1 step 8, 0.013
+here), which is consistent with a systematic logit error of ~0.02 and means
+token-for-token agreement on a golden set of any size will be decided by that
+error. `engine-assembly` stays open: its RMS half needs llama.cpp logits, which
+`--save-all-logits` does not provide in a usable form, and its argmax half needs
+a reference token for the single-token case.
