@@ -70,6 +70,21 @@ runs hash identically after the `atomicAdd` reduction order was removed.
 **Verdict**: same task, same answer, one token apart at a near-tie. Token-for-token
 equality is **not** claimed; the deviation is recorded with its index and margin.
 
+### Snapshot restore is inexact, which bounds two claims
+
+`SnapshotState`/`RestoreState` round-trips imperfectly: plain greedy re-run after a restore
+diverges from the uninterrupted run at token 5 (reproduced by `tests/mtp_test.cpp`, which
+registers the check regardless of MTP). Consequences:
+
+- MTP speculative decoding cannot be shown to reproduce plain autogressive output, because
+  the verification pass needs a rewind and the rewind itself is lossy;
+- cache restore is **not** byte-for-byte identical to an uninterrupted run, so the
+  continuation timings (TTFT 27,431 ms → 92 ms) are real but byte-exact restore equality is
+  not established.
+
+`notes/prefill-design.md` records the covered buffers, the buffers still to check and the
+byte-level diff that would localise it.
+
 ### The one clause that cannot be measured here
 
 `engine-assembly`'s contract asks for the logits RMS error against llama.cpp. Neither

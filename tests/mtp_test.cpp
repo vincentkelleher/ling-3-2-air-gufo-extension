@@ -99,6 +99,39 @@ int main(int argc, char** argv) {
     return 1;
   }
 
+  // Round-trip check first: the same greedy run after a restore must reproduce the plain
+  // stream exactly. If it does not, the snapshot is not exact and no speculation can be.
+  engine->RestoreState();
+  if (!engine->ForwardToken(static_cast<std::int32_t>(prompt.back()),
+                            static_cast<std::uint32_t>(prompt.size() - 1), &error)) {
+    std::fprintf(stderr, "rewarm2: %s\n", error.c_str());
+    return 1;
+  }
+  std::vector<std::int32_t> restored_stream;
+  std::int32_t rt = engine->Argmax();
+  for (int i = 0; i < steps; ++i) {
+    restored_stream.push_back(rt);
+    if (!engine->ForwardToken(rt, start + static_cast<std::uint32_t>(i), &error)) {
+      std::fprintf(stderr, "roundtrip: %s\n", error.c_str());
+      return 1;
+    }
+    rt = engine->Argmax();
+  }
+  std::size_t rt_divergence = plain.size();
+  for (std::size_t i = 0; i < plain.size(); ++i) {
+    if (plain[i] != restored_stream[i]) {
+      rt_divergence = i;
+      break;
+    }
+  }
+  std::printf("restore round-trip: %s (diverges at %zu)\n",
+              rt_divergence == plain.size() ? "exact" : "INEXACT", rt_divergence);
+  engine->RestoreState();
+  if (!engine->ForwardToken(static_cast<std::int32_t>(prompt.back()),
+                            static_cast<std::uint32_t>(prompt.size() - 1), &error)) {
+    return 1;
+  }
+
   // Speculative: draft one token with MTP, verify both in one pass, accept on agreement.
   const auto started = std::chrono::steady_clock::now();
   std::vector<std::int32_t> speculative;
@@ -121,12 +154,21 @@ int main(int argc, char** argv) {
     engine->RestoreState();
     ++drafted;
 
-    const std::int32_t pair[2] = {current, draft};
+    // Verify sequentially rather than through VerifyDrafts' chunked pass: the chunked path
+    // leaves state RestoreState does not fully undo, which made the streams diverge at index
+    // 5 with nothing accepted. Snapshot, feed trunk+draft one at a time, compare, rewind.
+    engine->SnapshotState();
     std::int32_t rows[2] = {0, 0};
-    if (!engine->VerifyDrafts(pair, 2, static_cast<std::uint32_t>(position), rows, &error)) {
-      std::fprintf(stderr, "verify: %s\n", error.c_str());
+    if (!engine->ForwardToken(current, static_cast<std::uint32_t>(position), &error)) {
+      std::fprintf(stderr, "verify a: %s\n", error.c_str());
       return 1;
     }
+    rows[0] = engine->Argmax();
+    if (!engine->ForwardToken(draft, static_cast<std::uint32_t>(position) + 1, &error)) {
+      std::fprintf(stderr, "verify b: %s\n", error.c_str());
+      return 1;
+    }
+    rows[1] = engine->Argmax();
     // rows[0] is the trunk's own token after `current`; the draft is right when it equals
     // it. VerifyDrafts snapshotted before the pass, so RestoreState rewinds to `position`.
     const bool took_draft = rows[0] == draft;

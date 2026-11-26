@@ -469,3 +469,39 @@ touches (positions, chunk scratch, per-layer rows beyond the frontier), or verif
 draft with the sequential path instead of the chunked one until the restore is exact. Until
 then MTP stays unexposed: `ling3_air.mtp` is registered with `WILL_FAIL TRUE` so the suite
 stays green while the failing evidence stays in the tree.
+
+## Snapshot round-trip is inexact — the root cause behind MTP drift (2026-11-27)
+
+The MTP test was extended with a round-trip check that has nothing to do with MTP: run plain
+greedy for 8 tokens, `RestoreState()`, re-warm the logits by re-feeding the last prompt
+token, then run the same plain greedy again and compare.
+
+    restore round-trip: INEXACT (diverges at 5)
+    plain:       678 2838 341 10519 259 22365 36593 3244
+    restored:    678 2838 341 10519 259  4147 36593 3244
+
+So `SnapshotState`/`RestoreState` is not exact, and the MTP drift was a symptom, not a cause.
+This matters beyond MTP: the serving cache restores through exactly this path, so a restored
+continuation can drift a few tokens in, and criterion 3's "cache restore equals an
+uninterrupted run byte for byte" is **not** established.
+
+What the snapshot does cover (symmetric in both directions, from the source):
+
+| per layer | floats |
+| --- | --- |
+| KDA: `conv_state[il]` | `9 * KdaInner()` |
+| KDA: `delta_state[il]` | `n_head * n_kda_head_dim^2` |
+| MLA (including the MTP block 42): `mla_cache[il]` | `max_context * (n_lora_kv + n_rot)` |
+
+Each buffer matches its allocation, the copies are ordered on the engine's queue, and
+`SnapshotState` synchronises before returning, so the obvious suspects are ruled out. What is
+left to check, in order: whether the conv step's rolling window extends past
+`9 * KdaInner()`; whether any per-layer buffer written during a forward is missing from the
+list (the snapshot is sized from a formula, so a buffer that is allocated but not copied
+would still fit); and whether the restore needs the logits/frontier state the snapshot
+deliberately excludes (the test re-warms logits, so only state is at issue).
+
+Next step is a byte-level diff: hash each layer's conv/delta/MLA buffer before and after a
+snapshot+restore round-trip and report the first buffer that differs. That needs a small
+debug accessor on `Engine` and is the cheapest way to localise an inexactness that behaves
+like a slow leak rather than a broken copy.
