@@ -54,12 +54,14 @@ path on the same machine. Depth rows: 12.54 / 12.41 / 12.04 tok/s at depth
 - **No batched prefill**: prompt tokens are fed one at a time, which is why
   prefill equals decode speed (12.5 tok/s, against a 6,277 tok/s roofline at
   2,048 tokens). `notes/prefill-design.md` is the plan for fixing that.
-- **Not token-for-token with llama.cpp**: the streams agree for eight tokens and
-  then diverge where the top-2 logit margin is 0.022 (a 0.1 % difference), and
-  another prompt diverges at token 0. Same meaning, same final answer.
-  The integer per-group dots already match llama.cpp's dot products
-  (`tests/dot_vs_gufo_test.cpp`), so the residual difference is in the parts that
-  are still plain fp32.
+- **Not token-for-token with llama.cpp except on simple arithmetic.** Measured
+  with `tools/golden_set.py` (24 greedy tokens per case, identical prompts): the
+  arithmetic case matches end to end (30/30 characters), the others agree for
+  the opening of a sentence (93, 27 and 9 characters) and then split where the
+  top-2 logit margin is 0.01-0.02 — a 0.1 % difference deciding the token. Same
+  task, same meaning, different wording. The integer per-group dots already match
+  llama.cpp's dot products (`tests/dot_vs_gufo_test.cpp`), so the residual is
+  elsewhere.
 - **No MTP speculative decoding** and **no image input**: the MTP block is
   mapped but unused; the projector is downloaded but no vision path exists.
 - **No sampler beyond greedy**, no reasoning markers, no tool-call dialect.
