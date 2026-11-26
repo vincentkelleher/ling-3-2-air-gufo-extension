@@ -252,11 +252,23 @@ not matter (a bigger window at the same block count is *slower*).
 
 So the MoE's ~40-47 GB/s is a kernel-efficiency gap of about **2.5x**, not a hardware limit, and
 the decode gate is not out of reach in principle: pulling the expert path from 40 to 100 GB/s
-would take its 32 ms to ~13 ms and decode from ~17 to ~24 tok/s (48 % of the roofline). What is
-still unknown is *why* our expert kernel behaves like the 8-block case rather than the 32-block
-one; it launches ~1 000 blocks of 256 threads, so raw block count is not it, which points at
-per-block work granularity (one warp per output row, 1 440 bytes of weights each) or at the
-integer work in the Q4 unpacking competing with the loads.
+would take its 32 ms to ~13 ms and decode from ~17 to ~24 tok/s (48 % of the roofline). What is still unknown is *why* our expert kernel behaves like the 8-block case rather than the
+32-block one; it launches ~1 000 blocks of 256 threads, so raw block count is not it.
+
+**It is not the arithmetic.** Forcing the expert dot to sum raw bytes instead of unpacking 4-bit
+weights and multiplying gives an identical rate:
+
+| variant | decode |
+| --- | --- |
+| full Q4 unpack + MAC per row | 16.93 tok/s |
+| same reads, no unpack, no multiply (timing probe only) | 16.75 tok/s |
+
+So the expert path is **read-bound** and every bit of arithmetic is already hidden behind the
+loads. That rules out the unpacking as the gap and leaves the read pattern: each warp's 32 lanes
+touch addresses 144 bytes apart (one Q4_K block each), so a single load instruction spans 32
+different cache lines, whereas the scatter probe's threads read adjacent 4-byte words and get
+100 GB/s. The fix is therefore a coalesced expert GEMV — lanes reading adjacent bytes of one row
+and reducing across the warp — which is the tiled/shared-memory design, not another tuning pass.
 
 ## Where the time goes now (decode, 8 tokens, this box)
 

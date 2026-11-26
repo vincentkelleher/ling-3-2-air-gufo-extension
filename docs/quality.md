@@ -79,9 +79,12 @@ routed MoE uses. Its first run used one block per window (2 048 threads, too few
 The MoE itself runs at ~40-47 GB/s while moving ~1.2-1.5 GB per token, so it is about **2.5x
 below what the pattern supports** — a kernel-efficiency gap, not a hardware limit. At 100 GB/s the
 expert path would take ~13 ms instead of 32 and decode would be ~24 tok/s (48 % of the 49.9 roofline)
-rather than 32-34 %. Closing it needs the expert kernel to behave like the high-block-count case
-in the probe; the next step is to find what makes it equivalent to the low-block-count case
-despite launching ~1 000 blocks.
+rather than 32-34 %. The arithmetic is not the gap: removing the 4-bit unpack and the multiply from the expert dot
+leaves the rate unchanged (16.75 vs 16.93 tok/s), so the path is read-bound. The read pattern is
+the difference — each warp's 32 lanes touch addresses 144 bytes apart, so one load instruction
+spans 32 cache lines, while the probe's threads read adjacent words and reach 100 GB/s. The fix is
+a coalesced expert GEMV (lanes reading adjacent bytes, reduced across the warp), which is the tiled
+design rather than another tuning pass.
 
 ### Snapshot restore is inexact, which bounds two claims
 
