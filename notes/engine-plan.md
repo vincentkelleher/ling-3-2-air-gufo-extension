@@ -927,3 +927,25 @@ Two things learned and kept:
 Next attempt should test the Q4_0 dot against `gguf.quants.dequantize` from a small
 python script (an independent reference, since Gufo's is unavailable) before any
 kernel work.
+
+### Q4_0 second attempt: still wrong against an independent reference, 2026-11-27
+
+With the activation scale restored (the first attempt rounded raw values below 1
+to zero), the kernel still disagreed with `gguf.quants` on real block-42 rows:
+
+| row | engine | reference |
+| --- | --- | --- |
+| 0 | 0.0226 | 0.4540 |
+| 1 | 0.0690 | -0.3531 |
+| 2 | 0.0521 | 1.6623 |
+| 3 | 0.0000 | 0.1574 |
+
+A zero third row and a sign flip point at the row/warp mapping rather than the
+nibble order, but Q4_0 is only needed for the MTP block and MTP itself is a much
+larger piece, so the kernel was reverted instead of debugged further.
+
+Kept for the next attempt: `tools/make_q40_fixture.py` writes exactly the fixture
+described above (real rows, gguf.quants reference, deterministic input), so a
+kernel can be checked in one command; the correct nibble order (low nibbles are
+values 0..15, high nibbles 16..31) is recorded; and the measured numbers above are
+the starting point.
