@@ -85,6 +85,13 @@ buy about 1.3x.
 - **No image input**: the projector is downloaded but no vision path exists.
 - **No sampler beyond greedy**, no reasoning markers, no tool-call dialect.
 
+## Quality
+
+[docs/quality.md](docs/quality.md) is the quality report: what is proven against
+Gufo's reference and llama.cpp, the per-stage numerical differences, the golden-set
+result (1 of 4 cases token-identical, the rest one token apart at a 0.048 logit
+margin) and the known gaps — no HTTP serving, no vision, MTP not accepted.
+
 ## Layout
 
 ```text
