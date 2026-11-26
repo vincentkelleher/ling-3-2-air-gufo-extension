@@ -1229,7 +1229,14 @@ void LaunchGemm(const void* weights, StorageType type, std::size_t rows,
           data, x, y, rows_int, cols_int, row_bytes, batch_int, x_int, y_int);
       break;
     default:
-      break;  // Q5_K batching is not implemented yet (notes/prefill-design.md)
+      // No batched kernel for this storage: run the batch as per-token GEMVs, which every type
+      // supports. Correct for any type, slower than a GEMM, and better than silently producing
+      // nothing for a tensor whose type the batched path does not know.
+      for (int m = 0; m < batch_int; ++m) {
+        LaunchGemv(data, type, rows, cols, x + static_cast<std::size_t>(m) * x_int,
+                   y + static_cast<std::size_t>(m) * y_int, stream);
+      }
+      break;
   }
   }
 }
