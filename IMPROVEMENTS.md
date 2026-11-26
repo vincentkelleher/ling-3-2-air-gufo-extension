@@ -72,6 +72,38 @@ per-token work (the routed MoE and the per-token attention) dominates prefill ju
 dominates decode. Not changed: the default stays 32, and prefill needs the attention and
 MoE restructuring below, not a bigger chunk.
 
+### KDA projection group through the prepared GEMV — no gain, reverted
+
+The KDA branch's q/k/v/f_a projections all read the same `m.h`, so the layer quantised
+it once and ran the four matrices through `LaunchGemvPrepared`.
+
+| | before | after |
+| --- | --- | --- |
+| decode | 14.45 tok/s | 14.36 tok/s |
+| tokens / logits | — | identical |
+
+**No gain**, for the same reason as the head: a matrix with thousands of rows streams
+far more weight bytes than the 10 KB activation costs to quantise, so the activation is
+in cache and the quantisation overlaps the weight traffic. Reverted rather than kept:
+an extra 2560-element quantisation per layer buys nothing.
+
+### KDA sub-stage profile (why attention costs 31 ms)
+
+Three extra marks split the KDA branch on the 35 KDA layers:
+
+| sub-stage | ms/token |
+| --- | --- |
+| q/k/v/f_a projections | 9.65 |
+| conv1d + silu + gate/beta | 5.06 |
+| delta rule (the recurrence) | 6.28 |
+| output norm + g_a + out projection | 7.14 |
+| MLA layers (the other 7) | ~3.2 |
+
+The projections and output matrices (16.79 ms) are already bandwidth-bound, as the two
+experiments above showed. The **delta rule at 6.28 ms is not**: it walks a per-head
+recurrence, so it is latency and occupancy bound rather than bandwidth bound, and it is
+the most promising remaining target in attention. It has not been attempted here.
+
 ## Where the time goes now (decode, 8 tokens, this box)
 
 | group | ms/token | share |

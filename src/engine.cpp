@@ -540,14 +540,14 @@ bool Engine::ForwardFromEmbedded(std::uint32_t position, std::string* error) {
   const bool profile = std::getenv("LING3_PROFILE") != nullptr;
   std::vector<hipEvent_t> profile_events;
   if (profile) {
-    profile_events.resize(static_cast<std::size_t>(c.n_layer) * 4, nullptr);
+    profile_events.resize(static_cast<std::size_t>(c.n_layer) * 8, nullptr);
     for (auto& event : profile_events) {
       hipEventCreateWithFlags(&event, hipEventDefault);
     }
   }
   auto mark = [&](std::uint32_t layer, int slot) {
     if (profile) {
-      hipEventRecord(profile_events[static_cast<std::size_t>(layer) * 4 + slot], stream);
+      hipEventRecord(profile_events[static_cast<std::size_t>(layer) * 8 + slot], stream);
     }
   };
 
@@ -609,6 +609,7 @@ bool Engine::ForwardFromEmbedded(std::uint32_t position, std::string* error) {
         dump_at("/work/p_kproj_%u.bin", m.k, kda_inner, position);
         dump_at("/work/p_vproj_%u.bin", m.v, kda_inner, position);
       }
+      mark(il, 3);
       hip::LaunchConv1dStep(m.q, static_cast<const float*>(dev(layer.kda_conv_q)),
                             m.conv_state[il], kda_inner, 0, m.cq, stream,
                             (il == 0 && std::getenv("LING3_DUMP") != nullptr) ? m.kernel_debug : nullptr);
@@ -661,6 +662,7 @@ bool Engine::ForwardFromEmbedded(std::uint32_t position, std::string* error) {
       }
       // `cq` is free after the L2 normalisation; the delta step reads `kn`
       // while writing, so it needs a different buffer.
+      mark(il, 4);
       hip::LaunchDeltaRuleStep(m.qn, m.kn, m.cv, m.kda_gate, m.beta,
                                m.delta_state[il], m.cq, heads, kda_dim, stream,
                                (il == 0 && std::getenv("LING3_DUMP") != nullptr)
@@ -674,6 +676,7 @@ bool Engine::ForwardFromEmbedded(std::uint32_t position, std::string* error) {
         dump_at("/work/p_state_%u.bin", m.delta_state[il],
                 heads * kda_dim * kda_dim, position);
       }
+      mark(il, 5);
       hip::LaunchRmsNorm(m.cq, static_cast<const float*>(dev(layer.kda_o_norm)), m.qn,
                          heads, kda_dim, eps, stream);
       if (il == 0) {
@@ -831,29 +834,54 @@ bool Engine::ForwardFromEmbedded(std::uint32_t position, std::string* error) {
     double rest_ms = 0.0;
     float elapsed = 0.0f;
     double ffn_ms = 0.0;
+    double proj_ms = 0.0;
+    double conv_ms = 0.0;
+    double delta_ms = 0.0;
+    double out_ms = 0.0;
     for (std::uint32_t il = 0; il < c.n_layer; ++il) {
-      hipEventElapsedTime(&elapsed, profile_events[il * 4], profile_events[il * 4 + 1]);
+      hipEventElapsedTime(&elapsed, profile_events[il * 8], profile_events[il * 8 + 1]);
       attention_ms += elapsed;
-      hipEventElapsedTime(&elapsed, profile_events[il * 4 + 1], profile_events[il * 4 + 2]);
+      hipEventElapsedTime(&elapsed, profile_events[il * 8 + 1], profile_events[il * 8 + 2]);
       ffn_ms += elapsed;
-      const hipEvent_t next = il + 1 < c.n_layer ? profile_events[(il + 1) * 4]
-                                                 : profile_events[il * 4 + 2];
-      hipEventElapsedTime(&elapsed, profile_events[il * 4 + 2], next);
+      const hipEvent_t next = il + 1 < c.n_layer ? profile_events[(il + 1) * 8]
+                                                 : profile_events[il * 8 + 2];
+      hipEventElapsedTime(&elapsed, profile_events[il * 8 + 2], next);
       rest_ms += elapsed;
+      if (c.IsKda(il)) {
+        hipEventElapsedTime(&elapsed, profile_events[il * 8], profile_events[il * 8 + 3]);
+        proj_ms += elapsed;
+        hipEventElapsedTime(&elapsed, profile_events[il * 8 + 3], profile_events[il * 8 + 4]);
+        conv_ms += elapsed;
+        hipEventElapsedTime(&elapsed, profile_events[il * 8 + 4], profile_events[il * 8 + 5]);
+        delta_ms += elapsed;
+        hipEventElapsedTime(&elapsed, profile_events[il * 8 + 5], profile_events[il * 8 + 1]);
+        out_ms += elapsed;
+      }
     }
     static long tokens_profiled = 0;
     static double attention_total = 0.0;
     static double rest_total = 0.0;
     static double ffn_total = 0.0;
+    static double proj_total = 0.0;
+    static double conv_total = 0.0;
+    static double delta_total = 0.0;
+    static double out_total = 0.0;
     ++tokens_profiled;
     attention_total += attention_ms;
     rest_total += rest_ms;
     ffn_total += ffn_ms;
+    proj_total += proj_ms;
+    conv_total += conv_ms;
+    delta_total += delta_ms;
+    out_total += out_ms;
     if (tokens_profiled % 8 == 0) {
       std::fprintf(stderr,
-                   "profile: %ld tokens, attention %.2f, ffn/moe %.2f, other %.2f, "
-                   "total %.2f ms/token\n",
+                   "profile: %ld tokens, attention %.2f (kda proj %.2f, conv/gate %.2f, "
+                   "delta %.2f, norm/out %.2f), ffn/moe %.2f, other %.2f, total %.2f "
+                   "ms/token\n",
                    tokens_profiled, attention_total / tokens_profiled,
+                   proj_total / tokens_profiled, conv_total / tokens_profiled,
+                   delta_total / tokens_profiled, out_total / tokens_profiled,
                    ffn_total / tokens_profiled, rest_total / tokens_profiled,
                    (attention_total + ffn_total + rest_total) / tokens_profiled);
     }
@@ -1030,9 +1058,9 @@ bool Engine::PrefillChunk(const std::int32_t* tokens, std::size_t count,
         hip::LaunchSigmoid(m.beta_pre, m.beta, heads, stream);
         hip::LaunchL2Norm(m.cq, m.qn, heads, kda_dim, eps, stream);
         hip::LaunchL2Norm(m.ck, m.kn, heads, kda_dim, eps, stream);
-        hip::LaunchDeltaRuleStep(m.qn, m.kn, m.cv, m.kda_gate, m.beta,
+      hip::LaunchDeltaRuleStep(m.qn, m.kn, m.cv, m.kda_gate, m.beta,
                                  m.delta_state[il], m.cq, heads, kda_dim, stream);
-        hip::LaunchRmsNorm(m.cq, static_cast<const float*>(dev(layer.kda_o_norm)), m.qn,
+      hip::LaunchRmsNorm(m.cq, static_cast<const float*>(dev(layer.kda_o_norm)), m.qn,
                            heads, kda_dim, eps, stream);
         hip::LaunchGemv(dev(layer.kda_g_a), Storage(layer.kda_g_a.type), kda_inner,
                         n_embd, m.bh + row, m.gate_pre, stream);
