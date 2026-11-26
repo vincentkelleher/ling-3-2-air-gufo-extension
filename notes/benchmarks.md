@@ -72,3 +72,25 @@ better access patterns, not less arithmetic:
    same warp-per-row rate;
 4. the router reads 5 MB of F32 weights per block (4.4 % of bytes) - keep it in
    bf16.
+
+## Golden set vs llama.cpp (2026-11-27)
+
+`tools/golden_set.py`, greedy, 24 generated tokens per case, identical prompts
+(the model's own framing) fed to both engines:
+
+| case | common prefix (chars) | engine / llama length | divergence |
+| --- | --- | --- | --- |
+| plain (`The capital of France is`) | 93 | 127 / 110 | `n incomplete sentence th` vs ` well-known fact.` |
+| arithmetic (`What is 17 times 23?`) | 30 | 30 / 30 | **none — full match** |
+| tool-call (AAPL with a `get_stock_price` schema) | 27 | 100 / 102 | `stock price of AAPL. I n` vs `price of AAPL stock. I s` |
+| thinking-on (`Explain why the sky is blue`) | 9 | 131 / 114 | `wants a one-sentence exp` vs `is asking for a one-sentence` |
+
+So 1 of 4 cases is token-identical end to end, and the others agree for a
+sentence-opening worth of text before a near-tie (top-2 logit margins of
+0.01-0.02, measured earlier) sends them apart. That is the deviation the
+`engine-prefill` contract asks to record: same task, same meaning, different
+wording from the first near-tie onwards.
+
+Reproduce: `tools/golden_set.py --engine-wrapper <script> --llama-wrapper <script>
+--steps 24`; the engine reads its prompt from `LING3_PROMPT_FILE` so marker
+characters survive the shell.

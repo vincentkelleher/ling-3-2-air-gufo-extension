@@ -5,6 +5,8 @@
 //   (defaults: $LING3_GGUF, 8 steps, 156891 = <|startoftext|>)
 
 #include <chrono>
+#include <fstream>
+#include <sstream>
 #include <cstdio>
 #include <cstdlib>
 #include <string>
@@ -37,7 +39,18 @@ int main(int argc, char** argv) {
     return 77;
   }
   const int steps = argc > 2 ? std::atoi(argv[2]) : 8;
-  const std::string prompt = argc > 3 ? argv[3] : std::string();
+  std::string prompt = argc > 3 ? argv[3] : std::string();
+  // A file avoids shell quoting for prompts with markers like <|role_end|>.
+  if (const char* file = std::getenv("LING3_PROMPT_FILE")) {
+    std::ifstream input(file, std::ios::binary);
+    if (!input) {
+      std::fprintf(stderr, "cannot read %s\n", file);
+      return 2;
+    }
+    std::ostringstream buffer;
+    buffer << input.rdbuf();
+    prompt = buffer.str();
+  }
   const bool use_prompt = !prompt.empty();
 
   std::string error;
