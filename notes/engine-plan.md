@@ -786,3 +786,18 @@ faster per-expert calls for now.
 
 Also fixed: the operator suite called `LaunchConv1dStep` with the pre-slot
 argument order, so the standalone suite had stopped building.
+
+## llama.cpp's `--save-all-logits` file: not a header plus float rows (2026-11-27)
+
+Recorded so it is not retried: the file opens with the ASCII `_logits_` followed
+by int32 fields (context 16, n_vocab 157184, 2, 27, ...). Its size is exactly
+7 rows of `n_vocab` float32 (4,401,152 bytes) plus 260 bytes, but no offset in
+200..400 yields finite floats with a logit-like spread (std 0.5..20), so the rows
+are not plain float32 at any such header length. Either the rows are encoded
+(e.g. fp16 or delta) or there is a per-row header.
+
+Consequence: `engine-assembly`'s "RMS error of logits vs llama.cpp" clause cannot
+be measured from this export. The task's argmax clause is met and evidenced
+(engine argmax 678 = `The`, llama.cpp's first generated token for the same
+prompt). If the RMS is required, the practical route is a llama.cpp build that
+prints logits to stdout for one token, not this file.
