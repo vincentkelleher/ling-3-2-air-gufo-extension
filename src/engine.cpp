@@ -357,6 +357,18 @@ bool Engine::ForwardToken(std::int32_t token, std::uint32_t position,
   auto dev = [&m](const Tensor& tensor) { return m.Dev(tensor); };
   const bool stats = std::getenv("LING3_STATS") != nullptr;
   std::vector<float> host_row;
+  auto dump_raw = [&](const char* path, const float* device, std::size_t count) {
+    if (std::getenv("LING3_DUMP") == nullptr) {
+      return;
+    }
+    std::vector<float> host(count);
+    hipMemcpy(host.data(), device, count * sizeof(float), hipMemcpyDeviceToHost);
+    FILE* file = std::fopen(path, "wb");
+    if (file != nullptr) {
+      std::fwrite(host.data(), sizeof(float), count, file);
+      std::fclose(file);
+    }
+  };
   auto report_buf = [&](const char* label, const float* device, std::size_t count) {
     if (!stats) {
       return;
@@ -419,9 +431,31 @@ bool Engine::ForwardToken(std::int32_t token, std::uint32_t position,
                       m.h, m.k, stream);
       hip::LaunchGemv(dev(layer.kda_v), Storage(layer.kda_v.type), kda_inner, n_embd,
                       m.h, m.v, stream);
+      if (il == 0 && std::getenv("LING3_DUMP") != nullptr) {
+        auto dump = [&](const char* path, const float* device, std::size_t count) {
+          std::vector<float> host(count);
+          hipMemcpy(host.data(), device, count * sizeof(float), hipMemcpyDeviceToHost);
+          FILE* file = std::fopen(path, "wb");
+          if (file != nullptr) {
+            std::fwrite(host.data(), sizeof(float), count, file);
+            std::fclose(file);
+          }
+        };
+        dump("/work/ling3_q0.bin", m.q, kda_inner);
+        dump("/work/ling3_h0.bin", m.h, n_embd);
+      }
       hip::LaunchConv1dStep(m.q, static_cast<const float*>(dev(layer.kda_conv_q)),
                             m.conv_state[il], m.cq, kda_inner, stream);
       hip::LaunchSilu(m.cq, m.cq, kda_inner, stream);
+      if (il == 0 && std::getenv("LING3_DUMP") != nullptr) {
+        std::vector<float> host(kda_inner);
+        hipMemcpy(host.data(), m.cq, kda_inner * sizeof(float), hipMemcpyDeviceToHost);
+        FILE* file = std::fopen("/work/ling3_cq0.bin", "wb");
+        if (file != nullptr) {
+          std::fwrite(host.data(), sizeof(float), kda_inner, file);
+          std::fclose(file);
+        }
+      }
       hip::LaunchConv1dStep(m.k, static_cast<const float*>(dev(layer.kda_conv_k)),
                             m.conv_state[il] + kda_inner, m.ck, kda_inner, stream);
       hip::LaunchSilu(m.ck, m.ck, kda_inner, stream);
@@ -440,12 +474,26 @@ bool Engine::ForwardToken(std::int32_t token, std::uint32_t position,
 
       hip::LaunchL2Norm(m.cq, m.qn, heads, kda_dim, eps, stream);
       hip::LaunchL2Norm(m.ck, m.kn, heads, kda_dim, eps, stream);
+      if (il == 0) {
+        dump_raw("/work/d_ck.bin", m.ck, kda_inner);
+        dump_raw("/work/d_cv.bin", m.cv, kda_inner);
+        dump_raw("/work/d_qn.bin", m.qn, kda_inner);
+        dump_raw("/work/d_kn.bin", m.kn, kda_inner);
+        dump_raw("/work/d_gate.bin", m.kda_gate, kda_inner);
+        dump_raw("/work/d_beta.bin", m.beta, heads);
+      }
       // `cq` is free after the L2 normalisation; the delta step reads `kn`
       // while writing, so it needs a different buffer.
       hip::LaunchDeltaRuleStep(m.qn, m.kn, m.cv, m.kda_gate, m.beta,
                                m.delta_state[il], m.cq, heads, kda_dim, stream);
+      if (il == 0) {
+        dump_raw("/work/d_delta.bin", m.cq, kda_inner);
+      }
       hip::LaunchRmsNorm(m.cq, static_cast<const float*>(dev(layer.kda_o_norm)), m.qn,
                          heads, kda_dim, eps, stream);
+      if (il == 0) {
+        dump_raw("/work/d_onorm.bin", m.qn, kda_inner);
+      }
       hip::LaunchGemv(dev(layer.kda_g_a), Storage(layer.kda_g_a.type), kda_inner,
                       n_embd, m.h, m.gate_pre, stream);
       hip::LaunchMulSigmoid(m.qn, m.gate_pre, kda_inner, stream);
@@ -527,17 +575,29 @@ bool Engine::ForwardToken(std::int32_t token, std::uint32_t position,
         report_buf("expert_gate", m.expert_gate, c.n_ff_exp);
         report_buf("expert_down", m.expert_down, n_embd);
       }
+      if (il == 2) {
+        dump_raw("/work/d2_ffnh.bin", m.ffn_h, n_embd);
+        dump_raw("/work/d2_logits.bin", m.moe_logits, c.n_expert);
+        dump_raw("/work/d2_ids.bin", reinterpret_cast<const float*>(m.moe_ids),
+                 c.n_expert_used * 0 + 8);
+      }
       hip::LaunchMoeGather(dev(layer.gate_exps), Storage(layer.gate_exps.type),
                            dev(layer.up_exps), Storage(layer.up_exps.type),
                            dev(layer.down_exps), Storage(layer.down_exps.type),
                            n_embd, c.n_ff_exp, m.ffn_h, m.moe_ids, m.moe_weights,
                            c.n_expert_used, m.x, m.expert_gate, m.expert_up,
                            m.expert_down, stream);
+      if (il == 2) {
+        dump_raw("/work/d2_after_gather.bin", m.x, n_embd);
+      }
       hip::LaunchFfn(dev(layer.gate_shexp), Storage(layer.gate_shexp.type),
                      dev(layer.up_shexp), Storage(layer.up_shexp.type),
                      dev(layer.down_shexp), Storage(layer.down_shexp.type), n_embd,
                      c.n_ff_shexp, m.ffn_h, 1.0f, m.x, m.expert_gate, m.expert_up,
                      m.expert_down, stream);
+      if (il == 2) {
+        dump_raw("/work/d2_after_shared.bin", m.x, n_embd);
+      }
       if (il == 31) {
         report_buf("x after shared", m.x, n_embd);
       }
@@ -551,6 +611,7 @@ bool Engine::ForwardToken(std::int32_t token, std::uint32_t position,
   hip::LaunchGemv(dev(weights.output), Storage(weights.output.type), c.n_vocab,
                   n_embd, m.h, m.logits, stream);
   hip::LaunchArgmax(m.logits, c.n_vocab, m.argmax, stream);
+  dump_raw("/work/our_logits.bin", m.logits, c.n_vocab);
 
   const hipError_t status = hipStreamSynchronize(stream);
   if (status != hipSuccess) {
