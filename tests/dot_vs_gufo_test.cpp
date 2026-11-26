@@ -15,6 +15,7 @@
 
 #include <gufo/ext/experimental/ggml_dequant.hpp>
 #include <gufo/ext/experimental/ggml_gemm.hpp>
+
 #include <gufo/ext/gguf_reader.hpp>
 
 namespace {
@@ -39,6 +40,10 @@ struct BlockQ5K {
   std::uint8_t scales[12];
   std::uint8_t qh[32];
   std::uint8_t qs[128];
+};
+struct BlockQ4_0 {
+  std::uint16_t d;
+  std::uint8_t qs[16];
 };
 struct BlockQ6K {
   std::uint8_t ql[128];
@@ -174,8 +179,18 @@ double HostDot(core::GgmlType type, const void* row, const std::vector<float>& x
       }
       return sum;
     }
-    default:
-      return 0.0;
+    case core::GgmlType::kQ4_0: {
+      const auto* blocks = static_cast<const BlockQ4_0*>(row);
+      for (std::size_t b = 0; b < cols / 32; ++b) {
+        const float d = Half(blocks[b].d);
+        for (int j = 0; j < 32; ++j) {
+          const int nibble = (j & 1) ? (blocks[b].qs[j / 2] >> 4)
+                                     : (blocks[b].qs[j / 2] & 0x0F);
+          sum += d * static_cast<double>(nibble - 8) * x[b * 32 + j];
+        }
+      }
+      return sum;
+    }
   }
 }
 
@@ -183,6 +198,7 @@ std::size_t RowBytes(core::GgmlType type, std::size_t cols) {
   switch (type) {
     case core::GgmlType::kF32: return cols * 4;
     case core::GgmlType::kQ8_0: return cols / 32 * 34;
+    case core::GgmlType::kQ4_0: return cols / 32 * 18;
     case core::GgmlType::kQ4_K: return cols / 256 * 144;
     case core::GgmlType::kQ5_K: return cols / 256 * 176;
     case core::GgmlType::kQ6_K: return cols / 256 * 210;
@@ -260,7 +276,8 @@ int main(int argc, char** argv) {
   }
 
   // One tensor per storage type, plus block 31's Q5_K experts.
-  const char* names[] = {"blk.0.attn_q.weight", "blk.0.attn_norm.weight",
+  const char* names[] = {"blk.42.attn_q.weight", "blk.42.nextn.eh_proj.weight",
+                         "blk.0.attn_q.weight", "blk.0.attn_norm.weight",
                          "blk.2.ffn_gate_exps.weight", "blk.2.ffn_up_exps.weight",
                          "blk.31.ffn_down_exps.weight", "token_embd.weight",
                          "output.weight"};
@@ -274,6 +291,11 @@ int main(int argc, char** argv) {
       continue;
     }
     const std::size_t cols = static_cast<std::size_t>(info->dimensions[0]);
+    if (!quant::IsSupported(info->type)) {
+      std::printf("skipped %s: Gufo's reference does not decode %s\n", name,
+                  core::ToString(info->type).data());
+      continue;
+    }
     const std::size_t stride = RowBytes(info->type, cols);
     if (stride == 0) {
       std::printf("unsupported type for %s\n", name);

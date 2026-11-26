@@ -906,3 +906,24 @@ Order of work for MTP, therefore:
    embedding, and produces logits through the shared head.
 4. Validate: drafting must reproduce greedy output exactly; measure whether it
    pays at 12.5 tok/s decode (it needs to beat the extra block's cost).
+
+## Q4_0: needed for MTP, attempted, reverted, 2026-11-27
+
+Block 42 (the MTP layer) is entirely Q4_0 and this engine has no Q4_0 dot, so MTP
+cannot start without one. A first attempt -- 18-byte blocks, low nibbles of the
+first 16 values and high nibbles of the last 16 (Q4_0 is not interleaved like
+Q4_1/Q5_0), integer activation path like the Q8_0 one -- still disagreed with its
+host reference by ~0.5 relative error after fixing the nibble order, so it was
+reverted rather than kept half-working.
+
+Two things learned and kept:
+
+- `tests/dot_vs_gufo_test.cpp` now skips storage types Gufo's own reference cannot
+  decode (it asserts on them), naming them, instead of aborting the whole run.
+  That is how the Q4_0 gap surfaced.
+- The nibble layout above is the correct one and is written down here, so the next
+  attempt starts from it.
+
+Next attempt should test the Q4_0 dot against `gguf.quants.dequantize` from a small
+python script (an independent reference, since Gufo's is unavailable) before any
+kernel work.
