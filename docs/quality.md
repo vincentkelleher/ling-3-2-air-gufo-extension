@@ -101,7 +101,7 @@ pass that would no longer be llama.cpp's arithmetic.
 
 | gap | status |
 | --- | --- |
-| HTTP serving, cache, streaming | **partly** — `gufo serve llm` answers a single request and streams (cancellation verified), and a frontier capture succeeds (502 MB, `cache_captures=1`); the **next request after a capture crashes inside the host**, so multi-request serving is unverified. `notes/runner-plan.md` has the sequence and the remaining fixes |
+| HTTP serving, cache, streaming | **works** — `gufo serve llm` answers requests and streams (cancellation verified), the frontier capture succeeds (502 MB, `cache_captures=1`), and repeated requests run with no crash. The crash that looked like a host bug was ours: binding a second state built a *second* engine, re-registering the same weight mapping failed, and the pool was left with no state (`state=0x0` in the backtrace). One engine per slot. Reuse is still `cache_reuse=none` — restore is not exercised yet |
 | MTP speculative decoding | block runs, **58 % acceptance measured (18/31)**; not wired into serving because the modeled gain at 58 % with a 1.29x-cheaper verifier is ~1.15x |
 | Vision (mmproj) | **implemented and verified** at the engine level (numpy reference 3.2e-06, llama.cpp parity 0.04 %); the `gufo prompt --image` flag path is written but **unverified** |
 | Token-for-token equality | **not met**; one-token deviation at a 0.048 margin, documented above |

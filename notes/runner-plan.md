@@ -334,3 +334,19 @@ successful capture, on the next request, before any adapter call we can observe.
 it needs a stack trace from the host process (gdb or a coredump backtrace), which this
 environment does not provide, so serving is **single-request verified and multi-request
 unverified**, and is reported that way rather than claimed as working.
+
+## The null reservation was ours (2026-11-27)
+
+The SIGSEGV in `ComponentTextCache::Acquire` with `state=0x0` was not a host defect. The
+pool binds a state per request; our `BindComponentState` created a **new engine every
+time**, and a second engine re-registers the same 80 GiB mapping — `hipHostRegister`
+refuses an already-registered range, engine creation returned null, and the pool was left
+with no state, which is exactly the null reservation the cache then dereferenced.
+
+Fix: the adapter keeps one engine per slot and `BindComponentState` reuses it
+(`Ling3ComponentAdapter::Existing`). After that, repeated requests and streaming run with
+no crash at all (`fatal_signal` count 0 in the server log).
+
+Lesson worth keeping: when the host reports a null pointer that "cannot be ours", check
+whether an earlier call of ours silently returned null. The `bad_function_call` chain had
+the same shape — each one was a hook we had left empty rather than a host bug.

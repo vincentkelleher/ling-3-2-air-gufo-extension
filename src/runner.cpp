@@ -94,6 +94,15 @@ class Ling3ComponentAdapter final : public cache::Adapter,
     component_.state_bytes = state_bytes;
   }
 
+  /// The engine already serving this slot, if any. Binding a state twice must not build a
+  /// second engine: creating one re-registers the same 80 GiB mapping, `hipHostRegister`
+  /// refuses an already-registered range, and the pool is then left with no state (which
+  /// is the null reservation that crashed Acquire).
+  [[nodiscard]] Engine* Existing(cache::Slot* slot) {
+    const auto found = engines_.find(slot);
+    return found == engines_.end() ? nullptr : found->second;
+  }
+
   Engine& Adopt(cache::Slot* slot, std::unique_ptr<Engine> engine) {
     Engine* raw = engine.release();
     engines_[slot] = raw;
@@ -403,11 +412,6 @@ std::unique_ptr<ComponentCacheResources> Ling3Runner::CreateComponentCacheResour
 
 std::unique_ptr<TextRunnerState> Ling3Runner::BindComponentState(
     cache::Adapter& adapter, cache::Slot& slot) const {
-  std::string error;
-  auto engine = g_engine_factory == nullptr ? nullptr : g_engine_factory(&error);
-  if (engine == nullptr) {
-    return nullptr;
-  }
   if (Trace()) {
     std::fprintf(stderr, "[runner] bind slot %p\n", static_cast<const void*>(&slot));
   }
@@ -415,10 +419,19 @@ std::unique_ptr<TextRunnerState> Ling3Runner::BindComponentState(
   if (components == nullptr) {
     return nullptr;
   }
-  // The adapter takes ownership so that its snapshot copies always have a live engine,
-  // whatever order the host destroys states in.
-  Engine& owned = components->Adopt(&slot, std::move(engine));
-  auto state = std::make_unique<Ling3RunnerState>(owned, impl_->config);
+  Engine* engine = components->Existing(&slot);
+  if (engine == nullptr) {
+    std::string error;
+    auto created = g_engine_factory == nullptr ? nullptr : g_engine_factory(&error);
+    if (created == nullptr) {
+      if (Trace()) {
+        std::fprintf(stderr, "[runner] engine creation failed: %s\n", error.c_str());
+      }
+      return nullptr;
+    }
+    engine = &components->Adopt(&slot, std::move(created));
+  }
+  auto state = std::make_unique<Ling3RunnerState>(*engine, impl_->config);
   state->Attach(components, &slot);
   return state;
 }
