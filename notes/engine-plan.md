@@ -464,3 +464,24 @@ are right and the difference must come from the *input* or an aliasing/ordering
 problem — in that case dump the conv input (`m.k`, `m.v`) and the output in the
 same call and compare them against the dumped projection, which catches a buffer
 being reused between the two launches.
+
+### No tensor swap: the k/v conv uses the right weights but the wrong window
+
+Comparing each dumped conv output against `silu(w*x)` for all three conv tensors:
+
+| path | vs conv_q | vs conv_k | vs conv_v |
+| --- | --- | --- | --- |
+| k | 1.45 | **0.751** | 1.40 |
+| v | 0.209 | 0.216 | **0.0713** |
+
+Each path matches its own tensor best, so the mapping is right, but neither is
+exact even though the input projection is exact to 1e-6 and the state should be
+zero at position 0. The q path (whose state slice is written first) *is* exact.
+
+That asymmetry is the clue: q runs first and matches, k and v run after it and
+do not, which is what happens if the conv reads a window that is not
+`[0, 0, 0, x]` — i.e. the state slice or the shift inside `LaunchConv1dStep` is
+not what the code reads like at call time. Next step: dump, inside the conv
+kernel for `channels` 0..3, the four window values it actually multiplies and the
+four weights, for the q, k and v launches of block 0 at position 0. Four floats
+each; that ends the guessing.
