@@ -120,20 +120,27 @@ __global__ void DeltaRuleKernel(const float* q, const float* k, const float* v,
   }
   __syncthreads();
 
-  float* row = state + (static_cast<std::size_t>(head) * head_dim + j) * head_dim;
+  // The state is column-major: element (i, j) lives at (head*head_dim + i)*head_dim + j.
+  // Each thread owns one column j and walks i, so threads touch consecutive addresses
+  // on every pass. The row-major layout this used to have read 128 floats apart per
+  // thread, which made all three passes uncoalesced.
+  const std::size_t head_base = static_cast<std::size_t>(head) * head_dim;
+  const auto at = [&](int i) {
+    return state + (head_base + static_cast<std::size_t>(i)) * head_dim + j;
+  };
   if (debug != nullptr && head == 0 && j == 0) {
-    for (int i = 0; i < head_dim; ++i) debug[i] = row[i];                 // pre
+    for (int i = 0; i < head_dim; ++i) debug[i] = *at(i);                 // pre
     for (int i = 0; i < head_dim; ++i) debug[head_dim + i] = decay[i];    // decay
   }
   for (int i = 0; i < head_dim; ++i) {
-    row[i] *= decay[i];
+    *at(i) *= decay[i];
   }
   if (debug != nullptr && head == 0 && j == 0) {
-    for (int i = 0; i < head_dim; ++i) debug[2 * head_dim + i] = row[i];  // post
+    for (int i = 0; i < head_dim; ++i) debug[2 * head_dim + i] = *at(i);  // post
   }
   float dot = 0.0f;
   for (int i = 0; i < head_dim; ++i) {
-    dot += row[i] * k_shared[i];
+    dot += *at(i) * k_shared[i];
   }
   if (debug != nullptr && head == 0 && j == 0) {
     for (int i = 0; i < head_dim; ++i) debug[3 * head_dim + i] = v[i];
@@ -142,12 +149,12 @@ __global__ void DeltaRuleKernel(const float* q, const float* k, const float* v,
   }
   const float delta = (v[head * head_dim + j] - dot) * beta[head];
   for (int i = 0; i < head_dim; ++i) {
-    row[i] += k_shared[i] * delta;
+    *at(i) += k_shared[i] * delta;
   }
   const float* q_head = q + static_cast<std::size_t>(head) * head_dim;
   float sum = 0.0f;
   for (int i = 0; i < head_dim; ++i) {
-    sum += row[i] * q_head[i];
+    sum += *at(i) * q_head[i];
   }
   const float result = sum / sqrtf(static_cast<float>(head_dim));
   out[head * head_dim + j] = result;

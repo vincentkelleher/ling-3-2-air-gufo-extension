@@ -87,6 +87,26 @@ far more weight bytes than the 10 KB activation costs to quantise, so the activa
 in cache and the quantisation overlaps the weight traffic. Reverted rather than kept:
 an extra 2560-element quantisation per layer buys nothing.
 
+### Delta-rule state transposed to column-major — +5.4 %, kept
+
+The delta rule stores one `head_dim x head_dim` state per head and updates it per token.
+It was row-major, so thread `j` walked its own row: every access in all three passes
+(decay, `k . row`, `row += k * delta`, `q . row`) was `head_dim` floats away from the
+neighbouring thread's, i.e. uncoalesced. Element `(i, j)` now lives at
+`(head*head_dim + i)*head_dim + j`, so the threads of a warp touch consecutive addresses
+and each pass streams linearly.
+
+| | before | after |
+| --- | --- | --- |
+| delta rule per token | 6.28 ms | **2.98 ms** |
+| attention per token | 31.35 ms | 28.06 ms |
+| decode | 14.46 tok/s | **15.24 tok/s** |
+| tokens / logits | — | identical |
+
+The arithmetic is unchanged (each thread sums over `i` in the same order), which is why
+the tokens stayed identical. The layout is internal to this kernel: the state starts
+zeroed and is only ever read or written here, so no other code had to change.
+
 ### KDA sub-stage profile (why attention costs 31 ms)
 
 Three extra marks split the KDA branch on the 35 KDA layers:
