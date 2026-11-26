@@ -57,7 +57,7 @@ path on the same machine. Depth rows: 12.54 / 12.41 / 12.04 tok/s at depth
 - **Not token-for-token with llama.cpp except on simple arithmetic.** Measured
   with `tools/golden_set.py` (24 greedy tokens per case, identical prompts): the
   arithmetic case matches end to end (30/30 characters), the others agree for
-  the opening of a sentence (93, 27 and 9 characters) and then split where the
+  the opening of a sentence (53, 27 and 19 characters) and then split where the
   top-2 logit margin is 0.01-0.02 — a 0.1 % difference deciding the token. Same
   task, same meaning, different wording. The integer per-group dots already match
   llama.cpp's dot products (`tests/dot_vs_gufo_test.cpp`), so the residual is
