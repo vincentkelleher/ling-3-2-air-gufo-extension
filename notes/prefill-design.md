@@ -439,3 +439,33 @@ fast as the GEMV path, and a grouped MoE whose per-expert loop runs on the devic
 (the removed attempt; the fault is most likely an expert count or offset mismatch
 between `LaunchBuildExpertLists`' 512-entry tables and the kernel's `experts`
 argument, which should be passed rather than hard-coded).
+
+## MTP equivalence: the test exists and fails at index 5 (2026-11-27)
+
+`tests/mtp_test.cpp` implements the loop: draft one token with the MTP head, verify trunk
+plus draft in a single chunked pass (`VerifyDrafts`, which snapshots internally), accept the
+draft only when the trunk's own token matches, rewind with `RestoreState` and re-feed
+exactly what was accepted. Against plain greedy from the same state:
+
+    plain:       678 2838 341 10519 259 22365 36593 3244
+    speculative: 678 2838 341 10519 259  4147 36593 3244
+    drafts 8, accepted 0 (0 %)
+    FAIL tokens match at index 5
+
+Two things are now known:
+
+- **Nothing is accepted** (0 of 8), which matches the earlier measurement (58 % of MTP
+  drafts match the trunk at a *different* prompt; here the head is not predicting the next
+  token reliably at all, so the loop degenerates to one token per step).
+- **With nothing accepted the stream must still be identical**, and it is not: it diverges
+  at index 5. Since the loop then only ever feeds `Argmax()` of the current state, the
+  cause is that the verification pass leaves state that `RestoreState` does not fully undo —
+  the chunked pass runs tokens through GEMM paths and writes rows/counters the snapshot does
+  not cover. Dropping the MTP head's own writes (snapshot before drafting, restore after)
+  changed nothing, so the MTP layer is not the culprit.
+
+Fix direction: either make `SnapshotState`/`RestoreState` cover everything a chunked pass
+touches (positions, chunk scratch, per-layer rows beyond the frontier), or verify a *single*
+draft with the sequential path instead of the chunked one until the restore is exact. Until
+then MTP stays unexposed: `ling3_air.mtp` is registered with `WILL_FAIL TRUE` so the suite
+stays green while the failing evidence stays in the tree.
