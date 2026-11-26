@@ -293,7 +293,7 @@ std::unique_ptr<Engine> Engine::Create(const core::GgufReader& reader,
       alloc(&m.expert_down, n_embd) && alloc(&m.logits, config.n_vocab) &&
       alloc_int(&m.moe_ids, config.n_expert_used) &&
       alloc(&m.moe_weights, config.n_expert_used) && alloc_int(&m.argmax, 1) &&
-      alloc(&m.kernel_debug, 5 * kda_dim);
+      alloc(&m.kernel_debug, 8 * kda_dim);
   if (!ok) {
     return fail("engine: device scratch allocation failed");
   }
@@ -507,7 +507,7 @@ bool Engine::ForwardToken(std::int32_t token, std::uint32_t position,
                                    ? m.kernel_debug
                                    : nullptr);
       if (il == 0) {
-        dump_at("/work/p_kernel_%u.bin", m.kernel_debug, 5 * kda_dim, position);
+        dump_at("/work/p_kernel_%u.bin", m.kernel_debug, 8 * kda_dim, position);
       }
       if (il == 0) {
         dump_at("/work/p_delta_%u.bin", m.cq, kda_inner, position);

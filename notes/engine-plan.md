@@ -353,3 +353,35 @@ is overwritten once per KDA block 0 call, and the output dump sits in the same
 `5*head_dim` in `m.kernel_debug`) and stamp the output dumps with it, so the
 pairing is unambiguous; then redo the position-1 comparison. Every conclusion
 above about the decay being correct stands — it is measured inside the kernel.
+
+### Resolved: `m.cq` after the delta call is the attention output, not the delta
+
+`DeltaRuleKernel` writes `out[j] = (sum_i row[i]*q[i]) / sqrt(head_dim)` — the
+q read-out — while `delta[j] = (v[j] - dot)*beta` is an intermediate that is
+never stored. All my position-1 comparisons treated `p_delta_*.bin` as `delta`
+and so compared an attention output (rms 3.4e-4) against a delta formula
+(rms 1.9e-2). That is the whole "70x too small" and "does not match any variant"
+story: analysis error, not an engine bug.
+
+The kernel-recorded row now equals the output buffer **exactly** (0 diff at
+positions 0 and 1), `decay == expf(gate)` to 6e-8, `post == pre*decay` exactly,
+and the state write after token 0 equals `v0[j]*k0[i]*beta0` to 1.9e-9.
+
+So the KDA block is verified end to end, including the state, and the same holds
+for the MoE (router exact, shared 1.2e-7) and MLA (scores 1e-7, value absorb
+4.2e-7) blocks.
+
+### What that leaves
+
+Nothing measured so far is wrong, yet the composed model emits newlines where
+llama.cpp answers "The user is asking". The remaining honest step is a **numpy
+forward of the first blocks compared against per-block `x` dumps** — dumps exist
+only for block 0 today, so:
+
+1. dump `x` after every block (`p_x_<layer>_<position>.bin`),
+2. port blocks 0-5 to numpy (KDA, dense FFN, MoE, MLA) using `gguf.quants`,
+3. compare block by block and stop at the first mismatch.
+
+Do not repeat the position/stage dump arithmetic without an explicit
+"what buffer holds what" table first; three of the four anomalies so far were
+mismatched buffers, not mismatched math.

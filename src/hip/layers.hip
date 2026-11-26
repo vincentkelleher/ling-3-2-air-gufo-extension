@@ -143,7 +143,11 @@ __global__ void DeltaRuleKernel(const float* q, const float* k, const float* v,
   for (int i = 0; i < head_dim; ++i) {
     sum += row[i] * q_head[i];
   }
-  out[head * head_dim + j] = sum / sqrtf(static_cast<float>(head_dim));
+  const float result = sum / sqrtf(static_cast<float>(head_dim));
+  out[head * head_dim + j] = result;
+  if (debug != nullptr && head == 0) {
+    debug[7 * head_dim + j] = result;  // what this launch intends to write
+  }
 }
 
 __global__ void ArgmaxKernel(const float* x, int count, std::int32_t* result) {
