@@ -146,3 +146,35 @@ Two facts that make a first version cheaper:
   must go through it rather than sample on the host, or temperature/top-k/top-p and
   the reasoning budget will diverge from the server's own accounting. Read
   `include/gufo/ext/sampling.hpp` and the LFM3 runner before writing it.
+
+## Scale, measured against the installed API (2026-11-27)
+
+The extension compiles against `/work/gufo-src` (the installed Gufo), not the 0.36.0 tree,
+and the two differ: `include/gufo/ext/component_cache_resources.hpp` exists in 0.36.0 but
+not in the installed tree, so the runner contract must be read from the installed
+`src/ext/text.hpp`.
+
+`TextModelRunner` has **13 pure virtuals** there: Descriptor, ResourceClaim,
+SupportedPlans, Tokenize, RenderAndTokenize, Decode, CreateComponentCacheResources,
+BindComponentState, ReconcileComponentState, Prefill, SelectNext, Advance,
+CheckpointPosition. `TextRunnerState` adds only three virtuals
+(`state_account`, `SetCancellationCheck`, `MeasuredResources`), which is the cheap part.
+
+The expensive part is the cache side. The smallest in-tree implementation:
+
+| file | lines |
+| --- | --- |
+| `src/models/deepseek_v4_flash/continuation_adapter.hpp` | 87 |
+| `src/models/deepseek_v4_flash/continuation_adapter.cpp` | 669 |
+| `src/models/deepseek_v4_flash/runner.cpp` | 931 |
+
+i.e. ~1,700 lines of contract code even for the smallest model, of which the adapter
+(components, positions, prefill planning, restore/validate/invalidate latches, private
+state capture, row copy in/out, borrow views) is 756. That is the real cost of
+`gufo serve llm`, and it is why the provider still registers `create = nullptr`.
+
+A cheaper first milestone, if serving is attempted later: implement the runner with an
+adapter that reports **no components** (empty `Components()`, `PlanPrefill` returning
+`{end}`), which satisfies the interface without prefix reuse. That skips the row copies,
+private-state capture and borrow views entirely and is worth trying before the full
+adapter: it would make `gufo serve llm` work with full prefill per request.
