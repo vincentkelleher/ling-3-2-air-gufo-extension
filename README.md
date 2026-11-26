@@ -58,7 +58,7 @@ at the bottom.
 | --- | --- | --- |
 | decode, short context | **16.2-17.0 tok/s** (median 17.0) | llama.cpp CPU: 12.52 tok/s |
 | prefill, 104-token prompt | 12.52 tok/s sequential, **16.13 tok/s chunked (1.29x)** | llama.cpp CPU prompt eval: 24.20 tok/s |
-| prefill, pp2048 | **21.4-23.2 tok/s** = 0.34-0.37 % of the 6,277 tok/s roofline | llama.cpp prompt eval: 24.20 tok/s |
+| prefill, pp2048 | **23.4-23.8 tok/s** = 0.37-0.38 % of the 6,277 tok/s roofline | llama.cpp prompt eval: 24.20 tok/s |
 | weight load | 2.1 s warm, 35.9 s cold | llama.cpp mmap: 1.58 s |
 
 Machine ceilings measured in-repo (`tools/bandwidth_probe.hip`,

@@ -303,6 +303,29 @@ whether the kernel stalls on memory or on issue — neither is available in this
 decode gate is reported as unresolved with a measured 2.4x gap rather than a guess about its
 cause.
 
+### Batched router for prefill — +55 %, kept
+
+`PrefillChunk` batched every projection in a chunk except the router: for each of the 32 tokens it
+copied the token's row into scratch, ran a 512-row GEMV and then routed. That is 35 layers x 32
+tokens of GEMV-plus-copy per chunk, i.e. ~2 200 launches plus 1 120 device copies.
+
+It is now one GEMM for the whole chunk (`n_expert x n_embd` over the batch) with the per-token
+`RouterSelect` reading its row of the result, and the copy is gone because `MoeGather` takes the
+row of the chunk activation directly.
+
+| case | before | after |
+| --- | --- | --- |
+| pp2048, 32-token chunks | 15.4 tok/s | **23.8 tok/s** (0.38 % of the 6 277 roofline) |
+| 4 821-token prompt, 128-token chunks | 15.37 tok/s | **23.35 tok/s** |
+| decode (unchanged path) | 16.90 tok/s | 16.90 tok/s |
+
+Greedy tokens are identical (128206 25 198 198 480 ...) and the chunked pass reports the same
+argmax (678) as before, so the batching changed only how the chunk is computed.
+
+This also revises the earlier "chunk size barely matters" result: with the per-token router in
+place a bigger chunk bought 3.6 % (14.84 at chunk 8 vs 15.37 at 128); with it batched, the chunk
+path is 1.5x the old throughput.
+
 ## Where the time goes now (decode, 8 tokens, this box)
 
 | group | ms/token | share |

@@ -8,7 +8,7 @@ Same box (Ryzen AI Max, 128 GB unified, gfx1151), same Q4_K_M shards, greedy
 | decode, depth 0 | **16.2-17.0 tok/s** | 12.52 tok/s | **1.29-1.36x** |
 | decode, depth 2048 | 15.72 tok/s | not measured at depth | — |
 | prefill, 104-token prompt | 12.52 sequential, 16.13 chunked | 24.20 tok/s prompt eval | 0.67x |
-| prefill, pp2048 (32-token chunks) | 21.4-23.2 tok/s | 24.20 tok/s prompt eval | 0.88-0.96x |
+| prefill, pp2048 (32-token chunks) | 23.4-23.8 tok/s | 24.20 tok/s prompt eval | 0.97-0.98x |
 | weight load, warm page cache | 2.1 s | 1.58 s (mmap) | 1.33x slower |
 | golden set: plain | 93 chars agree, then `0.048` logit margin | — | — |
 | golden set: arithmetic | **identical, 30/30 chars** | — | — |

@@ -85,6 +85,8 @@ struct Engine::Impl {
   float* mla_out{nullptr};
   float* kvq{nullptr};
   float* moe_logits{nullptr};
+  /// Router logits for a whole prefill chunk: one GEMM instead of a GEMV per token.
+  float* moe_logits_batch{nullptr};
   /// Pre-quantised activation for the "prepared" GEMV path: a head with 156k rows
   /// otherwise re-quantises the same 2560 values once per row.
   std::int8_t* moe_q8{nullptr};
@@ -360,6 +362,7 @@ std::unique_ptr<Engine> Engine::Create(const core::GgufReader& reader,
       alloc(&m.scores, heads * context) && alloc(&m.latent, heads * latent) &&
       alloc(&m.mla_out, v_dim) && alloc(&m.kvq, kv_dim) &&
       alloc(&m.moe_logits, config.n_expert) &&
+      alloc(&m.moe_logits_batch, Impl::kMaxChunk * config.n_expert) &&
       hipMalloc(reinterpret_cast<void**>(&m.moe_q8), std::max<std::size_t>(n_embd, static_cast<std::size_t>(config.n_expert_used) * config.n_ff_exp) * sizeof(std::int8_t)) == hipSuccess &&
       hipMalloc(reinterpret_cast<void**>(&m.moe_scale), (std::max<std::size_t>(n_embd, static_cast<std::size_t>(config.n_expert_used) * config.n_ff_exp) / 256) * sizeof(float)) == hipSuccess &&
       hipMalloc(reinterpret_cast<void**>(&m.moe_sums), (std::max<std::size_t>(n_embd, static_cast<std::size_t>(config.n_expert_used) * config.n_ff_exp) / 256) * 8 * sizeof(int)) == hipSuccess &&
@@ -1189,20 +1192,23 @@ bool Engine::PrefillChunk(const std::int32_t* tokens, std::size_t count,
         hip::LaunchAxpy(m.bx + row, m.bffout + row, 1.0f, n_embd, stream);
       }
     } else {
+      // One router GEMM for the whole chunk instead of a GEMV and a copy per token: the
+      // projections for the chunk are already batched, and the router was the last per-token
+      // step here.
+      hip::LaunchGemm(dev(layer.gate_inp), Storage(layer.gate_inp.type), c.n_expert, n_embd,
+                      m.bffnh, M, n_embd, m.moe_logits_batch,
+                      static_cast<std::size_t>(c.n_expert), stream);
       for (int i = 0; i < M; ++i) {
         const std::size_t row = static_cast<std::size_t>(i) * n_embd;
-        hipMemcpyAsync(m.ffn_h, m.bffnh + row, n_embd * sizeof(float),
-                       hipMemcpyDeviceToDevice, stream);
-        hip::LaunchGemv(dev(layer.gate_inp), Storage(layer.gate_inp.type), c.n_expert,
-                        n_embd, m.ffn_h, m.moe_logits, stream);
-        hip::LaunchRouterSelect(m.moe_logits,
+        const float* logits_row = m.moe_logits_batch + static_cast<std::size_t>(i) * c.n_expert;
+        hip::LaunchRouterSelect(logits_row,
                                 static_cast<const float*>(dev(layer.exp_probs_b)),
                                 c.n_expert, c.n_group, c.n_group_used, c.n_expert_used,
                                 c.expert_weights_scale, m.moe_ids, m.moe_weights, stream);
         hip::LaunchMoeGather(dev(layer.gate_exps), Storage(layer.gate_exps.type),
                              dev(layer.up_exps), Storage(layer.up_exps.type),
                              dev(layer.down_exps), Storage(layer.down_exps.type), n_embd,
-                             c.n_ff_exp, m.ffn_h, m.moe_ids, m.moe_weights,
+                             c.n_ff_exp, m.bffnh + row, m.moe_ids, m.moe_weights,
                              c.n_expert_used, m.bx + row, m.expert_gate, m.expert_up,
                              m.expert_down, m.moe_q8, m.moe_scale, m.moe_sums, stream);
       }
