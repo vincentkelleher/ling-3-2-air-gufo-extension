@@ -488,6 +488,8 @@ bool Engine::ForwardToken(std::int32_t token, std::uint32_t position,
                                m.delta_state[il], m.cq, heads, kda_dim, stream);
       if (il == 0) {
         dump_raw("/work/d_delta.bin", m.cq, kda_inner);
+        dump_raw("/work/d_state.bin", m.delta_state[il],
+                 heads * kda_dim * kda_dim);
       }
       hip::LaunchRmsNorm(m.cq, static_cast<const float*>(dev(layer.kda_o_norm)), m.qn,
                          heads, kda_dim, eps, stream);

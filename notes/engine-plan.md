@@ -250,3 +250,18 @@ show). Position 0's own state write is unverified, so both halves are suspect:
 
 Next concrete step: dump `delta_state[0]` after token 0 and compare with
 `k0[i]*v0[j]*beta0` elementwise (2 MiB dump); that splits the two.
+
+### State write is correct; the read path is the suspect
+
+`d_state.bin` after token 0 equals `k0[i]*v0[j]*beta0` to **1.9e-9** (rms 0.00096
+both sides), so `DeltaRuleKernel` writes the state correctly. The position-1
+mismatch therefore comes from what the kernel *reads back* (decay + dot with
+`k`), or from assembling the numpy reference out of separate dumps — the engine's
+position-1 delta rms (0.00027) matches `(v1 - small) * beta1` with a small
+`beta1`, while the reference built from the dumps gives 0.019, which is what you
+get with `beta1 ≈ 0.9`. One of the two is not the pair the kernel used.
+
+Next step (removes the ambiguity): have the kernel itself dump `dot` (the
+`sum_i M'[j][i]*k[i]` term) for block 0 at position 1, and compare against
+`(v1 - dot)/beta1` in numpy. That is a single number per head-dim, so it cannot
+be an artefact of mixing dumps from different positions.
