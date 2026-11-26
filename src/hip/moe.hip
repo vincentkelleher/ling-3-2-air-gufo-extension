@@ -259,6 +259,21 @@ void LaunchScatterAdd(float* dst, const std::int32_t* indices,
       src, static_cast<int>(divisor));
 }
 
+/// out[i] += sum over slots of weights[slot] * down[slot][i]: the combine step of
+/// the routed MoE, in the same slot order the host loop used.
+__global__ void MoeCombineKernel(const float* down, const float* weights, int experts,
+                                 int width, float* out) {
+  const int i = blockIdx.x * blockDim.x + threadIdx.x;
+  if (i >= width) {
+    return;
+  }
+  float sum = out[i];
+  for (int slot = 0; slot < experts; ++slot) {
+    sum += weights[slot] * down[static_cast<std::size_t>(slot) * width + i];
+  }
+  out[i] = sum;
+}
+
 void LaunchMoeGather(const void* gate_exps, StorageType gate_type,
                      const void* up_exps, StorageType up_type,
                      const void* down_exps, StorageType down_type,
@@ -266,26 +281,22 @@ void LaunchMoeGather(const void* gate_exps, StorageType gate_type,
                      const std::int32_t* ids, const float* weights,
                      std::size_t n_selected, float* out, float* expert_gate,
                      float* expert_up, float* expert_down, hipStream_t stream) {
-  const std::size_t gate_row = RowBytes(gate_type, n_embd);
-  const std::size_t up_row = RowBytes(up_type, n_embd);
-  const std::size_t down_row = RowBytes(down_type, n_ff);
-  // Expert ids live on the device; copy them once per step.
-  std::int32_t host_ids[64];
-  float host_weights[64];
-  const std::size_t count = n_selected < 64 ? n_selected : 64;
-  hipMemcpyAsync(host_ids, ids, count * sizeof(std::int32_t),
-                 hipMemcpyDeviceToHost, stream);
-  hipMemcpyAsync(host_weights, weights, count * sizeof(float),
-                 hipMemcpyDeviceToHost, stream);
-  hipStreamSynchronize(stream);
-  for (std::size_t i = 0; i < count; ++i) {
-    const std::size_t expert = static_cast<std::size_t>(host_ids[i]);
-    LaunchFfn(static_cast<const char*>(gate_exps) + expert * n_ff * gate_row,
-              gate_type, static_cast<const char*>(up_exps) + expert * n_ff * up_row,
-              up_type, static_cast<const char*>(down_exps) + expert * n_embd * down_row,
-              down_type, n_embd, n_ff, x, host_weights[i], out, expert_gate,
-              expert_up, expert_down, stream);
-  }
+  // Every selected expert is covered by one launch per matrix, with the ids left in
+  // device memory. The previous version copied ids and weights to the host and
+  // synchronized the stream on every token, then launched the expert FFNs from a host
+  // loop -- 35 synchronizations per token, which is why decode and prefill ran at the
+  // same speed.
+  LaunchGemvExperts(gate_exps, gate_type, ids, n_selected, n_ff, n_embd, x,
+                    /*batch_stride=*/0, expert_gate, /*out_stride=*/n_ff, stream);
+  LaunchGemvExperts(up_exps, up_type, ids, n_selected, n_ff, n_embd, x,
+                    /*batch_stride=*/0, expert_up, /*out_stride=*/n_ff, stream);
+  LaunchSilu(expert_gate, expert_gate, n_selected * n_ff, stream);
+  LaunchMulInto(expert_gate, expert_up, expert_gate, n_selected * n_ff, stream);
+  LaunchGemvExperts(down_exps, down_type, ids, n_selected, n_embd, n_ff, expert_gate,
+                    /*batch_stride=*/n_ff, expert_down, /*out_stride=*/n_embd, stream);
+  const int blocks = static_cast<int>((n_embd + kThreads - 1) / kThreads);
+  MoeCombineKernel<<<blocks, kThreads, 0, stream>>>(
+      expert_down, weights, static_cast<int>(n_selected), static_cast<int>(n_embd), out);
 }
 
 }  // namespace gufo::ext::ling3_air::hip

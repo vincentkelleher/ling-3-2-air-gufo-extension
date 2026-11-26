@@ -799,6 +799,7 @@ bool Engine::ForwardFromEmbedded(std::uint32_t position, std::string* error) {
       dump_raw("/work/d0_ffnh.bin", m.ffn_h, n_embd);
     }
     report("block", il);
+    mark(il, 2);
   }
 
   report("final", c.n_layer);
@@ -816,27 +817,32 @@ bool Engine::ForwardFromEmbedded(std::uint32_t position, std::string* error) {
     double attention_ms = 0.0;
     double rest_ms = 0.0;
     float elapsed = 0.0f;
+    double ffn_ms = 0.0;
     for (std::uint32_t il = 0; il < c.n_layer; ++il) {
       hipEventElapsedTime(&elapsed, profile_events[il * 4], profile_events[il * 4 + 1]);
       attention_ms += elapsed;
+      hipEventElapsedTime(&elapsed, profile_events[il * 4 + 1], profile_events[il * 4 + 2]);
+      ffn_ms += elapsed;
       const hipEvent_t next = il + 1 < c.n_layer ? profile_events[(il + 1) * 4]
-                                                 : profile_events[il * 4 + 1];
-      hipEventElapsedTime(&elapsed, profile_events[il * 4 + 1], next);
+                                                 : profile_events[il * 4 + 2];
+      hipEventElapsedTime(&elapsed, profile_events[il * 4 + 2], next);
       rest_ms += elapsed;
     }
     static long tokens_profiled = 0;
     static double attention_total = 0.0;
     static double rest_total = 0.0;
+    static double ffn_total = 0.0;
     ++tokens_profiled;
     attention_total += attention_ms;
     rest_total += rest_ms;
+    ffn_total += ffn_ms;
     if (tokens_profiled % 8 == 0) {
       std::fprintf(stderr,
-                   "profile: %ld tokens, attention %.2f ms/token, rest %.2f ms/token, "
+                   "profile: %ld tokens, attention %.2f, ffn/moe %.2f, other %.2f, "
                    "total %.2f ms/token\n",
                    tokens_profiled, attention_total / tokens_profiled,
-                   rest_total / tokens_profiled,
-                   (attention_total + rest_total) / tokens_profiled);
+                   ffn_total / tokens_profiled, rest_total / tokens_profiled,
+                   (attention_total + ffn_total + rest_total) / tokens_profiled);
     }
     for (auto& event : profile_events) {
       hipEventDestroy(event);
