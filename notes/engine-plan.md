@@ -857,3 +857,29 @@ to launch latency and weight traffic, not to the activation arithmetic. Further
 work on them should batch or fuse the *launches* (the tested `LaunchGemvExperts`
 kernel does exactly that and needs the prefill batch to pay) rather than move the
 activation work around.
+
+## Corrected near-tie, 2026-11-27, single framing and exact marker
+
+Per-position top-2 margins for the plain case with the golden-set prompt fed once
+(`LING3_RAW_PROMPT=1`, marker token 156903):
+
+| pos | token | text | margin |
+| --- | --- | --- | --- |
+| 24 | 678 | `The` | 1.808 |
+| 25 | 678 | `The` | 7.763 |
+| 26 | 2838 | ` user` | 9.278 |
+| 27 | 341 | ` is` | 5.390 |
+| 28 | 10519 | ` asking` | 8.716 |
+| 29 | 259 | ` a` | 3.617 |
+| 30 | 22365 | ` straightforw` | 0.386 |
+| 31 | 36593 | ` factual` | 4.016 |
+| 32 | 3244 | ` question` | 5.215 |
+| 33 | 866 | ` about` | **0.048** |
+
+The split sits at position 33 with a 0.048 margin on logits of order 20, i.e.
+0.24 percent. Matching llama.cpp's CPU arithmetic to that tolerance would mean
+reproducing its reduction orders exactly; the activation quantization already
+matches and the deterministic reductions here are a different but equally valid
+order. Token-for-token equality across the whole golden set is therefore not
+reachable in practice -- the contract's documented-deviation clause is the honest
+route, and the deviation is one token at a measured margin.
