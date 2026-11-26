@@ -105,7 +105,9 @@ src/hip/*.hip        GEMV (F32/Q8_0/Q4_K/Q5_K/Q6_K), conv1d, delta rule,
 src/text/*           tokenizer, pre-tokenizer, chat template
 tests/               probe, config, tokenizer, chat, dot-vs-gufo, GPU operators
 tools/               bandwidth probe, roofline model, reference fixtures
-notes/               engine plan, verification log, benchmarks
+docs/quality.md      quality report: what is proven, what is measured, what is broken
+notes/               engine-plan (status + verification log), benchmarks, prefill and
+                     runner plans, vision plan, build notes
 ```
 
 ## Building and testing
