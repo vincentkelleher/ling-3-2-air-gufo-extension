@@ -621,3 +621,19 @@ token-for-token agreement on a golden set of any size will be decided by that
 error. `engine-assembly` stays open: its RMS half needs llama.cpp logits, which
 `--save-all-logits` does not provide in a usable form, and its argmax half needs
 a reference token for the single-token case.
+
+## Two negative results on the parity gap (2026-11-27)
+
+Both attempted and reverted/kept-neutral, recorded so they are not repeated:
+
+1. Quantizing activations to Q8_K per 256-block before the K-quant dots (what
+   llama.cpp does) changed nothing: prompt 1 still splits at the same word.
+2. Accumulating the K-quant dots in double precision instead of float changed
+   nothing either, and cost 40% of throughput (6.4 -> 3.76 tok/s).
+
+So the residual difference is not activation rounding and not fp32 accumulation
+loss. What is left is the shape of the dot itself: llama.cpp sums integer
+products per sub-block and applies a single float scale per group, while these
+kernels multiply dequantized floats. That rewrite (Q4_K: 8x32 groups with d*sc
+and dmin*m corrections; Q6_K: 16-element groups) is the next and only change on
+this critical path.
