@@ -145,3 +145,31 @@ current per-token per-expert GEMVs.
 That is the single largest remaining piece of engineering in this project, and it
 is also what makes MTP's accept loop pay (see `notes/prefill-design.md`). It should
 be done in one go with the logits-equality check, not incrementally.
+
+### MoE grouping needs large M, so prefill must be chunked, 2026-11-27
+
+Arithmetic that changes the design: with top-8 of 512 experts, a batch of M tokens
+makes M*8 selections over 512 experts, so the expected number of tokens per expert
+is M*8/512 = M/64. At M=8 that is 0.125 selections per expert on average — i.e.
+almost every selected (expert, token) pair is alone, and an expert's weights are
+still read for a single token. Grouping buys nothing.
+
+The expert read amortises only when M is a few hundred:
+
+| M | expected tokens per expert | expert weight reads saved |
+| --- | --- | --- |
+| 8 | 0.125 | ~0 |
+| 64 | 1 | ~1x |
+| 256 | 4 | ~4x |
+| 512 | 8 | ~8x |
+
+So the batched forward that matters is **chunked prefill with M around 256-512**,
+not a small batch: prompt ingestion in 512-token chunks, one pass per chunk, with
+the MoE grouped by expert across the chunk. That also sets the memory budget: the
+per-token scratch (q, attn out, ffn) becomes 512x its current size, which is
+affordable for a 512-token chunk in unified memory but must be allocated
+deliberately rather than by multiplying the existing buffers.
+
+This is one coherent piece of work — chunked forward, grouped MoE, batched MLA
+attention with a causal mask, validated by last-token logits against the sequential
+path. It is the largest remaining engineering item in the project.
