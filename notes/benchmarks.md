@@ -91,7 +91,7 @@ prompt -- its files are already framed, so the engine needs
 
 1 of 4 cases is token-identical end to end. On the plain case the split is the
 known near-tie at token 8: llama.cpp writes `question: "The capital…`, this engine
-writes `question about the capital…`, and the top-2 logit margin there is 0.022.
+writes `question about the capital…`, and the top-2 logit margin there is 0.048 (measured with the corrected prompt; an earlier note said 0.022 from a differently framed prompt).
 That is the deviation the `engine-prefill` contract asks to record.
 
 Reproduce: `tools/golden_set.py --engine-wrapper <script> --llama-wrapper <script>
