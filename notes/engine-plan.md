@@ -307,3 +307,27 @@ verified, and the end-to-end difference from llama.cpp unexplained. The next
 two steps are therefore (1) position-stamped dumps + the position-1 delta check,
 and (2) token-for-token comparison against llama.cpp on the pinned prompt, which
 is what `engine-assembly` actually requires.
+
+### Position 1, with stamped dumps: the kernel's state update is not the one modelled
+
+Position-stamped dumps (`p_*_%u.bin`) now separate the steps, and the picture is:
+
+| check | max abs diff |
+| --- | --- |
+| `state_0` vs `v0[j]*k0[i]*beta0` | 1.9e-9 |
+| `delta_1` vs `(v1 - sum_i (M0*exp(g1))[j][i]*k1[i]) * beta1` | 0.288 (engine rms 2.7e-4, ref 1.9e-2) |
+| `state_1` vs `state_0*exp(g1) + k1(x)delta_1` | 0.0786 |
+| `state_1` vs `state_0 + k1(x)delta_1` | 0.0812 |
+| `state_1` vs `state_0*exp(g0) + ...` | 0.0744 |
+
+`state_1` rms (1.79e-3) is *larger* than `state_0` (0.96e-3) while the update term
+is tiny (2.4e-5), and the elementwise effective decay has median 0.65 (close to
+`exp(g1)`'s median 0.695) but a near-zero correlation — the magnitude looks like a
+decay was applied while the per-element values do not match any of the variants
+above. That pattern fits an axis/layout mismatch or a race rather than a missing
+decay.
+
+Next step (one build): have `DeltaRuleKernel` dump, for head 0 only, `row[0..127)`
+before the decay, `decay[0..127)`, and `row[0..127)` after it. Compare those three
+with numpy and the axis question answers itself. Everything up to position 0, and
+the whole state *write*, is verified.

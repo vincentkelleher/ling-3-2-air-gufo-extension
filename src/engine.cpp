@@ -369,6 +369,21 @@ bool Engine::ForwardToken(std::int32_t token, std::uint32_t position,
       std::fclose(file);
     }
   };
+  auto dump_at = [&](const char* format, const float* device, std::size_t count,
+                     std::uint32_t position) {
+    if (std::getenv("LING3_DUMP") == nullptr) {
+      return;
+    }
+    char path[128];
+    std::snprintf(path, sizeof(path), format, position);
+    std::vector<float> host(count);
+    hipMemcpy(host.data(), device, count * sizeof(float), hipMemcpyDeviceToHost);
+    FILE* file = std::fopen(path, "wb");
+    if (file != nullptr) {
+      std::fwrite(host.data(), sizeof(float), count, file);
+      std::fclose(file);
+    }
+  };
   auto report_buf = [&](const char* label, const float* device, std::size_t count) {
     if (!stats) {
       return;
@@ -475,21 +490,21 @@ bool Engine::ForwardToken(std::int32_t token, std::uint32_t position,
       hip::LaunchL2Norm(m.cq, m.qn, heads, kda_dim, eps, stream);
       hip::LaunchL2Norm(m.ck, m.kn, heads, kda_dim, eps, stream);
       if (il == 0) {
-        dump_raw("/work/d_ck.bin", m.ck, kda_inner);
-        dump_raw("/work/d_cv.bin", m.cv, kda_inner);
-        dump_raw("/work/d_qn.bin", m.qn, kda_inner);
-        dump_raw("/work/d_kn.bin", m.kn, kda_inner);
-        dump_raw("/work/d_gate.bin", m.kda_gate, kda_inner);
-        dump_raw("/work/d_beta.bin", m.beta, heads);
+        dump_at("/work/p_ck_%u.bin", m.ck, kda_inner, position);
+        dump_at("/work/p_cv_%u.bin", m.cv, kda_inner, position);
+        dump_at("/work/p_qn_%u.bin", m.qn, kda_inner, position);
+        dump_at("/work/p_kn_%u.bin", m.kn, kda_inner, position);
+        dump_at("/work/p_gate_%u.bin", m.kda_gate, kda_inner, position);
+        dump_at("/work/p_beta_%u.bin", m.beta, heads, position);
       }
       // `cq` is free after the L2 normalisation; the delta step reads `kn`
       // while writing, so it needs a different buffer.
       hip::LaunchDeltaRuleStep(m.qn, m.kn, m.cv, m.kda_gate, m.beta,
                                m.delta_state[il], m.cq, heads, kda_dim, stream);
       if (il == 0) {
-        dump_raw("/work/d_delta.bin", m.cq, kda_inner);
-        dump_raw("/work/d_state.bin", m.delta_state[il],
-                 heads * kda_dim * kda_dim);
+        dump_at("/work/p_delta_%u.bin", m.cq, kda_inner, position);
+        dump_at("/work/p_state_%u.bin", m.delta_state[il],
+                heads * kda_dim * kda_dim, position);
       }
       hip::LaunchRmsNorm(m.cq, static_cast<const float*>(dev(layer.kda_o_norm)), m.qn,
                          heads, kda_dim, eps, stream);
