@@ -76,3 +76,33 @@ The 4608 in `mm.0` is 1152 × 2 × 2, i.e. the `spatial_merge_size` of 2.
 - This is the second-largest remaining piece after the runner; it depends on
   nothing else, so it can be built in parallel with the runner once the serving
   path exists (an image can only be exercised through the server).
+
+## Vision encoder: core verified against numpy (2026-11-27)
+
+The mmproj is BF16, which the text kernels do not implement, so `VisionEncoder`
+dequantizes each tensor it needs to F32 on the host and uploads it (27 blocks =
+1.54 GiB of device weights). Kernels: `MatvecInMajor*` (the mmproj stores weights
+`[in][out]`, the transpose of the text GEMV), `LayerNormKernel` (weight+bias),
+`GeluKernel` (tanh form, as `clip.use_gelu` records), `VisionAttention` and `Add`.
+
+`tools/make_vision_fixture.py` writes a reference from the real weights (numpy,
+F32), and `tests/vision_test.cpp` checks the encoder against it:
+
+| stage | max abs error | limit |
+| --- | --- | --- |
+| patch embed (two 768-float patches, 4608→1152) | 5.0e-06 | 1e-3 |
+| encoder block 0 (LN → qkv → attention → out → residual → LN → ffn → residual) | 3.4e-05 | 2e-3 |
+
+Two things this established:
+
+- The vision tower's attention is **bidirectional**, not causal. Attending causally
+  gave a 1.13 error against reference magnitudes of 11.2; bidirectional gives
+  3.4e-05. Worth recording because the text decoder's kernels are all causal and
+  reusing one silently produces plausible-but-wrong image features.
+- BF16→F32 at load is sufficient: no BF16 kernels are needed for the tower, at the
+  cost of 1.54 GiB of device weights (the text weights are zero-copy and untouched).
+
+Not yet done: position embeddings with dynamic-resolution interpolation, the
+spatial merge (2x2 → 576 tokens for a 768x768 image), `v.post_ln` and the `mm.*`
+projector, the image-preprocessing path, and wiring image embeddings into the text
+prompt. `PatchEmbed` and `RunBlock` are the validated primitives those build on.

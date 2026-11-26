@@ -39,6 +39,7 @@ gufo_extension_target(
   SOURCES
     src/engine.cpp
     src/drivers.cpp
+    src/vision.cpp
   LINK_LIBRARIES
     gufo_ling3_air
     gufo_ext_runtime
@@ -52,7 +53,8 @@ if(TARGET gufo_ling3_air_hip)
     src/hip/layers.hip
     src/hip/attention.hip
     src/hip/moe.hip
-    src/hip/ops.hip)
+    src/hip/ops.hip
+    src/hip/vision.hip)
 endif()
 
 # End-to-end forward: load, decode, report tokens and rate.
@@ -115,6 +117,25 @@ if(TARGET ling3_air_chat_test)
   target_compile_definitions(ling3_air_chat_test PRIVATE
     LING3_FIXTURES_DIR="${GUFO_EXTENSION_BUILD_ROOT}/fixtures")
   add_test(NAME ling3_air.chat COMMAND ling3_air_chat_test)
+endif()
+
+# Vision encoder against the numpy reference from tools/make_vision_fixture.py.
+gufo_extension_target(
+  NAME ling3_air_vision_test
+  SOURCES
+    tests/vision_test.cpp
+  LINK_LIBRARIES
+    gufo_ling3_air_hip
+    gufo_ling3_air
+    gufo_ext_runtime
+    gufo_ext_core
+    gufo_ext_hip
+)
+if(TARGET ling3_air_vision_test)
+  target_compile_definitions(ling3_air_vision_test PRIVATE
+    LING3_FIXTURES_DIR="${GUFO_EXTENSION_BUILD_ROOT}/fixtures")
+  add_test(NAME ling3_air.vision COMMAND ling3_air_vision_test)
+  set_tests_properties(ling3_air.vision PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 1800)
 endif()
 
 # Config and weight-map validation against a real GGUF.
