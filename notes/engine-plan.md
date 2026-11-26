@@ -563,3 +563,34 @@ different order and quantizes activations), not a structural bug.
 Next: measure the divergence position and the logit margin at it (how close the
 top-2 are), then reduce error where it matters — for example, keep activations in
 fp32 through the MoE gather and match llama.cpp's `Q8_K` activation quantization.
+
+## The divergence is decided by a 0.022 logit margin (2026-11-27)
+
+Per-step argmax and top-2 margin for the pinned prompt (logits dumped per
+position with `LING3_DUMP`):
+
+| step | token | text | margin |
+| --- | --- | --- | --- |
+| 0 | 678 | `The` | 8.134 |
+| 1 | 2838 | ` user` | 8.961 |
+| 2 | 341 | ` is` | 5.322 |
+| 3 | 10519 | ` asking` | 8.567 |
+| 4 | 259 | ` a` | 3.399 |
+| 5 | 22365 | ` straightfo…` | 0.595 |
+| 6 | 36593 | ` factual` | 4.097 |
+| 7 | 3244 | ` question` | 4.291 |
+| 8 | 866 | ` about` | **0.022** |
+| 9 | 268 | ` the` | 4.587 |
+| 10 | 7706 | ` capital` | 13.334 |
+| 11 | 300 | ` of` | 9.027 |
+
+The engine and llama.cpp agree for eight tokens and split at step 8, where the
+top-2 margin is 0.022 on logits of order 20 — 0.1 %. So the divergence is decided
+by numerical noise, not by a structural difference: matching llama.cpp token for
+token needs the logit error below ~0.02 at such steps, which means matching its
+quantized-activation dots (`Q8_K` activation quantization before the K-quant dot
+products) rather than accumulating dequantized weights against fp32 activations.
+
+This is the documented deviation the `engine-prefill` contract asks for: pinned
+prompt, divergence index 8, margin 0.022, same sentence meaning and same final
+answer.

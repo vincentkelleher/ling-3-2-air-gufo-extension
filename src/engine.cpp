@@ -696,7 +696,7 @@ bool Engine::ForwardToken(std::int32_t token, std::uint32_t position,
   hip::LaunchGemv(dev(weights.output), Storage(weights.output.type), c.n_vocab,
                   n_embd, m.h, m.logits, stream);
   hip::LaunchArgmax(m.logits, c.n_vocab, m.argmax, stream);
-  dump_raw("/work/our_logits.bin", m.logits, c.n_vocab);
+  dump_at("/work/logits_%u.bin", m.logits, c.n_vocab, position);
 
   const hipError_t status = hipStreamSynchronize(stream);
   if (status != hipSuccess) {
