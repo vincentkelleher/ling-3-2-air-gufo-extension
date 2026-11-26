@@ -27,8 +27,8 @@ tools/bench_report.py --engine <binary-or-wrapper> --model <gguf> \
 | --- | --- | --- | --- |
 | decode, short context | **12.48 tok/s** | 25.0 % | llama.cpp CPU `llama-completion`: 12.52 tok/s |
 | prefill, 24-token prompt (sequential) | 12.49 tok/s | 0.20 % | llama.cpp CPU prompt eval: 24.20 tok/s |
-| prefill, 25-token prompt (chunked, 8-token chunks) | 15.41 tok/s | 0.25 % | same reference |
-| prefill, 104-token prompt (sequential / chunk 8 / chunk 64 / chunk 104) | 12.48 / 15.60 / 16.19 / **16.20 tok/s** | 0.26 % | same reference |
+| prefill, 24-token prompt (chunked, 24-token chunk) | 15.72 tok/s | 0.25 % | same reference |
+| prefill, 104-token prompt (sequential / chunk 32 / 64 / 104) | 12.52 / 16.13 / **16.13** / 16.12 tok/s | 0.26 % | same reference |
 | weight load | 2.1 s warm / 35.9 s cold | - | llama.cpp mmap load: 1.58 s |
 
 Depth rows (`LING3_DEPTH`, context 4096, 8 decode steps after prefilling the
@@ -116,3 +116,23 @@ against it.
 This does not affect the parity question with llama.cpp, where the deviation was
 already one token at a 0.048 margin, but it means any future "token-for-token"
 comparison has to state which prefill path produced the tokens.
+
+### Corrected prefill numbers after a test bug, 2026-11-27
+
+The chunked-ingestion branch never advanced the decode `position`, so decode
+restarted at position 0 and overwrote the cache. That made decode *look* faster
+(16.13 tok/s) while producing different text. With the position fixed, on a
+104-token prompt with the test's own timing:
+
+| path | prefill |
+| --- | --- |
+| sequential | 12.52 tok/s (8.306 s) |
+| chunked, 32 / 64 / 104-token chunks | 16.13 / 16.13 / 16.12 tok/s (6.45 s) |
+
+So the honest gain is **1.29x**, and decode is unchanged at 12.52 tok/s. The
+earlier 16.20/1.30x figures were within a rounding of this, but the 16.13 *decode*
+figure seen once was an artefact of the bug and is withdrawn.
+
+Worth remembering for the next measurement: the test's chunked path and the
+sequential path must agree on the position bookkeeping, or "decode speed" is
+measuring a shorter context.

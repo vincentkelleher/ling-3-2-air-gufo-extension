@@ -230,6 +230,7 @@ int main(int argc, char** argv) {
   const auto start_time = std::chrono::steady_clock::now();
   if (use_prompt && std::getenv("LING3_PREFILL_CHUNK") != nullptr) {
     // Ingest the prompt through the chunked path; decode then continues normally.
+    const auto chunk_prefill_start = std::chrono::steady_clock::now();
     std::vector<std::int32_t> ids(prompt_tokens.begin(), prompt_tokens.end() - 1);
     std::size_t consumed = 0;
     while (consumed < ids.size()) {
@@ -242,6 +243,14 @@ int main(int argc, char** argv) {
       consumed += chunk;
     }
     token = static_cast<std::int32_t>(prompt_tokens.back());
+    // Decode continues after the ingested prefix: without this the loop restarts
+    // at position 0 and overwrites the cache (which also made decode look faster).
+    position = ids.size();
+    const double chunk_seconds = std::chrono::duration<double>(
+                                     std::chrono::steady_clock::now() - chunk_prefill_start)
+                                     .count();
+    std::printf("prefill: %zu tokens in %.3f s = %.2f tok/s\n", ids.size(),
+                chunk_seconds, ids.size() / chunk_seconds);
   } else if (use_prompt) {
     for (std::size_t i = 0; i + 1 < prompt_tokens.size(); ++i) {
       if (!engine->ForwardToken(static_cast<std::int32_t>(prompt_tokens[i]),

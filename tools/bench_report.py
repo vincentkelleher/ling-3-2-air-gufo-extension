@@ -32,8 +32,11 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 DEFAULT_BANDWIDTH = 237.0  # GB/s, tools/bandwidth_probe.hip, medians of 3
 
 
-def measure(engine, model, prompt, steps, depth, context):
+def measure(engine, model, prompt, steps, depth, context, chunked_prefill):
     env = dict(os.environ, LING3_DEPTH=str(depth), LING3_CONTEXT=str(context))
+    if chunked_prefill:
+        env["LING3_PREFILL_CHUNK"] = "1"
+        env["LING3_CHUNK_SIZE"] = str(chunked_prefill)
     command = [engine, model, str(steps), prompt]
     output = subprocess.run(command, env=env, capture_output=True, text=True)
     if output.returncode != 0:
@@ -82,6 +85,9 @@ def main():
                              "(defaults to --model, which may be a container path)")
     parser.add_argument("--bandwidth", type=float, default=DEFAULT_BANDWIDTH)
     parser.add_argument("--context", type=int, default=4096)
+    parser.add_argument("--chunked-prefill", type=int, default=0,
+                        help="ingest the prompt through PrefillChunk with this "
+                             "chunk size (0 keeps the sequential path)")
     args = parser.parse_args()
 
     print(f"bandwidth {args.bandwidth:.1f} GB/s (measured), "
@@ -93,7 +99,8 @@ def main():
         text = ""
         for _ in range(args.runs):
             rate, prefill, text = measure(args.engine, args.model, args.prompt,
-                                          args.steps, depth, args.context)
+                                          args.steps, depth, args.context,
+                                          args.chunked_prefill)
             rates.append(rate)
             prefills.append(prefill)
         median = statistics.median(rates)
@@ -103,9 +110,10 @@ def main():
               f"{100.0 * median / roofline:>9.1f}%  {text[:40]}")
         if prefills and prefills[0] > 0:
             prefill = statistics.median(prefills)
-            print(f"       prefill {prefill:>6.2f} tok/s "
-                  f"(token by token; prompt ingestion has no batched pass yet, so "
-                  f"it costs what decode costs -- notes/prefill-design.md)")
+            mode = (f"chunked, {args.chunked_prefill}-token chunks"
+                    if args.chunked_prefill else "token by token")
+            print(f"       prefill {prefill:>6.2f} tok/s ({mode}; the prefill "
+                  f"roofline is ~6,277 tok/s at 2,048 tokens, so both are ~0.2-0.3%)")
     print("reference on the same box: llama.cpp CPU decode 12.52 tok/s, "
           "prompt eval 24.20 tok/s")
 
