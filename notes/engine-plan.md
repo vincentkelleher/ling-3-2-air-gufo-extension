@@ -691,3 +691,15 @@ logit margins (one 12-step run in six matched llama.cpp, the rest did not).
 Replaced with per-warp sums in shared memory and a fixed-order sum. Eight
 consecutive 12-step runs are now identical (same hash). The engine also got an
 explicit non-blocking stream instead of the implicit one.
+
+## Negative result: block-per-row GEMV is slower here (2026-11-27)
+
+One block of 256 threads per row with a shared-memory reduction replaced the
+warp-per-row mapping: **3.31 tok/s** versus 7.08, i.e. 2.1x slower. The reduction
+cost dominates when a row is only 10-80 quant blocks wide, and the LM head then
+launches 157k blocks. Reverted; the warp-per-row mapping stands.
+
+The useful conclusion is that this kernel is dequantization-bound, not
+parallelism-bound: each lane walks whole 256-weight blocks. The next attempt
+should reduce per-weight work (vectorised loads, 8-bit path with a resident
+activation scale, or a fused Q6_K+Q4_K expert kernel) rather than add threads.
