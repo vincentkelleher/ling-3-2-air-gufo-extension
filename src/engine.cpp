@@ -89,6 +89,7 @@ struct Engine::Impl {
   std::int32_t* moe_ids{nullptr};
   float* moe_weights{nullptr};
   std::int32_t* argmax{nullptr};
+  float* kernel_debug{nullptr};
 
   std::vector<float*> conv_state;
   std::vector<float*> delta_state;
@@ -291,7 +292,8 @@ std::unique_ptr<Engine> Engine::Create(const core::GgufReader& reader,
       alloc(&m.expert_up, config.n_ff > config.n_ff_exp ? config.n_ff : config.n_ff_exp) &&
       alloc(&m.expert_down, n_embd) && alloc(&m.logits, config.n_vocab) &&
       alloc_int(&m.moe_ids, config.n_expert_used) &&
-      alloc(&m.moe_weights, config.n_expert_used) && alloc_int(&m.argmax, 1);
+      alloc(&m.moe_weights, config.n_expert_used) && alloc_int(&m.argmax, 1) &&
+      alloc(&m.kernel_debug, 5 * kda_dim);
   if (!ok) {
     return fail("engine: device scratch allocation failed");
   }
@@ -500,7 +502,13 @@ bool Engine::ForwardToken(std::int32_t token, std::uint32_t position,
       // `cq` is free after the L2 normalisation; the delta step reads `kn`
       // while writing, so it needs a different buffer.
       hip::LaunchDeltaRuleStep(m.qn, m.kn, m.cv, m.kda_gate, m.beta,
-                               m.delta_state[il], m.cq, heads, kda_dim, stream);
+                               m.delta_state[il], m.cq, heads, kda_dim, stream,
+                               (il == 0 && std::getenv("LING3_DUMP") != nullptr)
+                                   ? m.kernel_debug
+                                   : nullptr);
+      if (il == 0) {
+        dump_at("/work/p_kernel_%u.bin", m.kernel_debug, 5 * kda_dim, position);
+      }
       if (il == 0) {
         dump_at("/work/p_delta_%u.bin", m.cq, kda_inner, position);
         dump_at("/work/p_state_%u.bin", m.delta_state[il],

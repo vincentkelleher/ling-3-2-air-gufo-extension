@@ -331,3 +331,25 @@ Next step (one build): have `DeltaRuleKernel` dump, for head 0 only, `row[0..127
 before the decay, `decay[0..127)`, and `row[0..127)` after it. Compare those three
 with numpy and the axis question answers itself. Everything up to position 0, and
 the whole state *write*, is verified.
+
+### In-kernel dump: the decay is right, and two dumps disagree within one launch
+
+`DeltaRuleKernel` now records, for head 0 row 0: the row before decay, `decay`,
+the row after decay, `v`, `dot` and `beta`. Results:
+
+- `decay == expf(gate[0..128))`: **5.96e-8** (the gate buffer the kernel sees is
+  the one dumped, and the multiply is applied: `post == pre*decay` exactly).
+- Position 1: `pre` rms 5.96e-4 -> `post` rms 1.40e-4, i.e. the decay shrinks the
+  state as it should.
+- The kernel's `v` equals `m.cv` (bit-identical) and `dot` is 6.6e-4 with
+  `beta` 0.8813, so its own arithmetic says `out[0] = (v[0] - dot)*beta = 0.0119`.
+- But the dumped `out` (`p_delta_1.bin`) holds **2.5e-4** at index 0, which
+  corresponds to `v[0] ~ 9.5e-4`, not 0.0142.
+
+So within what should be one launch the debug record and the output disagree,
+which means the two files were not written by the same launch (the debug buffer
+is overwritten once per KDA block 0 call, and the output dump sits in the same
+`if (il == 0)` block). Next step: add a launch counter to the debug record (index
+`5*head_dim` in `m.kernel_debug`) and stamp the output dumps with it, so the
+pairing is unambiguous; then redo the position-1 comparison. Every conclusion
+above about the decay being correct stands — it is measured inside the kernel.

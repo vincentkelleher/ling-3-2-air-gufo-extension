@@ -97,7 +97,8 @@ __global__ void RopeKernel(float* x, int heads, int head_dim, int n_rot,
 /// two threads touch the same floats.
 __global__ void DeltaRuleKernel(const float* q, const float* k, const float* v,
                                 const float* g, const float* beta, float* state,
-                                float* out, int heads, int head_dim) {
+                                float* out, int heads, int head_dim,
+                                float* debug) {
   const int head = blockIdx.x;
   if (head >= heads || threadIdx.x >= head_dim) {
     return;
@@ -114,12 +115,24 @@ __global__ void DeltaRuleKernel(const float* q, const float* k, const float* v,
   __syncthreads();
 
   float* row = state + (static_cast<std::size_t>(head) * head_dim + j) * head_dim;
+  if (debug != nullptr && head == 0 && j == 0) {
+    for (int i = 0; i < head_dim; ++i) debug[i] = row[i];                 // pre
+    for (int i = 0; i < head_dim; ++i) debug[head_dim + i] = decay[i];    // decay
+  }
   for (int i = 0; i < head_dim; ++i) {
     row[i] *= decay[i];
+  }
+  if (debug != nullptr && head == 0 && j == 0) {
+    for (int i = 0; i < head_dim; ++i) debug[2 * head_dim + i] = row[i];  // post
   }
   float dot = 0.0f;
   for (int i = 0; i < head_dim; ++i) {
     dot += row[i] * k_shared[i];
+  }
+  if (debug != nullptr && head == 0 && j == 0) {
+    for (int i = 0; i < head_dim; ++i) debug[3 * head_dim + i] = v[i];
+    debug[4 * head_dim] = dot;
+    debug[4 * head_dim + 1] = beta[head];
   }
   const float delta = (v[head * head_dim + j] - dot) * beta[head];
   for (int i = 0; i < head_dim; ++i) {
@@ -185,12 +198,12 @@ void LaunchRope(float* x, std::size_t heads, std::size_t head_dim,
 void LaunchDeltaRuleStep(const float* q, const float* k, const float* v,
                          const float* g, const float* beta, float* state,
                          float* out, std::size_t heads, std::size_t head_dim,
-                         hipStream_t stream) {
+                         hipStream_t stream, float* debug) {
   const std::size_t shared = 2 * head_dim * sizeof(float);
   DeltaRuleKernel<<<static_cast<int>(heads), static_cast<int>(head_dim),
                     shared, stream>>>(q, k, v, g, beta, state, out,
                                       static_cast<int>(heads),
-                                      static_cast<int>(head_dim));
+                                      static_cast<int>(head_dim), debug);
 }
 
 void LaunchArgmax(const float* x, std::size_t count, std::int32_t* result,

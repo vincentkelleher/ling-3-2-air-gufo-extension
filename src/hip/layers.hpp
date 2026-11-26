@@ -41,7 +41,7 @@ void LaunchRope(float* x, std::size_t heads, std::size_t head_dim,
 void LaunchDeltaRuleStep(const float* q, const float* k, const float* v,
                          const float* g, const float* beta, float* state,
                          float* out, std::size_t heads, std::size_t head_dim,
-                         hipStream_t stream);
+                         hipStream_t stream, float* debug = nullptr);
 
 /// Index of the largest value; ties resolve to the lower index.
 void LaunchArgmax(const float* x, std::size_t count, std::int32_t* result,
