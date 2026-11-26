@@ -22,6 +22,19 @@ Prefill roofline at 2,048 tokens (every expert touched once): ~**6,277 tok/s**.
 | prefill, 25-token prompt | 7.1 tok/s (token by token) | 0.1 % | llama.cpp CPU prompt eval: 24.20 tok/s |
 | weight load | 2.1 s warm / 35.9 s cold | - | llama.cpp mmap load: 1.58 s |
 
+Depth rows (`LING3_DEPTH`, context 4096, 8 decode steps after prefilling the
+cache with a repeated token; `tools/roofline.py --depth` accounts for the MLA
+latent cache):
+
+| depth | decode | vs depth 0 |
+| --- | --- | --- |
+| 0 | 6.56 tok/s | - |
+| 512 | 6.53 tok/s | -0.5 % |
+| 2048 | 6.38 tok/s | -2.7 % |
+
+Decode is almost depth-insensitive: the MLA cache is 576 floats/token on seven
+blocks (16.1 KiB/token), far smaller than the 4.75 GiB of weights read per step.
+
 The engine has no batched prefill yet: it feeds prompt tokens one at a time, so
 its "prefill" is just decode speed. That is the single biggest gap and the first
 item for `prefill-opt` (a batched forward would also lift decode indirectly by

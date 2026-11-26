@@ -58,7 +58,10 @@ int main(int argc, char** argv) {
   }
 
   ling::EngineOptions options;
-  options.max_context = 64;
+  options.max_context = 4096;
+  if (const char* ctx = std::getenv("LING3_CONTEXT")) {
+    options.max_context = static_cast<std::uint32_t>(std::atoi(ctx));
+  }
   const auto create_start = std::chrono::steady_clock::now();
   auto engine = ling::Engine::Create(*reader, config, weights, options, &error);
   if (!engine) {
@@ -134,6 +137,18 @@ int main(int argc, char** argv) {
       }
     }
     token = static_cast<std::int32_t>(prompt_tokens.back());
+  }
+  // Optional depth: fill the cache with one repeated token before timing, so
+  // decode is measured with a long context already in place.
+  std::size_t depth = 0;
+  if (const char* arg = std::getenv("LING3_DEPTH")) {
+    depth = static_cast<std::size_t>(std::atoi(arg));
+  }
+  for (std::size_t i = 0; i < depth; ++i) {
+    if (!engine->ForwardToken(156891, static_cast<std::uint32_t>(position++), &error)) {
+      std::fprintf(stderr, "prefill: %s\n", error.c_str());
+      return 1;
+    }
   }
   const auto decode_start = std::chrono::steady_clock::now();
   for (int step = 0; step < steps; ++step) {
