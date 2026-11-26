@@ -87,6 +87,9 @@ struct Engine::Impl {
   float* moe_logits{nullptr};
   /// Pre-quantised activation for the "prepared" GEMV path: a head with 156k rows
   /// otherwise re-quantises the same 2560 values once per row.
+  std::int8_t* moe_q8{nullptr};
+  float* moe_scale{nullptr};
+  int* moe_sums{nullptr};
   signed char* act_values{nullptr};
   float* act_scales{nullptr};
   int* act_sums{nullptr};
@@ -357,6 +360,9 @@ std::unique_ptr<Engine> Engine::Create(const core::GgufReader& reader,
       alloc(&m.scores, heads * context) && alloc(&m.latent, heads * latent) &&
       alloc(&m.mla_out, v_dim) && alloc(&m.kvq, kv_dim) &&
       alloc(&m.moe_logits, config.n_expert) &&
+      hipMalloc(reinterpret_cast<void**>(&m.moe_q8), std::max<std::size_t>(n_embd, static_cast<std::size_t>(config.n_expert_used) * config.n_ff_exp) * sizeof(std::int8_t)) == hipSuccess &&
+      hipMalloc(reinterpret_cast<void**>(&m.moe_scale), (std::max<std::size_t>(n_embd, static_cast<std::size_t>(config.n_expert_used) * config.n_ff_exp) / 256) * sizeof(float)) == hipSuccess &&
+      hipMalloc(reinterpret_cast<void**>(&m.moe_sums), (std::max<std::size_t>(n_embd, static_cast<std::size_t>(config.n_expert_used) * config.n_ff_exp) / 256) * 8 * sizeof(int)) == hipSuccess &&
       hipMalloc(reinterpret_cast<void**>(&m.act_values), act_cols * sizeof(signed char)) == hipSuccess &&
       hipMalloc(reinterpret_cast<void**>(&m.act_scales), (act_cols / 256) * sizeof(float)) == hipSuccess &&
       hipMalloc(reinterpret_cast<void**>(&m.act_sums), (act_cols / 256) * 8 * sizeof(int)) == hipSuccess &&
@@ -791,7 +797,7 @@ bool Engine::ForwardFromEmbedded(std::uint32_t position, std::string* error) {
                            dev(layer.down_exps), Storage(layer.down_exps.type),
                            n_embd, c.n_ff_exp, m.ffn_h, m.moe_ids, m.moe_weights,
                            c.n_expert_used, m.x, m.expert_gate, m.expert_up,
-                           m.expert_down, stream);
+                           m.expert_down, m.moe_q8, m.moe_scale, m.moe_sums, stream);
       if (il == 2) {
         dump_raw("/work/d2_after_gather.bin", m.x, n_embd);
       }
@@ -1146,7 +1152,7 @@ bool Engine::PrefillChunk(const std::int32_t* tokens, std::size_t count,
                              dev(layer.down_exps), Storage(layer.down_exps.type), n_embd,
                              c.n_ff_exp, m.ffn_h, m.moe_ids, m.moe_weights,
                              c.n_expert_used, m.bx + row, m.expert_gate, m.expert_up,
-                             m.expert_down, stream);
+                             m.expert_down, m.moe_q8, m.moe_scale, m.moe_sums, stream);
       }
       hip::LaunchGemm(dev(layer.gate_shexp), Storage(layer.gate_shexp.type),
                       c.n_ff_shexp, n_embd, m.bffnh, M, n_embd, m.bffa, c.n_ff_shexp,
@@ -1268,7 +1274,7 @@ bool Engine::ForwardMtp(std::int32_t token, std::uint32_t position,
                        dev(layer.down_exps), Storage(layer.down_exps.type), n_embd,
                        c.n_ff_exp, m.ffn_h, m.moe_ids, m.moe_weights,
                        c.n_expert_used, m.x, m.expert_gate, m.expert_up,
-                       m.expert_down, stream);
+                       m.expert_down, m.moe_q8, m.moe_scale, m.moe_sums, stream);
   hip::LaunchFfn(dev(layer.gate_shexp), Storage(layer.gate_shexp.type),
                  dev(layer.up_shexp), Storage(layer.up_shexp.type),
                  dev(layer.down_shexp), Storage(layer.down_shexp.type), n_embd,

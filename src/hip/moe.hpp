@@ -64,6 +64,7 @@ void LaunchMoeGather(const void* gate_exps, StorageType gate_type,
                      std::size_t n_embd, std::size_t n_ff, const float* x,
                      const std::int32_t* ids, const float* weights,
                      std::size_t n_selected, float* out, float* expert_gate,
-                     float* expert_up, float* expert_down, hipStream_t stream);
+                     float* expert_up, float* expert_down, std::int8_t* act_q8,
+                     float* act_scales, int* act_sums, hipStream_t stream);
 
 }  // namespace gufo::ext::ling3_air::hip

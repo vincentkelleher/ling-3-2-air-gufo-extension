@@ -364,7 +364,14 @@ call arrives).
 So the supported mode is **one session**: requests queue and run one at a time, which is
 what all the verified numbers above were measured with (`sessions=1`, `batch_width=1`).
 
-The fix is mechanical and well scoped: move the scratch into the `Engine` (allocate with
-the other scratch in `Engine::Create`) and pass it to `LaunchMoeGather`, which also removes
-the `static` and its resize path. Until then `--sessions` > 1 must not be advertised, and
-`docs/quality.md` says session isolation is not exercised.
+**Update**: that fix is now in — the buffers live in `Engine` (`moe_q8/moe_scale/moe_sums`,
+allocated with the other scratch) and `LaunchMoeGather` takes them, so `moe.hip` has no
+`static` and no resize path. Greedy tokens are unchanged (16.87 tok/s, same token list).
+
+Two concurrent sessions **still hang** (bounded run killed at 420 s), so the static scratch
+was not the whole story. The next suspect is the adapter itself: `Ling3ComponentAdapter`
+keeps `engines_` and `positions_` in `std::map`s that the scheduler threads touch without a
+mutex (`EngineFor`, `OnPosition`, `Existing`, `Adopt`), which is a data race on the very
+path a second session takes. A `std::mutex` around those maps is the next step; if that is
+not enough, the remaining suspicion falls on two engines sharing one HIP device from two
+threads, which would need the host's serialisation rather than ours.
