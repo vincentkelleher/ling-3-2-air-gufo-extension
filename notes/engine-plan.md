@@ -227,3 +227,26 @@ file**, not raw float rows — 4,401,412 bytes with a 260-byte header that start
 with ASCII text and includes `n_vocab` and a token count, followed by 7 rows
 that contain 87 NaNs. Decode that header (or use token equality instead of
 logits) before comparing.
+
+## Result of the position-1 check (2026-11-26, current lead)
+
+Reproduction: run the engine with `LING3_DUMP=1` for 1 step (position 0) and
+again for 2 steps (position 1), keep both sets of `d_kn`, `d_cv`, `d_beta`,
+`d_gate`, `d_delta`, then compare position 1 against the closed form
+
+    M[j][i]  = k0[i] * v0[j] * beta0
+    M'[j][i] = M[j][i] * exp(g1[i])
+    delta1[j] = (v1[j] - sum_i M'[j][i] * k1[i]) * beta1
+
+Numbers: reference delta rms **0.01905**, engine delta rms **0.00027** (max diff
+0.288). Position 0 matched, so the divergence is in carrying the state: the
+engine's updated term is 70x too small relative to `v1`, which means the state it
+reads back is not `M` (or the decay/beta applied to it is not the one the dumps
+show). Position 0's own state write is unverified, so both halves are suspect:
+
+1. the state written after token 0 (`row[i] += k[i]*delta[j]` in
+   `DeltaRuleKernel`), and
+2. the decay `row[i] *= exp(g[i])` read back at token 1.
+
+Next concrete step: dump `delta_state[0]` after token 0 and compare with
+`k0[i]*v0[j]*beta0` elementwise (2 MiB dump); that splits the two.
