@@ -149,6 +149,28 @@ a code task, so the code is left on the bit-identical path. The head gains nothi
 the same reason as before: it is bandwidth-bound, and its lanes idling does not matter
 when the weights stream at 237 GB/s.
 
+### One block per row, one warp per Q4_K group — slower, reverted
+
+Attempt at the remaining MoE inefficiency (~40-47 GB/s effective against a 237 GB/s
+bound). Instead of giving a lane a whole group to walk serially, each block took one
+output row and each of its eight warps took one Q4_K group, so a group's 32 quantised
+values are 32 contiguous bytes and the inner sum is a warp reduction:
+
+| | decode |
+| --- | --- |
+| before | 16.91 tok/s |
+| block-per-row (8 warps, one per group) | **12.77 tok/s** |
+
+**Slower.** Each warp then reads only 32 bytes, so a 128-byte cache line is touched by
+four different warps and the line is fetched once but used by one; and the shape pays a
+warp reduction plus `__syncthreads` for every 256-wide block (ten per row) instead of
+reducing once per row. Reverted.
+
+The lesson for the next attempt: keep one warp per row (so its 1440-byte row streams
+through whole cache lines) and vectorise *inside* the lane — load the 144-byte block as
+nine 16-byte vectors and extract nibbles from registers — rather than spreading the row
+across more warps.
+
 ## Where the time goes now (decode, 8 tokens, this box)
 
 | group | ms/token | share |
