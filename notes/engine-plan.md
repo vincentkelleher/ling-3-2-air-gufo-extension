@@ -205,3 +205,25 @@ the engine:
 
 Next: dump logits at every prefill position (`dump_raw` in the prefill loop) and
 align them with the perplexity file's rows; report RMS and argmax agreement.
+
+## Next step, precisely: verify position 1 (the state update)
+
+Every position-0 stage is verified, so the remaining error must be in the
+recurrent state or in the end-to-end comparison. The cheapest decisive check is
+the delta rule at position 1, which is closed-form from position-0 dumps:
+
+    M1[j][i] = k0[i] * v0[j] * beta0            (state after token 0)
+    M1'[j][i] = M1[j][i] * exp(g1[i])           (decay at token 1)
+    delta1[j] = (v1[j] - sum_i M1'[j][i] * k1[i]) * beta1
+
+Run a two-token prompt with `LING3_DUMP=1`, keep position 0's `kn`/`cv`/`beta`/
+`gate`, dump position 1's, and compare `d_delta.bin` against the formula above.
+If it matches, the state is right and the difference is only in the end-to-end
+comparison; if not, the conv shift (`LaunchConv1dStep` state rotation) or the
+decayed-state multiply is wrong.
+
+Also note for the llama.cpp comparison: `--save-all-logits` writes a **custom
+file**, not raw float rows — 4,401,412 bytes with a 260-byte header that starts
+with ASCII text and includes `n_vocab` and a token count, followed by 7 rows
+that contain 87 NaNs. Decode that header (or use token equality instead of
+logits) before comparing.
