@@ -265,3 +265,26 @@ Next step (removes the ambiguity): have the kernel itself dump `dot` (the
 `sum_i M'[j][i]*k[i]` term) for block 0 at position 1, and compare against
 `(v1 - dot)/beta1` in numpy. That is a single number per head-dim, so it cannot
 be an artefact of mixing dumps from different positions.
+
+### The kernel's `g` is not the buffer that was dumped
+
+Numbers from the two-position experiment:
+
+| quantity | value |
+| --- | --- |
+| state after token 1 vs `M0*exp(g1) + k1 (x) delta1` | 0.0363 |
+| state after token 1 vs `M0 + k1 (x) delta1` (no decay) | **0.00161** |
+| `exp(g1)` rms from the dumped gate | 0.7038 |
+| engine-implied `dot` rms vs `v1` rms | 0.0219 vs 0.0220 |
+
+So the stored state is the *undecayed* update, even though `DeltaRuleKernel`
+does `row[i] *= decay[i]` with `decay[j] = expf(g[head*head_dim + j])`, and the
+`g` buffer dumped in the same iteration has rms `exp` of 0.70. The kernel must be
+reading a different `g` than `m.kda_gate` (or reading it before it is written:
+`LaunchKdaGate` and the delta rule are on the same stream, so ordering should
+hold — unless the gate buffer is reused by another launch in between).
+
+Next step: in `DeltaRuleKernel`, dump `decay[0..head_dim)` for head 0 to a file
+on the first call, and compare with `expf(d_gate.bin[0..128])`. If they differ, the
+pointer is wrong; if they match, the multiply is being lost (e.g. a compiler or
+aliasing problem) and the fix is to write the decayed state explicitly.
