@@ -46,3 +46,17 @@ ling3_air compiled in; a stock Gufo 0.36.0 takes the module with a plain
 `install`. Both were checked: the module is built from the extension source by
 Gufo itself (CMake configure + Ninja in `.staging`), and the installed module is
 what `diagnose` then reports (`source: module:.../gufo-ext-ling3_air.so`).
+
+## Re-validated 2026-11-27 (after the engine and kernel work)
+
+Rebuilt the HIP library and the module from the current tree against Gufo 0.36.0
+(extension API 0.3.42) and installed it into a fresh store:
+
+    Installed ling3_air 0.1.0 (/work/ext-build, sha256 fe341482b423)
+    diagnose --section extensions --json ->
+      "builtExtensions": [{"name": "ling3_air", "version": "0.1.0",
+       "source": "module:/work/ext-store2/ling3_air/modules/...so"}]
+
+So the module route still works with the integer-dot kernels, the explicit
+stream and the zero-copy engine: `gufo extension install` compiles the
+repository, and the installed module is what `diagnose` reports.
