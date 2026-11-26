@@ -1168,10 +1168,9 @@ bool Engine::PrefillChunk(const std::int32_t* tokens, std::size_t count,
     const std::size_t inner = kda ? kda_inner : v_dim;
     hip::LaunchGemm(dev(out_weight), Storage(out_weight.type), n_embd, inner, m.bgated,
                     M, inner, m.battn, n_embd, stream);
-    for (int i = 0; i < M; ++i) {
-      const std::size_t row = static_cast<std::size_t>(i) * n_embd;
-      hip::LaunchAxpy(m.bx + row, m.battn + row, 1.0f, n_embd, stream);
-    }
+    // One add for the whole chunk: both buffers are contiguous, so the per-token loop was
+    // 32 launches of a 2 560-element axpy where one launch does all of them.
+    hip::LaunchAxpy(m.bx, m.battn, 1.0f, static_cast<std::size_t>(M) * n_embd, stream);
     if (stop_after_block >= 0 && static_cast<std::int32_t>(il) == stop_after_block) {
       hipStreamSynchronize(stream);
       return true;
@@ -1187,10 +1186,7 @@ bool Engine::PrefillChunk(const std::int32_t* tokens, std::size_t count,
       hip::LaunchMulInto(m.bffa, m.bffb, m.bffa, M * c.n_ff, stream);
       hip::LaunchGemm(dev(layer.ffn_down), Storage(layer.ffn_down.type), n_embd, c.n_ff,
                       m.bffa, M, c.n_ff, m.bffout, n_embd, stream);
-      for (int i = 0; i < M; ++i) {
-        const std::size_t row = static_cast<std::size_t>(i) * n_embd;
-        hip::LaunchAxpy(m.bx + row, m.bffout + row, 1.0f, n_embd, stream);
-      }
+      hip::LaunchAxpy(m.bx, m.bffout, 1.0f, static_cast<std::size_t>(M) * n_embd, stream);
     } else {
       // One router GEMM for the whole chunk instead of a GEMV and a copy per token: the
       // projections for the chunk are already batched, and the router was the last per-token
@@ -1221,10 +1217,7 @@ bool Engine::PrefillChunk(const std::int32_t* tokens, std::size_t count,
       hip::LaunchMulInto(m.bffa, m.bffb, m.bffa, M * c.n_ff_shexp, stream);
       hip::LaunchGemm(dev(layer.down_shexp), Storage(layer.down_shexp.type), n_embd,
                       c.n_ff_shexp, m.bffa, M, c.n_ff_shexp, m.bffout, n_embd, stream);
-      for (int i = 0; i < M; ++i) {
-        const std::size_t row = static_cast<std::size_t>(i) * n_embd;
-        hip::LaunchAxpy(m.bx + row, m.bffout + row, 1.0f, n_embd, stream);
-      }
+      hip::LaunchAxpy(m.bx, m.bffout, 1.0f, static_cast<std::size_t>(M) * n_embd, stream);
     }
   }
 
