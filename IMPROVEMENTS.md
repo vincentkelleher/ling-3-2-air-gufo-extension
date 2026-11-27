@@ -554,11 +554,12 @@ are unchanged by construction.
 | + KDA k, v, f_a, g_a | 18.99 |
 | + MLA q, kv_a, out | 19.15 |
 | + LM head (Q8_0, 0.43 GB/token) | 19.34 |
-| + KDA output projection | **19.63-19.72** |
+| + KDA output projection | 19.63-19.72 |
+| + router projection | **19.85** (median of 3) |
 
 Correctness held at every step: `ctest` 10/10 and `tools/golden_set_ids.py` unchanged at plain 19 /
 arithmetic none / tool-call 16 / thinking-on 2, i.e. identical greedy output at +13 % throughput. That
-is 39 % of the roofline, up from 34 %, with the 60 % gate still ahead. Re-verified at the final state:
+is 39.8 % of the roofline (19.85 tok/s), up from 34 %, with the 60 % gate still ahead. Re-verified at the final state:
 `ctest` 10/10 and the golden set unchanged at plain 19 / arithmetic none / tool-call 16 /
 thinking-on 2.
 

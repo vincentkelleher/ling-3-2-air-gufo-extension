@@ -969,8 +969,15 @@ bool Engine::ForwardFromEmbedded(std::uint32_t position, std::string* error) {
                      c.n_ff, m.ffn_h, 1.0f, m.x, m.expert_gate, m.expert_up,
                      m.expert_down, stream);
     } else {
-      hip::LaunchGemv(dev(layer.gate_inp), Storage(layer.gate_inp.type),
-                      c.n_expert, n_embd, m.ffn_h, m.moe_logits, stream);
+      if (Storage(layer.gate_inp.type) == hip::kQ8_0) {
+        hip::LaunchQuantizeActivations32(m.ffn_h, n_embd, m.act_values, m.act_scales32,
+                                         stream);
+        hip::LaunchGemvPrepared(dev(layer.gate_inp), hip::kQ8_0, c.n_expert, n_embd,
+                                m.act_values, m.act_scales32, m.moe_logits, stream);
+      } else {
+        hip::LaunchGemv(dev(layer.gate_inp), Storage(layer.gate_inp.type), c.n_expert,
+                        n_embd, m.ffn_h, m.moe_logits, stream);
+      }
       hip::LaunchRouterSelect(m.moe_logits,
                               static_cast<const float*>(dev(layer.exp_probs_b)),
                               c.n_expert, c.n_group, c.n_group_used,
