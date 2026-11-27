@@ -221,3 +221,20 @@ The precise next step, cheap and decisive: dump the router's selected expert ids
 existing `d2_ids` dump covers block 2 only) and compare them with the reference's `ffn_moe_topk`
 tensor, which `build_moe_ffn` reports through `cb`. If the ids differ, the fault is in routing at
 that layer (group config or bias); if they match, it is in the expert arithmetic itself.
+
+### The ids dump cannot be trusted; use stderr instead
+
+Extending the dump to block 40 gave router logits that look correct on both a known-good and the
+suspect layer (block 2: 512 values from -6.28 to -2.72; block 40: -8.02 to -1.02) while the **ids
+are all zeros on both** — impossible given distinct logits, so the ids file is not showing the
+router's actual selection. Do not build conclusions on it.
+
+The next probe should print the selected ids to stderr from the call site (like the probability
+trace that found the softmax bug), not through a file: several of the file-based dumps in this
+engine have needed a staging fix or a stream synchronise before they told the truth, and that cost
+more time than the bug itself.
+
+With routing indistinguishable at block 40 and blocks 0-39 matching to four decimals, the
+remaining explanations for the block-40 overshoot are (a) a routing difference that only the
+stderr trace can settle, or (b) the expert arithmetic for that layer, e.g. a per-layer expert
+tensor whose quantization type our dequantiser mishandles.

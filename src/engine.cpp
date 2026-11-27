@@ -842,11 +842,13 @@ bool Engine::ForwardFromEmbedded(std::uint32_t position, std::string* error) {
                               c.n_expert, c.n_group, c.n_group_used,
                               c.n_expert_used, c.expert_weights_scale, m.moe_ids,
                               m.moe_weights, stream);
-      if (il == 2) {
-        dump_raw("/work/d2_ffnh.bin", m.ffn_h, n_embd);
-        dump_raw("/work/d2_logits.bin", m.moe_logits, c.n_expert);
-        dump_raw("/work/d2_ids.bin", reinterpret_cast<const float*>(m.moe_ids),
-                 c.n_expert_used * 0 + 8);
+      if (il == 2 || il == 40) {
+        char path[64];
+        std::snprintf(path, sizeof(path), "/work/moe_ids_%u.bin", il);
+        dump_raw(path, reinterpret_cast<const float*>(m.moe_ids),
+                 static_cast<std::size_t>(c.n_expert_used) * 4);
+        std::snprintf(path, sizeof(path), "/work/moe_logits_%u.bin", il);
+        dump_raw(path, m.moe_logits, c.n_expert);
       }
       hip::LaunchMoeGather(dev(layer.gate_exps), Storage(layer.gate_exps.type),
                            dev(layer.up_exps), Storage(layer.up_exps.type),
