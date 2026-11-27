@@ -289,3 +289,25 @@ token) with `LING3_FINAL_LOGITS_F32`, feed the same prompt ids to the llama refe
 (already supports an explicit id list), and compare the top-5 and the softmax margin for id `×`
 against id 3105. A margin of a few hundredths says numerics; a wide gap says something structural
 still remains.
+
+## The golden harness was comparing different contexts (2026-11-27)
+
+Feeding both sides the *same token ids* makes the arithmetic case match **exactly** for 8 tokens
+(`16 22 3105 220 17 18 13 2954`), while `llama-completion -f` on the rendered prompt file answers
+`17 × 23 =`. The two were never in the same context: the CLI applies its own BOS and whitespace
+handling. So the text-based divergences (93 / 3 / 110 / 157 characters) mixed harness error with
+model error.
+
+`tools/golden_set_ids.py` replaces it: the engine tokenises the rendered prompt, then both sides are
+fed that exact id list (`tools/llama_greedy_ids.cpp` for the reference, `LING3_GREEDY_FROM_IDS` for
+the engine) and decoded greedily. Measured at 32 tokens:
+
+| case | result | first divergence |
+| --- | --- | --- |
+| plain | no | token 19 (engine 289, llama 259) |
+| arithmetic | **yes** | — |
+| tool-call | no | token 0 (engine 678, llama 156896) |
+| thinking-on | no | token 2 (engine 341, llama 18549) |
+
+`tool-call` diverging at the first token is the sharpest remaining lead: the context is identical,
+so that is a model difference on that prompt, not an index or framing error.

@@ -230,6 +230,27 @@ int main(int argc, char** argv) {
   }
 
   // An explicit id list, so the same contexts as the llama.cpp reference can be fed.
+  // Greedy decode from an explicit id list, so the reference comparison starts from the
+  // same context instead of two framings of the same prompt.
+  if (const char* ids = std::getenv("LING3_GREEDY_FROM_IDS")) {
+    std::size_t position = 0;
+    for (const char* p = ids; *p != '\0';) {
+      char* end = nullptr;
+      const long value = std::strtol(p, &end, 10);
+      if (end == p) { if (*p == ',') { ++p; continue; } break; }
+      if (!engine->ForwardToken(static_cast<std::int32_t>(value),
+                                static_cast<std::uint32_t>(position++), &error)) return 1;
+      p = end;
+    }
+    std::printf("ids");
+    for (int step = 0; step < steps; ++step) {
+      const std::int32_t next = engine->Argmax();
+      std::printf(" %d", static_cast<int>(next));
+      if (!engine->ForwardToken(next, static_cast<std::uint32_t>(position++), &error)) return 1;
+    }
+    std::printf("\n");
+    return 0;
+  }
   if (const char* ids = std::getenv("LING3_TOKEN_IDS")) {
     std::size_t position = 0;
     for (const char* p = ids; *p != '\0';) {
