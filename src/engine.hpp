@@ -74,12 +74,6 @@ class Engine {
                                   std::uint32_t start_position,
                                   std::int32_t* argmax_per_row, std::string* error);
 
-  /// Clears the recurrent state a prompt starts from: KDA conv and delta state and every MLA
-  /// latent cache. The buffers are zero at load, so this returns the engine to its pristine
-  /// state — what a fresh prompt must start from, since a previous request's history otherwise
-  /// leaks into it.
-  void ResetState();
-
   /// Snapshots / restores the trunk state (KDA conv+delta, MLA caches).
   void SnapshotState();
   /// The snapshot buffer's device address and size in floats: the same bytes

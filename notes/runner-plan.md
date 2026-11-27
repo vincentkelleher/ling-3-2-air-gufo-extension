@@ -511,3 +511,17 @@ With that, both a cache restore and a same-session reuse become "restore the fro
 tokens after it", which is the semantics the host assumes. The no-cache case additionally needs the
 host to ask for that restore — if it does not, the runner can still detect it in `SelectNext`
 (frontier != live position and a new prompt was prepared) and restore the frontier itself.
+
+### `Engine::ResetState` was removed (2026-11-27)
+
+The first attempt at per-request determinism was an `Engine::ResetState()` that `hipMemset` zeroed
+every KDA conv/delta buffer and MLA cache, called from `Prefill` when `offset == 0`. It **aborted the
+server** with `__amd_rocclr_fillBufferUnAligned` — a write to a read-only page — because the memset
+size is derived from `m.options.max_context`, which need not equal the context the cache buffers were
+allocated with (the host may create the engine with its own context). Removed, along with the two
+call sites, and serving verifies 200 again.
+
+The lesson for the frontier work: any state-wide operation must derive its extent from the
+*allocation*, not from a configuration field that can differ (the same class of bug as the 26 GB
+snapshot claim earlier, where the size came from the model's trained context rather than the serving
+one).

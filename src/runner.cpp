@@ -470,11 +470,6 @@ TextPrefillStep Ling3Runner::Prefill(TextRunnerState& state,
   // The engine's chunked pass has a fixed width (Engine::PrefillChunk's buffer); a
   // larger request would run past it. Clamping here also gives the host the frontier it
   // expects: it simply asks for the next pass.
-  if (offset == 0) {
-    // A fresh prompt: without this the previous request's KDA conv/delta history and MLA rows
-    // leak in, and two identical requests produce different output.
-    runner_state.engine().ResetState();
-  }
   const std::size_t limit = std::min<std::size_t>(max_input_tokens, 32);
   const std::size_t end = std::min(prompt.size(), offset + limit);
   std::vector<std::int32_t> ids(prompt.begin() + offset, prompt.begin() + end);
