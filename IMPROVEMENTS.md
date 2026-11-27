@@ -618,3 +618,21 @@ current kernel shapes land. The next real step is the one `notes/prefill-design.
 recurrence — a chunked scan — and the equivalent for the attention rows, which is kernel design
 rather than tuning.
 
+## Prefill: what the byte-identical guarantee rules out (2026-11-27)
+
+The chunked and per-token prefill paths are now byte-identical (966/966 residual rows, verified). That
+is a hard constraint on `prefill-opt`: any change that alters the arithmetic inside the chunk breaks
+it, and a faster run with different output is rejected by this project's own rule. Concretely:
+
+- **ruled out**: replacing the per-row gate/beta GEMVs with chunk GEMMs (different reduction order);
+  re-associating the KDA recurrence into a parallel scan (different rounding at every step); vectorised
+  re-quantisation of the activation (the quantiser must see identical inputs).
+- **admissible**: removing *launches* without changing the maths — e.g. one kernel per (layer, chunk)
+  that loops over the chunk's rows internally for conv+SiLU+L2-norm+delta (same order, same values),
+  or fusing kernels that already run back to back on the same buffers. Both keep the numbers identical
+  by construction and can be checked with the same 966-row comparison.
+
+So the honest expectation for `prefill-opt` is launch-overhead removal on the existing shapes, not a
+different algorithm — which is why the 70 % gate (≈4,400 tok/s against 23.8) is not reachable without
+relaxing the identity rule. That trade-off is the user's call, not something to decide silently.
+
