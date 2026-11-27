@@ -98,3 +98,16 @@ Not yet excluded: the `q_pe` rope at position >= 1, and what the score reads fro
 
 `LING3_ROPE` cannot be used as a probe on the sequential path: that call hardcodes `true` (neox), so
 the option has no effect there and must be fixed before the switch means anything.
+
+### Probes that did not resolve it
+
+`LING3_ROPE` was hardcoded to neox on the sequential MLA path (two `LaunchRope` calls passed a
+literal `true`); that is fixed, so the switch now reaches the kernel. Comparing the two conventions
+changed the dumped `d5_qpe.bin` but left `attn_5_1.bin` byte-identical, which cannot both be true for
+a score that reads `q_pe` — so the dump and the score are not reading the same code path, and the
+rope probe is inconclusive until the *sequential* path's scores are dumped (the `d5_*` dumps are
+written from the chunked prefill branch, while the decode route runs `ForwardFromEmbedded`).
+
+That is the next step, and it is well defined: dump `m.scores` inside the sequential MLA branch, then
+recompute the expected probabilities in numpy from the reference's `q_b` and the cached row, and
+compare probabilities rather than outputs.

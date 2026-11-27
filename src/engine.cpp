@@ -1247,8 +1247,8 @@ bool Engine::PrefillChunk(const std::int32_t* tokens, std::size_t count,
         hip::LaunchSplitQ(q_row, m.qn, m.q_pe, heads, c.NopeDim(), c.n_rot, stream);
         hip::LaunchRmsNorm(kv_ptr, static_cast<const float*>(dev(layer.mla_kv_a_norm)),
                            m.latent, 1, latent, eps, stream);
-        hip::LaunchRope(m.q_pe, heads, c.n_rot, c.n_rot, position, c.rope_freq_base, true,
-                        stream);
+        hip::LaunchRope(m.q_pe, heads, c.n_rot, c.n_rot, position, c.rope_freq_base,
+                        m.rope_neox, stream);
         hip::LaunchRope(kv_ptr + latent, 1, c.n_rot, c.n_rot, position,
                         c.rope_freq_base, true, stream);
         hip::LaunchMlaAppend(m.latent, kv_ptr + latent, m.mla_cache[il], position, latent,
@@ -1394,8 +1394,8 @@ bool Engine::ForwardMtp(std::int32_t token, std::uint32_t position,
                   latent + c.n_rot, n_embd, m.h, m.kvq, stream);
   hip::LaunchRmsNorm(m.kvq, static_cast<const float*>(dev(layer.mla_kv_a_norm)),
                      m.latent, 1, latent, eps, stream);
-  hip::LaunchRope(m.q_pe, heads, c.n_rot, c.n_rot, position, c.rope_freq_base, true,
-                  stream);
+  hip::LaunchRope(m.q_pe, heads, c.n_rot, c.n_rot, position, c.rope_freq_base,
+                  m.rope_neox, stream);
   hip::LaunchRope(m.kvq + latent, 1, c.n_rot, c.n_rot, position, c.rope_freq_base,
                   true, stream);
   hip::LaunchMlaAppend(m.latent, m.kvq + latent, m.mla_cache[c.n_layer], position,
