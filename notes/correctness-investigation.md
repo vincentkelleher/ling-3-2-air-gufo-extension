@@ -380,3 +380,32 @@ so the 2.5 scale placement (normalise then scale, which we do, versus scale then
 the source suggests is equivalent) is not verified against data — only against reading. With the dot
 paths pinned to 1e-4, a 0.26 % difference at block 0 remains unexplained and would be settled fastest
 by a reference that reports `ffn_moe_weights`, which this fork's dumper does not.
+
+## The chunked prefill path disagrees with the sequential one (found 2026-11-27)
+
+The engine implements the same block math twice: `Engine::PrefillChunk` (batched, used by serving
+prefill) and `Engine::ForwardToken` (per token, used by decode). Run on the *same* prompt and
+compared at the same final position, they disagree:
+
+| block | rel (sequential vs chunked) |
+| --- | --- |
+| 0 | 3.0e-03 |
+| 1 | 3.5e-03 |
+| 5 | 8.6e-03 |
+| 20 | 5.4e-02 |
+| 41 | 1.6e-01 |
+
+Two implementations of identical arithmetic must agree to ~1e-6, so this is a defect rather than an
+accumulation-order effect — and the note in `docs/quality.md` that "chunked prefill sums the same
+products in a different order, so it perturbs greedy output at these margins" understates it by three
+orders of magnitude.
+
+It also reframes the reference comparison: our per-block agreement with llama.cpp (0.3-4 %) was
+measured on the *sequential* path, and 3e-03 at block 0 is the same magnitude as the unexplained
+0.26 % there. Since serving prefills chunked and decodes sequentially, the mismatch perturbs every
+served request and is the most likely cause of the golden divergence indices.
+
+Block 0 is dense (`leading_dense_block_count = 2`), so the suspects are narrow: the batched GEMM used
+for the chunk (`LaunchGemm` on Q4_K/Q6_K) versus the per-token GEMV the sequential path uses, or the
+chunked KDA step. Bisect with a two-token prompt so the prefill covers exactly one token, and compare
+that token's block-0 residual between the two paths.
