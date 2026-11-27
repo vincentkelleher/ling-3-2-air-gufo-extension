@@ -587,3 +587,18 @@ kernel can be used. Worth
 doing: the prepared dot is the hot loop of every projection, and four int8 products per instruction
 is the cheapest remaining lever now that the activation quantisation is hoisted.
 
+
+### dot4 in the prepared Q8_0 dot: enabled, then reverted (results changed)
+
+Enabling the feature for the translation unit works — `extension.cmake` gained
+`set_source_files_properties(.../src/hip/kernels.hip PROPERTIES COMPILE_OPTIONS "-mllvm;-amdgpu-enable-dot1-insts")`
+and the plain `__builtin_amdgcn_sdot4` loop compiles with no attribute (which is what broke
+registration). But wiring it into `GemvPreparedKernel<kQ8_0>` made `ling3_air.dot` fail and the decode
+benchmark crash, i.e. the intrinsic is not the plain signed 4-way dot its name suggests in this
+toolchain — most likely the `negate`/signedness operand order, or `sdot4` being the unsigned variant.
+
+Both the kernel and the cmake flag were reverted; decode is back to the verified **19.26 tok/s** with
+`ctest` 10/10 and unchanged golden output. Next attempt should validate the intrinsic in isolation
+first — a tiny test comparing `sdot4(w, a, 0, false)` against the scalar sum of four int8 products —
+before it goes anywhere near a hot loop.
+
