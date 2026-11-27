@@ -432,6 +432,21 @@ So the two paths are not equivalent: they agree to 0.6 % at the first block and 
 This is the strongest defect signal found in this repository, and it explains why served output
 (chunked prefill) and harness output (sequential) behave differently on the same prompt.
 
+### First fix: the Q8_0 batched GEMM did not quantise its activation
+
+`GemmKernel<kQ8_0>` multiplied dequantised weights by the raw f32 activation, while its per-token
+counterpart `DotRow<kQ8_0>` quantises the activation per 32-value block (`d = amax/127`,
+`__float2int_rn`, clamp ±127) — which is also what llama.cpp does. The chunked and per-token paths
+therefore computed different products for every Q8_0 weight.
+
+After aligning the GEMM to the same scheme, block 0 (whose attention weights are Q8_0) goes from
+5.9e-03 to **1.3e-07** on both the attention contribution and the residual: the two paths now agree
+to rounding at that block. Divergence now starts at block 1 (9.2e-04) and still grows with depth, so
+the same class of mismatch exists for at least one more weight type; Q4_K and Q6_K use identical
+quantisers in both paths (`QuantizeGemmActivationsKernel` and `ActivationScale` both compute
+`amax/127` with the same rounding and clamp), so the next suspect is a projection that reaches the
+batched path through a different kernel than the per-token path uses.
+
 Two discriminators have been tried and are not usable as-is: `LING3_CHUNK_BLOCK` returns before the
 FFN, and `LING3_CHUNK_SIZE` did not change any result in this mode (the run with size 1 was
 bit-identical to size 8), so the chunk-width lever needs verifying before it can attribute the

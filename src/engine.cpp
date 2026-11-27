@@ -1313,6 +1313,21 @@ bool Engine::PrefillChunk(const std::int32_t* tokens, std::size_t count,
     const std::size_t inner = kda ? kda_inner : v_dim;
     hip::LaunchGemm(dev(out_weight), Storage(out_weight.type), n_embd, inner, m.bgated,
                     M, inner, m.battn, n_embd, stream);
+    if (std::getenv("LING3_DUMP_BLOCKS") != nullptr) {
+      // Attention contribution of the chunk's last row: the same quantity the per-token
+      // path writes to attn_<block>_<position>.bin, so attention and FFN can be separated.
+      std::vector<float> row(n_embd);
+      hipStreamSynchronize(stream);
+      hipMemcpy(row.data(), m.battn + static_cast<std::size_t>(M - 1) * n_embd,
+                n_embd * sizeof(float), hipMemcpyDeviceToHost);
+      char path[64];
+      std::snprintf(path, sizeof(path), "/work/xca_%u.bin", il);
+      FILE* file = std::fopen(path, "wb");
+      if (file != nullptr) {
+        std::fwrite(row.data(), sizeof(float), n_embd, file);
+        std::fclose(file);
+      }
+    }
     // One add for the whole chunk: both buffers are contiguous, so the per-token loop was
     // 32 launches of a 2 560-element axpy where one launch does all of them.
     hip::LaunchAxpy(m.bx, m.battn, 1.0f, static_cast<std::size_t>(M) * n_embd, stream);

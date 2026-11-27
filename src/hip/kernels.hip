@@ -703,13 +703,27 @@ __global__ void GemmKernel(const std::uint8_t* weights, const float* x, float* y
     // Spread *elements* across the block, not 32-weight blocks: with one thread
     // per block only 80 of 256 threads worked, so per-thread work grew with the
     // batch and the weight read never amortised (measured 8.8x for batch 8).
+    // Quantise the activation per 32-value block exactly as DotRow<kQ8_0> does (and as
+    // llama.cpp does): dequantising the weight and multiplying by an f32 activation made
+    // this branch disagree with the per-token path by ~0.5 % per matvec.
     const auto* blocks = reinterpret_cast<const BlockQ8_0*>(weight_row);
-    for (int k = threadIdx.x; k < cols; k += blockDim.x) {
-      const int b = k / 32;
-      const float weight =
-          HalfToFloat(blocks[b].d) * static_cast<float>(blocks[b].qs[k % 32]);
+    for (int b = threadIdx.x; b < cols / 32; b += blockDim.x) {
+      const float weight_d = HalfToFloat(blocks[b].d);
       for (int m = 0; m < batch; ++m) {
-        accumulator[m] += weight * x[m * x_stride + k];
+        const float* row = x + static_cast<std::size_t>(m) * x_stride + b * 32;
+        float amax = 0.0f;
+        for (int i = 0; i < 32; ++i) {
+          amax = fmaxf(amax, fabsf(row[i]));
+        }
+        const float scale = amax > 0.0f ? amax / 127.0f : 1.0f;
+        const float inverse = 1.0f / scale;
+        int total = 0;
+        for (int i = 0; i < 32; ++i) {
+          int a = __float2int_rn(row[i] * inverse);
+          a = a > 127 ? 127 : (a < -127 ? -127 : a);
+          total += static_cast<int>(blocks[b].qs[i]) * a;
+        }
+        accumulator[m] += weight_d * scale * static_cast<float>(total);
       }
     }
   } else if constexpr (TYPE == kQ4K) {
