@@ -453,6 +453,20 @@ attn_output, ffn_gate/up/down), block 0 agrees to 1.3e-07 after the fix, and blo
 identical inputs and identical matvecs — the conv step, the delta rule, the gate, or the L2 norm —
 reached through different buffers (`m.bq`/`m.bk`/`m.bv` rows versus `m.q`/`m.k`/`m.v`).
 
+**Located exactly.** With `LING3_STATE_TAG`, both paths dump their recurrent state after prefill at
+the same position. Measured on block 1:
+
+| state | chunked vs sequential |
+| --- | --- |
+| conv state (3 channels x 3 rows) | **1.0e-07** (identical) |
+| delta state (32 heads x 128 x 128) | **4.7e-04** |
+
+So the projections, the conv and the SiLU feeding it all agree, and the divergence is in the KDA
+delta-rule state update itself — which is exactly the magnitude seen at block 1 (9.2e-04 in the
+attention contribution) and the seed of everything downstream. The remaining suspects are the
+per-row inputs the chunked path hands that kernel (L2-normed q/k, the gated v, the decay gate, beta)
+or the buffer it accumulates into.
+
 Next concrete step, using the instrument that localized block 0: dump the chunked path's per-row KDA
 intermediates (`cq`/`ck`/`cv` after conv + SiLU, `kda_gate`, `beta`, the delta-rule output) next to
 the per-token path's `p_convq_<pos>`/`ling3_cq0` dumps, and compare them in order. The first of those

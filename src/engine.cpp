@@ -896,6 +896,28 @@ bool Engine::ForwardFromEmbedded(std::uint32_t position, std::string* error) {
     mark(il, 2);
   }
 
+  if (const char* tag = std::getenv("LING3_STATE_TAG")) {
+    // Recurrent state after prefill, so the two implementations can be compared at the
+    // layer where their outputs first differ.
+    hipStreamSynchronize(stream);
+    char path[96];
+    std::snprintf(path, sizeof(path), "/work/state_conv_%s.bin", tag);
+    if (FILE* file = std::fopen(path, "wb")) {
+      std::vector<float> host(9 * static_cast<std::size_t>(kda_inner));
+      hipMemcpy(host.data(), m.conv_state[1], host.size() * sizeof(float),
+                hipMemcpyDeviceToHost);
+      std::fwrite(host.data(), sizeof(float), host.size(), file);
+      std::fclose(file);
+    }
+    std::snprintf(path, sizeof(path), "/work/state_delta_%s.bin", tag);
+    if (FILE* file = std::fopen(path, "wb")) {
+      std::vector<float> host(static_cast<std::size_t>(heads) * kda_dim * kda_dim);
+      hipMemcpy(host.data(), m.delta_state[1], host.size() * sizeof(float),
+                hipMemcpyDeviceToHost);
+      std::fwrite(host.data(), sizeof(float), host.size(), file);
+      std::fclose(file);
+    }
+  }
   report("final", c.n_layer);
   hip::LaunchRmsNorm(m.x, static_cast<const float*>(dev(weights.output_norm)), m.h, 1,
                      n_embd, eps, stream);
@@ -1394,6 +1416,29 @@ bool Engine::PrefillChunk(const std::int32_t* tokens, std::size_t count,
         std::fwrite(row.data(), sizeof(float), n_embd, file);
         std::fclose(file);
       }
+    }
+  }
+
+  if (const char* tag = std::getenv("LING3_STATE_TAG")) {
+    // Same dump as the per-token path, so a chunked prefill's recurrent state can be
+    // compared with a sequential one at the same position.
+    hipStreamSynchronize(stream);
+    char path[96];
+    std::snprintf(path, sizeof(path), "/work/state_conv_%s.bin", tag);
+    if (FILE* file = std::fopen(path, "wb")) {
+      std::vector<float> host(9 * static_cast<std::size_t>(kda_inner));
+      hipMemcpy(host.data(), m.conv_state[1], host.size() * sizeof(float),
+                hipMemcpyDeviceToHost);
+      std::fwrite(host.data(), sizeof(float), host.size(), file);
+      std::fclose(file);
+    }
+    std::snprintf(path, sizeof(path), "/work/state_delta_%s.bin", tag);
+    if (FILE* file = std::fopen(path, "wb")) {
+      std::vector<float> host(static_cast<std::size_t>(heads) * kda_dim * kda_dim);
+      hipMemcpy(host.data(), m.delta_state[1], host.size() * sizeof(float),
+                hipMemcpyDeviceToHost);
+      std::fwrite(host.data(), sizeof(float), host.size(), file);
+      std::fclose(file);
     }
   }
 
