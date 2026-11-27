@@ -939,6 +939,15 @@ bool Engine::ForwardFromEmbedded(std::uint32_t position, std::string* error) {
         std::snprintf(path, sizeof(path), "/work/moe_logits_%u.bin", il);
         dump_raw(path, m.moe_logits, c.n_expert);
       }
+      if (const char* forced = std::getenv("LING3_FORCE_EXPERT")) {
+        // Measurement knob: pin every token to one expert so the gather's memory locality is
+        // perfect. Changes the output by design; only timings are meaningful.
+        const std::int32_t id = static_cast<std::int32_t>(std::atoi(forced));
+        std::vector<std::int32_t> forced_ids(static_cast<std::size_t>(c.n_expert_used), id);
+        hipMemcpyAsync(m.moe_ids, forced_ids.data(),
+                       forced_ids.size() * sizeof(std::int32_t), hipMemcpyHostToDevice,
+                       stream);
+      }
       hip::LaunchMoeGather(dev(layer.gate_exps), Storage(layer.gate_exps.type),
                            dev(layer.up_exps), Storage(layer.up_exps.type),
                            dev(layer.down_exps), Storage(layer.down_exps.type),
