@@ -319,3 +319,21 @@ Trying to isolate the last few percent at the head did not converge: selecting `
 `result_norm` in the reference dumper produced no files even though the run completed, so that
 observer is still not reporting what it selects. Treat the head comparison as open until the dumper
 is proven to write those tensors.
+
+## Why a few percent remains: activation quantisation schemes differ
+
+Checked this session: the LM head is `Q8_0 [2560, 157184]` and `token_embd` is `Q8_0` too, so the
+engine's "prepared" (quantise-the-activation) path never applies to the head — `LING3_HEAD_PLAIN`,
+added to test exactly that, is correctly inert and measured identical. The final logits are computed
+by a plain Q8_0 GEMV, so the remaining few-percent gap is not an avoidable approximation at the head.
+
+The residual difference is upstream and is a *scheme* difference, not an obvious bug: llama.cpp's CPU
+backend quantises the activation row before a Q4_K matvec too (`ggml_vec_dot_q4_K_q8_K`), but with
+Q8_K blocks — 256 elements with 8-bit sub-block scales — while our kernels use a 32-element
+Q8_0-style layout with fp16 scales. Both are quantised; they are not the same quantisation, so
+results differ by a fraction of a percent per matvec, which accumulates to the observed
+0.3-4 % residual spread and flips near ties (golden divergences at tokens 19 / 16 / 2).
+
+Reproducing llama.cpp token-for-token therefore most likely means reproducing its Q8_K activation
+quantisation for Q4_K/Q6_K matvecs, not further tuning of the f32 paths. That is a contained but
+real piece of work, and it is where the next session should start.

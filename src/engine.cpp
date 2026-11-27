@@ -899,8 +899,14 @@ bool Engine::ForwardFromEmbedded(std::uint32_t position, std::string* error) {
   report("final", c.n_layer);
   hip::LaunchRmsNorm(m.x, static_cast<const float*>(dev(weights.output_norm)), m.h, 1,
                      n_embd, eps, stream);
-  if (Storage(weights.output.type) == hip::kQ4K ||
-      Storage(weights.output.type) == hip::kQ6K) {
+  // The prepared path quantises the activation to Q8; llama.cpp dequantises the weight and
+  // keeps the activation in f32. LING3_HEAD_PLAIN forces the reference-shaped computation so
+  // the cost of that approximation can be measured instead of assumed.
+  const bool head_prepared =
+      (Storage(weights.output.type) == hip::kQ4K ||
+       Storage(weights.output.type) == hip::kQ6K) &&
+      std::getenv("LING3_HEAD_PLAIN") == nullptr;
+  if (head_prepared) {
     hip::LaunchQuantizeActivations(m.h, n_embd, m.act_values, m.act_scales, stream);
     hip::LaunchGemvPrepared(dev(weights.output), Storage(weights.output.type), c.n_vocab,
                             n_embd, m.act_values, m.act_scales, m.logits, stream);
@@ -1363,8 +1369,14 @@ bool Engine::PrefillChunk(const std::int32_t* tokens, std::size_t count,
   const std::size_t last = static_cast<std::size_t>(M - 1) * n_embd;
   hip::LaunchRmsNorm(m.bx + last, static_cast<const float*>(dev(weights.output_norm)),
                      m.h, 1, n_embd, eps, stream);
-  if (Storage(weights.output.type) == hip::kQ4K ||
-      Storage(weights.output.type) == hip::kQ6K) {
+  // The prepared path quantises the activation to Q8; llama.cpp dequantises the weight and
+  // keeps the activation in f32. LING3_HEAD_PLAIN forces the reference-shaped computation so
+  // the cost of that approximation can be measured instead of assumed.
+  const bool head_prepared =
+      (Storage(weights.output.type) == hip::kQ4K ||
+       Storage(weights.output.type) == hip::kQ6K) &&
+      std::getenv("LING3_HEAD_PLAIN") == nullptr;
+  if (head_prepared) {
     hip::LaunchQuantizeActivations(m.h, n_embd, m.act_values, m.act_scales, stream);
     hip::LaunchGemvPrepared(dev(weights.output), Storage(weights.output.type), c.n_vocab,
                             n_embd, m.act_values, m.act_scales, m.logits, stream);
