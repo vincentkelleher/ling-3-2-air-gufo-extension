@@ -500,3 +500,24 @@ weight reads through `DotRow`) are the two beneficiaries; halving both would mov
 context size a blind edit to the hottest kernel is a poor trade against the instrumentation already in
 place — the two changes above are mechanical and each is verifiable in isolation.
 
+
+## Decode: two attempts measured, one blocker identified (2026-11-27)
+
+**Q6_K prepared expert gather — no gain.** Extending `LaunchGemvExpertsPre` with a Q6_K prepared dot
+(mirroring the verified Q6_K body, one warp per expert row, activation quantised once) compiled and
+kept `ctest` 10/10, but moved decode only from 16.82-16.96 to 16.95-16.99 tok/s. Reverted: the Q6_K
+experts are a small share of the gather (most layers are Q4_K, which already had the prepared path).
+
+**Q8_0 prepared GEMV — blocked on a quantiser, not on the kernel.** The big projections are Q8_0
+(blocks 0-1 entirely, plus the token embedding and LM head), and they go through `DotRow<kQ8_0>`, which
+re-quantises the activation **for every output row**: a 4096-row projection re-quantises the same
+2560-value vector 4096 times. A `GemvPreparedKernel<kQ8_0>` was written and compiles, but it cannot be
+wired yet: `LaunchQuantizeActivations` emits one scale per **256** values (the Q4_K/Q6_K layout) while
+a Q8_0 prepared dot indexes one scale per **32** values, and the `act_scales` buffer is sized for the
+256 layout. So the missing piece is a 32-block activation quantiser plus its buffer, then routing the
+projection call sites through `LaunchGemvPrepared`.
+
+That is the concrete next step for `decode-opt`, and it is where the measured 35 %-of-peak bandwidth
+says the time is: the projections are 2.6 of the 4.753 GB a token reads, and they are the rows that
+re-quantise per row today.
+
