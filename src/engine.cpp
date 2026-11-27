@@ -968,6 +968,22 @@ std::vector<double> Engine::DebugStateDigest() {
   return digest;
 }
 
+void Engine::ResetState() {
+  Impl& m = *impl_;
+  for (std::uint32_t il = 0; il < m.config.n_layer_total; ++il) {
+    if (m.config.IsKda(il)) {
+      hipMemset(m.conv_state[il], 0, 9 * m.config.KdaInner() * sizeof(float));
+      hipMemset(m.delta_state[il], 0,
+                static_cast<std::size_t>(m.config.n_head) * m.config.n_kda_head_dim *
+                    m.config.n_kda_head_dim * sizeof(float));
+    } else {
+      hipMemset(m.mla_cache[il], 0,
+                m.options.max_context * (m.config.n_lora_kv + m.config.n_rot) * sizeof(float));
+    }
+  }
+  hipStreamSynchronize(m.queue);
+}
+
 void Engine::SnapshotState() {
   Impl& m = *impl_;
   if (m.snapshot == nullptr) {

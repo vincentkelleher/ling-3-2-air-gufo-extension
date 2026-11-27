@@ -302,6 +302,7 @@ TextRunnerDescriptor Ling3Runner::Descriptor() const {
   descriptor.max_context = impl_->max_context;
   descriptor.capabilities.supports_vision = false;
   descriptor.capabilities.incremental_prefill = false;
+
   // One pass covers the chunk the engine's prefill actually batches (PrefillChunk's
   // width); it is not split across layer groups, and one decoder is stepped at a time.
   descriptor.scheduling.pass_tokens = 32;
@@ -468,6 +469,11 @@ TextPrefillStep Ling3Runner::Prefill(TextRunnerState& state,
   // The engine's chunked pass has a fixed width (Engine::PrefillChunk's buffer); a
   // larger request would run past it. Clamping here also gives the host the frontier it
   // expects: it simply asks for the next pass.
+  if (offset == 0) {
+    // A fresh prompt: without this the previous request's KDA conv/delta history and MLA rows
+    // leak in, and two identical requests produce different output.
+    runner_state.engine().ResetState();
+  }
   const std::size_t limit = std::min<std::size_t>(max_input_tokens, 32);
   const std::size_t end = std::min(prompt.size(), offset + limit);
   std::vector<std::int32_t> ids(prompt.begin() + offset, prompt.begin() + end);
@@ -505,6 +511,14 @@ void Ling3Runner::Advance(TextRunnerState& state, TextRunnerToken token) const {
                                      static_cast<std::uint32_t>(runner_state.position()),
                                      &error);
   runner_state.set_position(runner_state.position() + 1);
+}
+
+bool Ling3Runner::CanContinue(const TextRunnerState& state,
+                              std::size_t prompt_tokens) const {
+  // The state stands wherever the last select/advance left it; that equals the prompt frontier
+  // only when nothing has been generated since. Claiming otherwise made the host skip prefill for
+  // a repeated prompt and decode from a state that had already advanced past it.
+  return static_cast<const Ling3RunnerState&>(state).position() == prompt_tokens;
 }
 
 std::size_t Ling3Runner::CheckpointPosition(const TextRunnerState& state) const {

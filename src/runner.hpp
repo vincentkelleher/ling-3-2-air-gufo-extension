@@ -85,6 +85,11 @@ class Ling3Runner final : public TextModelRunner {
   void Advance(TextRunnerState& state, TextRunnerToken token) const override;
   [[nodiscard]] std::size_t CheckpointPosition(
       const TextRunnerState& state) const override;
+  /// The host asks this before reusing a session's prefix. This runner can only continue a prompt
+  /// whose length equals where its state actually stands; otherwise the host must prefill again,
+  /// because the engine cannot rewind past a generated token.
+  [[nodiscard]] bool CanContinue(const TextRunnerState& state,
+                                 std::size_t prompt_tokens) const override;
 
   /// Engine factory: the runner creates one per serving slot.
   using EngineFactory = std::unique_ptr<Engine> (*)(std::string* error);

@@ -438,3 +438,32 @@ unimplemented, and the two facts worth keeping are: a second engine cannot be cr
 first has the weights registered, and coarse per-call locking is not a substitute for
 per-session state. A real fix needs either the host to serialise sessions or the engine to grow
 multi-sequence state — both larger than this extension.
+
+## Two identical requests produce different output (2026-11-27)
+
+Serving is **not per-request deterministic**, with the cache both on and off:
+
+| run | request 1 (cold) | request 2 (same prompt) |
+| --- | --- | --- |
+| cache on (`cache_reuse=ram`, `cached_tokens=249`) | "Foxes are known for their bushy tails and" | "The quick brown fox jumps over the lazy dog." |
+| cache off | same as above | same as above |
+
+A `LING3_RUNNER_TRACE` run shows why: request 2 **never calls `Prefill`** — the trace lists
+offsets 0, 32, … 224 for the 249-token prompt once, then jumps straight to decoding. So the host
+reused the session's prefix, while the engine's state had already advanced past the prompt by the
+tokens request 1 generated. The model therefore continues from mid-generation with the prompt
+repeated, which is exactly the "echo the prompt" output observed.
+
+Three hooks were tried, and none changed it:
+
+- `TextRunnerCapabilities::prefix_reuse = false` (reverted), which did not stop the reuse;
+- `SetPromptContext(state, nullptr)` → `Engine::ResetState()` + position 0 (kept, correct for
+  genuinely fresh prompts but that call is not made per request);
+- `CanContinue(state, prompt_tokens)` returning `position == prompt_tokens` (kept, correct in
+  intent) — the host did not act on it for this case.
+
+`Engine::ResetState()` (new) clears the KDA conv/delta state and every MLA cache, which is what a
+fresh prompt must start from; the remaining work is finding which hook the host consults before it
+skips prefill — `PreparePrefixReuse`, `HasDecodeFrontier` or a checkpoint-boundary decision — and
+satisfying it. Until then, `cache-server`'s "restore equals an uninterrupted run" clause fails for a
+repeated prompt, independently of the cache itself.
