@@ -1059,14 +1059,23 @@ bool Engine::ForwardFromEmbedded(std::uint32_t position, std::string* error) {
   // The prepared path quantises the activation to Q8; llama.cpp dequantises the weight and
   // keeps the activation in f32. LING3_HEAD_PLAIN forces the reference-shaped computation so
   // the cost of that approximation can be measured instead of assumed.
+  const StorageType head_type = Storage(weights.output.type);
+  const bool head_q8 = head_type == hip::kQ8_0;
   const bool head_prepared =
-      (Storage(weights.output.type) == hip::kQ4K ||
-       Storage(weights.output.type) == hip::kQ6K) &&
+      (head_type == hip::kQ4K || head_type == hip::kQ6K || head_q8) &&
       std::getenv("LING3_HEAD_PLAIN") == nullptr;
   if (head_prepared) {
-    hip::LaunchQuantizeActivations(m.h, n_embd, m.act_values, m.act_scales, stream);
-    hip::LaunchGemvPrepared(dev(weights.output), Storage(weights.output.type), c.n_vocab,
-                            n_embd, m.act_values, m.act_scales, m.logits, stream);
+    // Q8_0 weights carry one scale per 32 values, so their prepared dot needs the 32-value
+    // activation quantiser; the K-quants use the 256-value one.
+    if (head_q8) {
+      hip::LaunchQuantizeActivations32(m.h, n_embd, m.act_values, m.act_scales32, stream);
+      hip::LaunchGemvPrepared(dev(weights.output), head_type, c.n_vocab, n_embd,
+                              m.act_values, m.act_scales32, m.logits, stream);
+    } else {
+      hip::LaunchQuantizeActivations(m.h, n_embd, m.act_values, m.act_scales, stream);
+      hip::LaunchGemvPrepared(dev(weights.output), head_type, c.n_vocab, n_embd,
+                              m.act_values, m.act_scales, m.logits, stream);
+    }
   } else {
     hip::LaunchGemv(dev(weights.output), Storage(weights.output.type), c.n_vocab,
                     n_embd, m.h, m.logits, stream);
@@ -1610,14 +1619,23 @@ bool Engine::PrefillChunk(const std::int32_t* tokens, std::size_t count,
   // The prepared path quantises the activation to Q8; llama.cpp dequantises the weight and
   // keeps the activation in f32. LING3_HEAD_PLAIN forces the reference-shaped computation so
   // the cost of that approximation can be measured instead of assumed.
+  const StorageType head_type = Storage(weights.output.type);
+  const bool head_q8 = head_type == hip::kQ8_0;
   const bool head_prepared =
-      (Storage(weights.output.type) == hip::kQ4K ||
-       Storage(weights.output.type) == hip::kQ6K) &&
+      (head_type == hip::kQ4K || head_type == hip::kQ6K || head_q8) &&
       std::getenv("LING3_HEAD_PLAIN") == nullptr;
   if (head_prepared) {
-    hip::LaunchQuantizeActivations(m.h, n_embd, m.act_values, m.act_scales, stream);
-    hip::LaunchGemvPrepared(dev(weights.output), Storage(weights.output.type), c.n_vocab,
-                            n_embd, m.act_values, m.act_scales, m.logits, stream);
+    // Q8_0 weights carry one scale per 32 values, so their prepared dot needs the 32-value
+    // activation quantiser; the K-quants use the 256-value one.
+    if (head_q8) {
+      hip::LaunchQuantizeActivations32(m.h, n_embd, m.act_values, m.act_scales32, stream);
+      hip::LaunchGemvPrepared(dev(weights.output), head_type, c.n_vocab, n_embd,
+                              m.act_values, m.act_scales32, m.logits, stream);
+    } else {
+      hip::LaunchQuantizeActivations(m.h, n_embd, m.act_values, m.act_scales, stream);
+      hip::LaunchGemvPrepared(dev(weights.output), head_type, c.n_vocab, n_embd,
+                              m.act_values, m.act_scales, m.logits, stream);
+    }
   } else {
     hip::LaunchGemv(dev(weights.output), Storage(weights.output.type), c.n_vocab, n_embd,
                     m.h, m.logits, stream);
