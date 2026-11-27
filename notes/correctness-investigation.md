@@ -548,3 +548,23 @@ Two discriminators have been tried and are not usable as-is: `LING3_CHUNK_BLOCK`
 FFN, and `LING3_CHUNK_SIZE` did not change any result in this mode (the run with size 1 was
 bit-identical to size 8), so the chunk-width lever needs verifying before it can attribute the
 difference to the batched GEMM versus the per-token kernels inside the chunk.
+
+### engine-assembly's argmax clause, both context kinds (2026-11-27)
+
+The contract asks for argmax equality on "a pinned prompt whose context is a single BOS/text token".
+Measured for both, feeding explicit ids to each side:
+
+| context | llama.cpp argmax | ours |
+| --- | --- | --- |
+| `[156891]` (BOS) | 90827 | 128206 |
+| `[678]` ("The") | 90827 | 128206 |
+
+Both differ identically, so this is not a BOS-handling or text-token quirk; it is the same
+amplification described above — a sub-percent residual difference at block 0, travelling through 42
+layers and the router, is enough to move the argmax of a one-token context. Multi-token contexts
+happen to agree (two- and three-token BOS contexts both pick 2496, and the golden `arithmetic` case
+matches for all 32 generated tokens), which is consistent: more context makes the top-1 margin larger
+relative to the noise.
+
+So `engine-assembly` remains open for a measured reason, and its "RMS error of logits reported and
+documented" half is satisfied (1.07 RMS at a single token, 0.10-0.17 relative at two to three tokens).
