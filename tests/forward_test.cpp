@@ -346,6 +346,12 @@ int main(int argc, char** argv) {
   {
     std::vector<float> logits(engine->VocabSize());
     engine->ReadLogits(logits.data());
+    if (const char* path = std::getenv("LING3_FINAL_LOGITS_F32")) {
+      std::ofstream out(path, std::ios::binary);
+      out.write(reinterpret_cast<const char*>(logits.data()), logits.size() * sizeof(float));
+      out.close();
+      if (!out) { std::fprintf(stderr, "cannot write logits to %s\n", path); return 1; }
+    }
     std::size_t nan_count = 0;
     float minimum = logits[0];
     float maximum = logits[0];

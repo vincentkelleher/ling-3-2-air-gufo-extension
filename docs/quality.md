@@ -111,41 +111,30 @@ byte-level diff that would localise it.
 
 ### Single-token forward and first-token agreement
 
-`engine-assembly` asks for one decode step producing logits, the argmax equal to llama.cpp's
-first generated token for a prompt whose context is a single BOS/text token, and the logits RMS
-documented.
+**Bare BOS does not pass.** For context `[156891]` (one token, position zero) on the pinned
+Q4_K_M, llama.cpp CPU `e95426f` selects **90827**, whereas the extension selects **128206**.
+Over all 157,184 finite FP32 logits, the RMS difference is **1.069405** and the maximum absolute
+difference is **7.808860**. This is a first-step discrepancy, not a tokenizer or CLI framing
+difference. Its cause has not been localized. Agreement over prefixes of chat prompts does not
+establish agreement on this input.
 
-- one decode step produces the full vocabulary logits (`tests/forward_test.cpp` prints the top-5
-  and their values every step, and `tests/operator_gpu_test.cpp` checks the head);
-- **first-token agreement is established on the four pinned golden prompts**: the generated text
-  matches llama.cpp from its first character in every case, for 93 / 30 / 27 / 9 characters
-  (`tools/golden_set.py`, `docs/parity.md`). A bare-BOS context could not be compared through
-  llama.cpp's CLI — an empty prompt makes it emit nothing, and a prompt file containing
-  `<|startoftext|>` is tokenised as text, so the two contexts were never identical — which is
-  why the comparison is made on the pinned prompts instead;
-- the logits RMS against llama.cpp is **unmeasurable here** (below).
+Reproduce using a matching llama.cpp source checkout (`$LLAMA`) and CPU build (`$LIB` points
+to its `bin` directory). Run the forward test with no prompt environment overrides:
 
-### The one clause that cannot be measured here
+```sh
+c++ -O2 tools/llama_bos_logits.cpp -I"$LLAMA/include" -I"$LLAMA/ggml/include" \
+  -L"$LIB" -Wl,-rpath,"$LIB" -lllama -o /tmp/llama-bos
+/tmp/llama-bos "$MODEL" cpu.f32
+LING3_FINAL_LOGITS_F32=gpu.f32 "$FORWARD_TEST" "$MODEL" 1
+```
 
-`engine-assembly`'s contract asks for the logits RMS error against llama.cpp. Neither
-`llama-completion` nor `llama-perplexity` in this environment can emit logits — their only
-logit-related flag is `--logit-bias` — so the reference side cannot produce that number.
-What is measured instead:
-
-- **argmax equality**: the greedy first token matches on the pinned prompts, and the
-  `arithmetic` golden case is identical end to end (30/30 characters);
-- **golden-set prefixes**: 93 / 30 / 27 / 9 characters of agreement before the first
-  divergence, with a 0.048 top-2 logit margin at the plain case.
-
-Reported rather than papered over: unmeasurable with the available reference binaries, not
-unimplemented. Producing it needs a reference build that dumps logits, or a numpy forward
-pass that would no longer be llama.cpp's arithmetic.
+Both files contain one native FP32 row in vocabulary order. RMS is `sqrt(mean((cpu-gpu)^2))`
+computed in double precision.
 
 ## 5. Where the engine is genuinely different from the reference
 
-- Reduction orders differ (deterministic per-warp sums here versus llama.cpp's CPU
-  order), which is the source of the 0.048 margin and cannot be removed without
-  reproducing its arithmetic exactly.
+- The GPU and CPU use different reduction orders. This can matter at small margins, but
+  has not been established as the explanation for the single-BOS discrepancy.
 - Chunked prefill sums the same products in a different order again, so it perturbs
   greedy output at these margins; the sequential and chunked paths therefore have
   to be reported separately.
