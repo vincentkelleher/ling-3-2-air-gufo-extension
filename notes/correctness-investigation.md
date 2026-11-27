@@ -25,6 +25,15 @@ Hypotheses already excluded, each by reading the reference rather than guessing:
   error 0* against the file's own bytes, so the embedding path is exact and cannot explain position
   zero.
 
+- **MLA score scale.** The reference uses `1/sqrt(qk_head_dim)` = `1/sqrt(192)`; ours is the
+  compile-time `kMlaScoreScale = 1/13.856406460551018` = `1/sqrt(192)`. Equal, and a mismatch here
+  would have produced exactly this kind of systematic error.
+- **MLA block structure.** Reference: `q_a -> attn_q_a_norm -> q_b`, split `q_nope`/`q_pe`, rope on
+  both `q_pe` and `k_pe`, RMS-norm the latent, key = concat(normed latent, k_pe), value = normed
+  latent, head output gated by `sigmoid(wqkv_gate * pre-attention hidden)`, then `wo`. Ours stores
+  the same concatenated row in `mla_cache`, normalises the latent (`d5_latnorm`), uses the same
+  per-head gate (`beta_pre` -> sigmoid), and the same latent value sum.
+
 Still open: which block first diverges, and therefore whether the cause is the conv1d state, the MLA
 path, the routed MoE, or the head. A per-block residual comparison against the reference's
 `l_out-<n>` nodes is in progress.
