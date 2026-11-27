@@ -29,7 +29,7 @@ from gguf import GGUFReader
 from gguf.constants import GGMLQuantizationType as QT
 from gguf.quants import dequantize
 
-DEFAULT = ('/home/ai-box/Models/bartowski/Ling-3.2-air-GGUF/'
+DEFAULT = ('models/Ling-3.2-air-GGUF/'
            'mmproj-Ling-3.2-air-bf16.gguf')
 
 
