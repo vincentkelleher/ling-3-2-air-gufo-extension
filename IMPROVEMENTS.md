@@ -436,3 +436,31 @@ So `decode-opt`'s real target is memory behaviour: expert-order locality (hot-ex
 reordering), access granularity per expert, and whether the zero-copy weight mapping is being read in
 a pattern the memory system likes. Arithmetic-level tuning of the same reads cannot reach the gate.
 
+
+## Decode: locality excluded; the limit is achieved bandwidth (measured 2026-11-27)
+
+`LING3_FORCE_EXPERT=<id>` pins every token's routing to one expert, so the routed gather reads the
+same, single expert from L2 for every layer — perfect locality, identical byte count.
+
+| routing | tok/s | implied effective bandwidth at 4.753 GB/token |
+| --- | --- | --- |
+| normal (8 of 512 experts, scattered) | 16.96 | 80.6 GB/s |
+| forced expert 0 (perfect locality) | 17.61 | 83.7 GB/s |
+| forced expert 300 (distant table region) | 17.60 | 83.7 GB/s |
+
+**Locality is excluded**: perfect locality buys 4 %, and a distant expert behaves identically, so the
+gather is not paying for scatter. That also retro-explains the nine kernel variants that changed
+nothing — they were tuning arithmetic that was never the limit.
+
+What the numbers do say: at 4.753 GB/token confirmed by `tools/bytes_per_token.py`, 17 tok/s works out
+to **about 84 GB/s, i.e. 35 % of the 237 GB/s the bandwidth probe measures**. The engine reads the
+right number of bytes at roughly a third of peak. That is a load-efficiency problem — access width and
+coalescing inside the quantised dot products (each thread currently walking a row in small strides),
+not addressing, not traffic, and not locality.
+
+So `decode-opt`'s next attempt should be a vectorised load path in the Q4_K/Q6_K/Q8_0 row dots
+(16-byte loads per lane, block-aligned), measured with `bench-decode.sh` and gated on
+`tools/golden_set_ids.py` staying at plain 19 / arithmetic none / tool-call 16 / thinking-on 2. The
+target implied by the measurement: 3x on the dots would put decode near 50 tok/s, i.e. above the 60 %
+gate.
+
