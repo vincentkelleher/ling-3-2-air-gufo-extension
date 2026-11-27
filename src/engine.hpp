@@ -84,6 +84,10 @@ class Engine {
   bool SaveServingState(std::span<std::byte> destination);
   bool LoadServingState(std::span<const std::byte> source);
   bool ClearServingState();
+  /// Slot zero uses the original allocations. Additional slots have separate
+  /// persistent buffers but share the queue, weights and transient activations.
+  /// Caller serializes selection and execution as one operation.
+  void SelectServingSlot(std::size_t index);
   /// One number per layer of the state the snapshot is meant to cover, for localising an
   /// inexact restore: equal before and after a snapshot+restore round-trip means that
   /// layer's state survived.

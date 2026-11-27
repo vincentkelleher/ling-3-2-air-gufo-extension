@@ -38,10 +38,10 @@ committed under `tools/` (`bandwidth_probe.hip`, `roofline.py`, `bench_report.py
 | non-streaming completion | `POST /v1/completions` → 200, coherent text (`".\nA.Paris\nB.L"`), 5 prompt / 8 completion tokens |
 | streaming | `stream:true` delivers SSE chunks through the same request |
 | cancellation | the client closing the pipe mid-stream finishes the request as `finish=cancelled` — the server acted on it, which a disconnected client alone would not prove |
-| continuation / restore | repeated 406-token prefix: `cached_tokens=406`, prefill 0 tok/s, TTFT **27,431 ms → 92 ms → 11.6 ms**, `cache_reuse=ram` |
-| frontier capture | `cache_captures=1`, 502 MB, charged through the ledger |
+| continuation / restore | `tools/check_http_restore.py` requires successful private restores for a continued prefix, a repeated request and an edited suffix. All completion bytes match isolated cold runs. |
+| checkpoint contents | At context 4096, `ling3_air.mtp` clears and restores all 154,697,732 serialized bytes, then checks eight greedy tokens and their logits. |
 | scheduler profile | declared (`pass_tokens` 32, one layer group, decode width 1); the server logs `plan=serial-fallback`, `batch_width=1` |
-| **session isolation** | **not passing**: `--sessions 2` with two concurrent requests hangs. Attempts and the remaining design change are recorded in `notes/runner-plan.md`; the supported mode is one session |
+| session isolation | `tools/check_http_restore.py` submits two concurrent requests with `--sessions 2`. Traces show two distinct slot banks on one engine; both return the exact completion bytes of their separate cold runs. Engine operations are serialized; this is an isolation test, not a throughput claim. |
 | error recovery | an unloadable model, a request for a model id that is not loaded, and an invalid prompt all return structured errors instead of crashing |
 
 ## Independent numerical references and quality

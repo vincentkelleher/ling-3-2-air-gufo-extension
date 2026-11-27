@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
-"""Launch disposable one-slot servers; compare restored greedy bytes with cold runs."""
+"""Compare restored and concurrent greedy responses with isolated cold servers."""
+from concurrent.futures import ThreadPoolExecutor
+from threading import Barrier
+import re
 import argparse
 import json
 import os
@@ -18,12 +21,12 @@ prefix = 'Here is one fact about the red fox. ' * 8
 original = prefix + 'Where does it live?'
 edited = prefix + 'What does it eat?'
 
-def run(prompts, require_restore=False):
+def run(prompts, require_restore=False, concurrent=False):
     with tempfile.TemporaryDirectory() as directory:
         log = Path(directory, 'serve.log')
         with log.open('w') as output:
             proc = subprocess.Popen([args.gufo, 'serve', 'llm', '--model', args.model,
-                                     '--port', str(args.port), '--sessions', '1'],
+                                     '--port', str(args.port), '--sessions', '2' if concurrent else '1'],
                                     stdout=output, stderr=subprocess.STDOUT,
                                     env={**os.environ, 'LING3_RUNNER_TRACE': '1'})
         results = []
@@ -36,16 +39,54 @@ def run(prompts, require_restore=False):
                 time.sleep(.5)
             else:
                 raise TimeoutError('server did not listen')
-            for index, prompt in enumerate(prompts):
-                log_start = log.stat().st_size
+            barrier = Barrier(len(prompts)) if concurrent else None
+            def ask(prompt):
+                if barrier:
+                    barrier.wait(timeout=10)
                 body = {'prompt': prompt, 'model': args.model, 'temperature': 0, 'max_tokens': 12}
                 req = Request(f'http://127.0.0.1:{args.port}/v1/completions',
                               data=json.dumps(body).encode(), headers={'Content-Type':'application/json'})
                 with urlopen(req, timeout=180) as resp:
                     result = json.load(resp)
-                    results.append(result['choices'][0]['text'].encode())
-                    if not results[-1]:
+                    text = result['choices'][0]['text'].encode()
+                    if not text:
                         raise AssertionError('empty completion')
+                    return text
+            if concurrent:
+                with ThreadPoolExecutor(max_workers=len(prompts)) as pool:
+                    results = list(pool.map(ask, prompts))
+                trace = log.read_text()
+                banks = re.findall(r'\[runner\] bank (\d+) engine (\w+) slot (\w+)', trace)
+                if (len({b[0] for b in banks}) != 2 or len({b[1] for b in banks}) != 1 or
+                        len({b[2] for b in banks}) != 2):
+                    raise AssertionError('two resident banks did not share exactly one engine')
+                captures = set(re.findall(r'\[runner\] capture slot (\w+)', trace))
+                if captures != {b[2] for b in banks}:
+                    raise AssertionError('both slots did not participate')
+                # Close a real SSE response after the first generated piece,
+                # and verify that the scheduler actually noticed the disconnect.
+                start = log.stat().st_size
+                body = dict(prompt='Count from 1 to 100:', model=args.model,
+                            temperature=0, max_tokens=128, stream=True)
+                req = Request(f'http://127.0.0.1:{args.port}/v1/completions',
+                              data=json.dumps(body).encode(), headers={'Content-Type':'application/json'})
+                with urlopen(req, timeout=60) as stream:
+                    for line in stream:
+                        if line.startswith(b'data: {') and json.loads(line[6:])['choices'][0]['text']:
+                            break
+                    else:
+                        raise AssertionError('no SSE text chunk')
+                for _ in range(100):
+                    if b'finish=cancelled' in log.read_bytes()[start:]:
+                        break
+                    time.sleep(.1)
+                else:
+                    raise AssertionError('stream closed but server did not record cancellation')
+                print('OK: SSE yielded text; disconnect confirmed as cancelled by server')
+                return results
+            for index, prompt in enumerate(prompts):
+                log_start = log.stat().st_size
+                results.append(ask(prompt))
                 if require_restore and index > 0:
                     tail = log.read_bytes()[log_start:].decode()
                     if not any('[runner] restore ' in line and 'ok=1' in line
@@ -70,3 +111,7 @@ _, a, b, c = run([prefix.rstrip(), original, original, edited], require_restore=
 if a != original_reference or a != b or c != reference:
     raise SystemExit(f'byte mismatch: original={a == original_reference}, repeated={a == b}, edit={c == reference}')
 print(f'OK: repeated completion {len(a)} bytes; edited continuation {len(c)} bytes matches cold reference')
+pair = run([original, edited], concurrent=True)
+if pair != [original_reference, reference] or original_reference == reference:
+    raise SystemExit('concurrent completions did not match distinguishable cold references')
+print('OK: both slots used one engine; both concurrent outputs matched their cold references')

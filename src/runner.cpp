@@ -76,6 +76,7 @@ class DeviceStream final : public cache::Stream {
 class NullSlot final : public cache::Slot {
  public:
   bool loaded{false};
+  std::optional<std::size_t> bank;
   [[nodiscard]] bool IsValid() const noexcept override { return true; }
 };
 
@@ -101,21 +102,29 @@ class Ling3ComponentAdapter final : public cache::Adapter,
     component_.state_bytes = state_bytes;
   }
 
-  /// The engine already serving this slot, if any. Binding a state twice must not build a
-  /// second engine: creating one re-registers the same 80 GiB mapping, `hipHostRegister`
-  /// refuses an already-registered range, and the pool is then left with no state (which
-  /// is the null reservation that crashed Acquire).
-  [[nodiscard]] Engine* Existing(cache::Slot* slot) {
-    const std::lock_guard<std::mutex> lock(mutex_);
-    const auto found = engines_.find(slot);
-    return found == engines_.end() ? nullptr : found->second;
+  Engine& Bind(cache::Slot& slot) {
+    const std::lock_guard lock(execution_);
+    if (!engine_) {
+      std::string error;
+      if (g_engine_factory) engine_ = g_engine_factory(&error);
+      if (!engine_) throw std::runtime_error("Ling engine creation failed: " + error);
+    }
+    auto& bank = static_cast<NullSlot&>(slot).bank;
+    if (!bank) {
+      engine_->SelectServingSlot(next_bank_);
+      bank = next_bank_++;
+      if (Trace()) std::fprintf(stderr, "[runner] bank %zu engine %p slot %p\n", *bank,
+                                static_cast<void*>(engine_.get()), static_cast<void*>(&slot));
+    }
+    return *engine_;
   }
 
-  Engine& Adopt(cache::Slot* slot, std::unique_ptr<Engine> engine) {
-    const std::lock_guard<std::mutex> lock(mutex_);
-    Engine* raw = engine.release();
-    engines_[slot] = raw;
-    return *raw;
+  std::unique_lock<std::mutex> LockSlot(const void* slot) override {
+    std::unique_lock lock(execution_);
+    const auto& bank = static_cast<const NullSlot*>(static_cast<const cache::Slot*>(slot))->bank;
+    if (!engine_ || !bank) throw std::logic_error("unbound Ling slot");
+    engine_->SelectServingSlot(*bank);
+    return lock;
   }
 
   /// `continuation` tells the host this adapter can restore a padded prefix, which is what
@@ -179,14 +188,14 @@ class Ling3ComponentAdapter final : public cache::Adapter,
       std::fprintf(stderr, "[runner] capture slot %p size %zu\n", static_cast<const void*>(&slot),
                    payload.size());
     }
-    Engine* engine = EngineFor(slot);
-    return Ready(engine && engine->SaveServingState(payload));
+    auto lock = LockSlot(&slot);
+    return Ready(engine_->SaveServingState(payload));
   }
   [[nodiscard]] cache::Completion LoadPrivate(cache::Slot& slot, cache::ComponentId,
                                               std::span<const std::byte> payload,
                                               cache::Stream&) override {
-    Engine* engine = EngineFor(slot);
-    bool ok = engine && engine->LoadServingState(payload);
+    auto lock = LockSlot(&slot);
+    bool ok = engine_->LoadServingState(payload);
     static_cast<NullSlot&>(slot).loaded = ok;
     if (Trace()) std::fprintf(stderr, "[runner] restore %zu bytes ok=%d\n", payload.size(), ok);
     return Ready(ok);
@@ -212,26 +221,21 @@ class Ling3ComponentAdapter final : public cache::Adapter,
   }
   [[nodiscard]] bool Invalidate(cache::Slot& slot) noexcept override {
     static_cast<NullSlot&>(slot).loaded = false;
-    Engine* engine = EngineFor(slot);
-    if (engine && !engine->ClearServingState()) return false;
-    return true;
+    try {
+      auto lock = LockSlot(&slot);
+      return engine_->ClearServingState();
+    } catch (...) { return false; }
   }
 
  private:
-  [[nodiscard]] Engine* EngineFor(const cache::Slot& slot) const {
-    const std::lock_guard<std::mutex> lock(mutex_);
-    const auto found = engines_.find(const_cast<cache::Slot*>(&slot));
-    return found == engines_.end() ? nullptr : found->second;
-  }
+  std::mutex execution_;
+  std::size_t next_bank_{0};
+  std::unique_ptr<Engine> engine_;
 
   mutable std::mutex mutex_;
   cache::Identity identity_;
   std::uint32_t context_{0};
   cache::ComponentDescriptor component_{};
-  /// Engines live for the process. The host may tear down sessions (and the HIP context)
-  /// in any order at shutdown, and freeing an engine after its context has gone is what
-  /// crashed the server on SIGTERM, so ownership is deliberately not returned here.
-  std::map<cache::Slot*, Engine*> engines_;
   std::map<cache::Slot*, cache::Rows> positions_;
 };
 
@@ -254,6 +258,10 @@ Ling3RunnerState::Ling3RunnerState(Engine& engine, Ling3Config config)
 Ling3RunnerState::~Ling3RunnerState() = default;
 
 void Ling3RunnerState::Invalidate() noexcept {}
+
+std::unique_lock<std::mutex> Ling3RunnerState::LockEngine() {
+  return impl_->sink->LockSlot(impl_->slot);
+}
 
 Engine& Ling3RunnerState::engine() { return *impl_->engine; }
 
@@ -316,7 +324,8 @@ TextRunnerResourceClaim Ling3Runner::ResourceClaim() const {
   // The cache grants this much host memory for one session's state; without it the
   // prepared-session pass refuses with budget 0.
   const std::size_t state_bytes = Engine::ServingBytes(impl_->config, impl_->max_context);
-  claim.state_capacity_bytes = state_bytes;
+  // Budget for the two independently resident banks tested by the HTTP suite.
+  claim.state_capacity_bytes = 2 * state_bytes;
   claim.per_request_state_bytes = state_bytes;
   // A prompt token writes one row into each MLA layer's latent cache.
   std::size_t mla_layers = 0;
@@ -432,19 +441,7 @@ std::unique_ptr<TextRunnerState> Ling3Runner::BindComponentState(
   if (components == nullptr) {
     return nullptr;
   }
-  Engine* engine = components->Existing(&slot);
-  if (engine == nullptr) {
-    std::string error;
-    auto created = g_engine_factory == nullptr ? nullptr : g_engine_factory(&error);
-    if (created == nullptr) {
-      if (Trace()) {
-        std::fprintf(stderr, "[runner] engine creation failed: %s\n", error.c_str());
-      }
-      return nullptr;
-    }
-    engine = &components->Adopt(&slot, std::move(created));
-  }
-  auto state = std::make_unique<Ling3RunnerState>(*engine, impl_->config);
+  auto state = std::make_unique<Ling3RunnerState>(components->Bind(slot), impl_->config);
   state->Attach(components, &slot);
   return state;
 }
@@ -473,6 +470,7 @@ TextPrefillStep Ling3Runner::Prefill(TextRunnerState& state,
   const std::size_t end = std::min(prompt.size(), offset + limit);
   std::vector<std::int32_t> ids(prompt.begin() + offset, prompt.begin() + end);
   std::string error;
+  auto lock = runner_state.LockEngine();
   if (!ids.empty() &&
       !runner_state.engine().PrefillChunk(ids.data(), ids.size(),
                                           static_cast<std::uint32_t>(offset), -1,
@@ -490,6 +488,7 @@ TextDecodeSelection Ling3Runner::SelectNext(TextRunnerState& state,
                                             sampling::SamplerState&) const {
   TextDecodeSelection selection;
   auto& runner_state = static_cast<Ling3RunnerState&>(state);
+  auto lock = runner_state.LockEngine();
   selection.token = runner_state.engine().Argmax();
   const TextRunnerToken single = selection.token;
   selection.piece = Decode(std::span<const TextRunnerToken>(&single, 1));
@@ -502,9 +501,10 @@ void Ling3Runner::Advance(TextRunnerState& state, TextRunnerToken token) const {
   }
   auto& runner_state = static_cast<Ling3RunnerState&>(state);
   std::string error;
-  runner_state.engine().ForwardToken(static_cast<std::int32_t>(token),
-                                     static_cast<std::uint32_t>(runner_state.position()),
-                                     &error);
+  auto lock = runner_state.LockEngine();
+  if (!runner_state.engine().ForwardToken(static_cast<std::int32_t>(token),
+                                          static_cast<std::uint32_t>(runner_state.position()),
+                                          &error)) throw std::runtime_error(error);
   runner_state.set_position(runner_state.position() + 1);
 }
 

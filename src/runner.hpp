@@ -13,6 +13,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -35,6 +36,7 @@ class Ling3RunnerState final : public TextRunnerState {
   Ling3RunnerState(Engine& engine, Ling3Config config);
   ~Ling3RunnerState() override;
 
+  [[nodiscard]] std::unique_lock<std::mutex> LockEngine();
   [[nodiscard]] Engine& engine();
   [[nodiscard]] std::size_t position() const;
   void set_position(std::size_t position);
@@ -43,6 +45,7 @@ class Ling3RunnerState final : public TextRunnerState {
   /// has prefilled to.
   struct PositionSink {
     virtual ~PositionSink() = default;
+    virtual std::unique_lock<std::mutex> LockSlot(const void* slot) = 0;
     virtual void OnPosition(void* slot, std::size_t position) = 0;
   };
   void Attach(PositionSink* sink, void* slot);
@@ -91,7 +94,7 @@ class Ling3Runner final : public TextModelRunner {
   [[nodiscard]] bool CanContinue(const TextRunnerState& state,
                                  std::size_t prompt_tokens) const override;
 
-  /// Engine factory: the runner creates one per serving slot.
+  /// One factory invocation per cache adapter; all its slots share the engine.
   using EngineFactory = std::unique_ptr<Engine> (*)(std::string* error);
   static void SetEngineFactory(EngineFactory factory);
 

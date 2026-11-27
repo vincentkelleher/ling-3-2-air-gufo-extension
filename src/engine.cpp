@@ -12,7 +12,10 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <functional>
 #include <map>
+#include <stdexcept>
+#include <type_traits>
 #include <string>
 #include <vector>
 
@@ -132,6 +135,9 @@ struct Engine::Impl {
   // Built alongside the actual allocations. This is the serialization order.
   std::vector<std::pair<void*, std::size_t>> serving_ranges;
   std::size_t serving_bytes{0};
+  std::vector<std::function<void(void*)>> bind_range;
+  std::vector<std::vector<void*>> slot_addresses{1};
+  std::size_t active_slot{0};
   hipStream_t queue{nullptr};
   float* kernel_debug{nullptr};
 
@@ -405,7 +411,12 @@ std::unique_ptr<Engine> Engine::Create(const core::GgufReader& reader,
     return fail("engine: device scratch allocation failed");
   }
 
-  auto range = [&](void* address, std::size_t bytes) {
+  auto range = [&](auto& address, std::size_t bytes) {
+    using Pointer = std::remove_reference_t<decltype(address)>;
+    // All referenced fields (including the per-layer vector elements) stay
+    // at fixed addresses after engine creation.
+    m.bind_range.emplace_back([field = &address](void* ptr) { *field = static_cast<Pointer>(ptr); });
+    m.slot_addresses.front().push_back(address);
     m.serving_ranges.emplace_back(address, bytes);
     m.serving_bytes += bytes;
   };
@@ -994,6 +1005,36 @@ std::size_t Engine::ServingBytes(const Ling3Config& c, std::uint32_t context) {
                 : static_cast<std::size_t>(context) * (c.n_lora_kv + c.n_rot);
   }
   return floats * sizeof(float) + sizeof(std::int32_t);
+}
+
+void Engine::SelectServingSlot(std::size_t index) {
+  Impl& m = *impl_;
+  if (index == m.active_slot) return;
+  if (index > m.slot_addresses.size()) throw std::logic_error("nonsequential slot allocation");
+  if (index == m.slot_addresses.size()) {
+    std::vector<void*> ranges(m.serving_ranges.size());
+    std::size_t extent = 0;
+    for (const auto& range : m.serving_ranges) extent += (range.second + 255) & ~std::size_t(255);
+    std::byte* base = nullptr;
+    if (hipMalloc(reinterpret_cast<void**>(&base), extent) != hipSuccess)
+      throw std::runtime_error("could not allocate serving slot state");
+    if (hipMemsetAsync(base, 0, extent, m.queue) != hipSuccess || hipStreamSynchronize(m.queue) != hipSuccess) {
+      hipFree(base);
+      throw std::runtime_error("could not initialize serving slot state");
+    }
+    std::size_t offset = 0;
+    for (std::size_t i = 0; i < ranges.size(); ++i) {
+      ranges[i] = base + offset;
+      offset += (m.serving_ranges[i].second + 255) & ~std::size_t(255);
+    }
+    m.slot_addresses.push_back(std::move(ranges));
+  }
+  const auto& addresses = m.slot_addresses[index];
+  for (std::size_t i = 0; i < addresses.size(); ++i) {
+    m.bind_range[i](addresses[i]);
+    m.serving_ranges[i].first = addresses[i];
+  }
+  m.active_slot = index;
 }
 
 bool Engine::SaveServingState(std::span<std::byte> dst) {
