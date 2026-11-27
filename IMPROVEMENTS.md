@@ -606,3 +606,15 @@ Both the kernel and the cmake flag were reverted; decode is back to the verified
 first — a tiny test comparing `sdot4(w, a, 0, false)` against the scalar sum of four int8 products —
 before it goes anywhere near a hot loop.
 
+### Four-byte loads in the prepared Q8_0 dot: slightly worse, reverted
+
+Unpacking four int8 values per 32-bit load (exact by construction, same integer sum) measured
+**19.63-19.64 tok/s against 19.85** for the byte-wise loop, so the compiler is already vectorising
+that loop and the explicit shifts only add instructions. Reverted.
+
+With dot4 unavailable for this target, locality excluded, and the activation hoist done, the decode
+improvements available at this level are exhausted: 19.85 tok/s (39.8 % of the roofline) is where the
+current kernel shapes land. The next real step is the one `notes/prefill-design.md` describes for the
+recurrence — a chunked scan — and the equivalent for the attention rows, which is kernel design
+rather than tuning.
+
