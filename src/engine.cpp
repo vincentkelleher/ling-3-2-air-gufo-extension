@@ -788,6 +788,16 @@ bool Engine::ForwardFromEmbedded(std::uint32_t position, std::string* error) {
                  latent + c.n_rot);
       }
       hip::LaunchMlaSoftmax(m.scores, heads, position + 1, stream);
+      if (il == 5 && std::getenv("LING3_PROBS_TRACE") != nullptr) {
+        // Does the output actually depend on the probabilities? Print them where they are made.
+        hipStreamSynchronize(stream);
+        std::vector<float> probs(heads * (position + 1));
+        hipMemcpy(probs.data(), m.scores, probs.size() * sizeof(float),
+                  hipMemcpyDeviceToHost);
+        std::fprintf(stderr, "[probs] pos=%u h0 p0=%.6f p1=%.6f h1 p0=%.6f p1=%.6f\n",
+                     position, probs[0], position > 0 ? probs[1] : 0.0f,
+                     probs[position + 1], position > 0 ? probs[position + 2] : 0.0f);
+      }
       hip::LaunchMlaLatentSum(m.scores, m.mla_cache[il], heads, position + 1,
                               m.latent, stream);
       if (il == 5) {

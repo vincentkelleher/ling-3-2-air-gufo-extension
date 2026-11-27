@@ -137,3 +137,33 @@ not a function of the probabilities the dumps show, or the two dumps come from d
 The next step is therefore not another file comparison: print the post-softmax probabilities from
 inside the run (both rope modes) and confirm they differ; if they do, trace which probability array
 `MlaLatentSum` actually reads.
+
+## The defect (found and fixed, 2026-11-27)
+
+`SoftmaxKernel` never broadcast the block-wide maximum. After the warp shuffles only lane 0 of
+each warp holds a valid value, and the combine loop started at `w = 1`, so every other lane kept a
+partial maximum. With `cache_len = 2` each lane therefore subtracted *its own* score, `exp(0)`
+became 1 for both positions and every head returned **exactly 0.5/0.5** — a uniform attention that
+ignores the scores entirely. That single defect explains every observation gathered above:
+
+- position 0 looks correct (one key makes any distribution 1.0);
+- position 1 is wrong by 42 % on the first MLA layer's output;
+- two protocols (neox and interleaved rope) give byte-identical results, because the
+  probabilities no longer depend on the scores at all;
+- the error then accumulates through the remaining blocks.
+
+Fix: reduce to one scalar per warp, reduce those in shared memory, and broadcast the result through
+`__shared__` before normalising (both for the max and for the sum). Measured after the fix:
+
+| quantity | before | after |
+| --- | --- | --- |
+| `mla_out-5` relative error, position 1 | 0.420 | **0.0156** |
+| residual after block 5, position 1 | 0.050 | 0.050 |
+| first-layer probabilities | 0.500 / 0.500 (all heads) | head-varying, e.g. 0.977 / 0.023 |
+
+The cache was also switched from fp16-rounded stores to fp32: the reference's own `type_k`/`type_v`
+made no difference to its output, and the rounding only injected error into later scores.
+
+What remains after the fix is accumulation rather than a wrong formula: blocks 0-3 agree to
+0.3-0.6 %, the first MLA layer adds ~1.5 %, and the logits still differ (relative 0.19 at two
+tokens) because sub-percent residue in the residual stream flips router choices near their ties.

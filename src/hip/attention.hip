@@ -54,9 +54,15 @@ __global__ void SoftmaxKernel(float* scores, int heads, int cache_len) {
     return;
   }
   float* row = scores + static_cast<std::size_t>(head) * cache_len;
-  __shared__ float reduce[32];
+  __shared__ float warp_buf[32];
+  __shared__ float shared_max;
+  __shared__ float shared_sum;
   const int warps = static_cast<int>((blockDim.x + 31) / 32);
 
+  // Reduce to one scalar per warp, then to one scalar for the block, and *broadcast* it:
+  // after the shuffles only lane 0 holds the warp result, so every lane must read the
+  // block-wide value from shared memory. Not doing so made each lane subtract its own
+  // score as the max, which collapses a two-position softmax to exactly 0.5/0.5.
   float max_value = -INFINITY;
   for (int p = threadIdx.x; p < cache_len; p += blockDim.x) {
     max_value = fmaxf(max_value, row[p]);
@@ -66,13 +72,18 @@ __global__ void SoftmaxKernel(float* scores, int heads, int cache_len) {
   }
   __syncthreads();
   if ((threadIdx.x & 31) == 0) {
-    reduce[threadIdx.x >> 5] = max_value;
+    warp_buf[threadIdx.x >> 5] = max_value;
   }
   __syncthreads();
-  for (int w = 1; w < warps; ++w) {
-    max_value = fmaxf(max_value, reduce[w]);
+  if (threadIdx.x == 0) {
+    float best = warp_buf[0];
+    for (int w = 1; w < warps; ++w) {
+      best = fmaxf(best, warp_buf[w]);
+    }
+    shared_max = best;
   }
   __syncthreads();
+  max_value = shared_max;
 
   float sum = 0.0f;
   for (int p = threadIdx.x; p < cache_len; p += blockDim.x) {
@@ -83,16 +94,20 @@ __global__ void SoftmaxKernel(float* scores, int heads, int cache_len) {
   }
   __syncthreads();
   if ((threadIdx.x & 31) == 0) {
-    reduce[threadIdx.x >> 5] = sum;
+    warp_buf[threadIdx.x >> 5] = sum;
   }
   __syncthreads();
-  float total = 0.0f;
-  for (int w = 0; w < warps; ++w) {
-    total += reduce[w];
+  if (threadIdx.x == 0) {
+    float total = 0.0f;
+    for (int w = 0; w < warps; ++w) {
+      total += warp_buf[w];
+    }
+    shared_sum = total;
   }
+  __syncthreads();
 
   for (int p = threadIdx.x; p < cache_len; p += blockDim.x) {
-    row[p] = expf(row[p] - max_value) / total;
+    row[p] = expf(row[p] - max_value) / shared_sum;
   }
 }
 
