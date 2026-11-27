@@ -525,3 +525,25 @@ The lesson for the frontier work: any state-wide operation must derive its exten
 *allocation*, not from a configuration field that can differ (the same class of bug as the 26 GB
 snapshot claim earlier, where the size came from the model's trained context rather than the serving
 one).
+
+## Frontier wiring: three attempts, three crashes (2026-11-27)
+
+| attempt | change | result |
+| --- | --- | --- |
+| 1 | frontier buffer + full wiring (positions, capture, load, CanContinue) | SIGSEGV on the first request |
+| 2 | same, with `ResetState` removed | SIGSEGV on the first request |
+| 3 | **capture only** (call `CaptureFrontier()` when prefill completes, label positions with the frontier), leaving `CapturePrivate`/`LoadPrivate` untouched | SIGSEGV immediately after `event=listening`, i.e. during the host's warm-up prefill |
+
+Each revert restores serving (200 OK), so the fault is localised to `CaptureFrontier()` being called
+from the runner. Its allocation is byte-identical to the snapshot buffer's (verified line by line:
+`n_layer_total * (9 * kda_inner + heads * kda_dim^2 + max_context * kv_dim)`), and the copy loop
+mirrors `SnapshotState` exactly — so the difference from the working code is not the arithmetic of
+the copy but **where it runs**: `SnapshotState` has only ever been exercised from the test harness's
+main thread, while `CaptureFrontier` runs on the server's scheduler thread against an engine whose
+`hipStream_t` was created on the loader thread.
+
+Next step, in order of likelihood: create the engine (and therefore its queue) on the thread that
+will drive it, or make the queue creation explicitly device-scoped before cross-thread use; then
+retry the capture-only wiring. If that still faults, capture the frontier with `hipMemcpy`
+(synchronous, default stream) instead of `hipMemcpyAsync` on `m.queue`, which the adapter's own
+copies already do.
