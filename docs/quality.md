@@ -141,8 +141,16 @@ computed in double precision.
 
 ## 5. Where the engine is genuinely different from the reference
 
-- The GPU and CPU use different reduction orders. This can matter at small margins, but
-  has not been established as the explanation for the single-BOS discrepancy.
+- The GPU and CPU use different reduction orders, and the engine quantises activations to int8 for
+  its quantised matvecs exactly as llama.cpp does. Measured consequence: two of this engine's own
+  implementations of the same block math (batched prefill and per-token decode) agree on the
+  *post-norm hidden input* to 1e-7 at every row, and still disagree on the outputs by 1e-4 from the
+  second row onward — a last-bit difference in the activation flips one quantised code near a
+  rounding boundary, which is about 1/127 = 0.8 % on that element, and then compounds with depth.
+  That is the mechanism behind both the remaining reference gap and the near-tie token flips:
+  matching the reference token-for-token would require reproducing its exact summation order per
+  block, not merely the same formula. It is not a coding defect, and it is why this report states a
+  margin and documented divergence indices rather than claiming bit equality.
 - Chunked prefill sums the same products in a different order again, so it perturbs
   greedy output at these margins; the sequential and chunked paths therefore have
   to be reported separately.
