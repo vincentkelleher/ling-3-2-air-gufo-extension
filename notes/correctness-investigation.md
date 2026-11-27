@@ -467,7 +467,16 @@ attention contribution) and the seed of everything downstream. The remaining sus
 per-row inputs the chunked path hands that kernel (L2-normed q/k, the gated v, the decay gate, beta)
 or the buffer it accumulates into.
 
-Next concrete step, using the instrument that localized block 0: dump the chunked path's per-row KDA
+Inspected since: the delta step *is* inside the per-row loop (`for (int i = 0; i < M; ++i)`, only
+mis-indented), the conv state proves `cq/ck/cv` match, and the L2 norms, the decay gate and beta are
+deterministic functions of that same data — so the kernel inputs should be identical. Before
+instrumenting further, rule out the mundane explanation: the two runs may not have processed the same
+number of tokens (`steps=0` reaches the chunked entry point differently), which would advance the
+delta state by one row while the conv window still looks consistent. Print the processed token count
+in both paths first; only if they match does dumping `qn/kn/cv/kda_gate/beta` per row become the next
+step.
+
+Earlier next step, retained for the KDA inputs comparison: dump the chunked path's per-row KDA
 intermediates (`cq`/`ck`/`cv` after conv + SiLU, `kda_gate`, `beta`, the delta-rule output) next to
 the per-token path's `p_convq_<pos>`/`ling3_cq0` dumps, and compare them in order. The first of those
 that differs names the defect.
