@@ -767,6 +767,16 @@ bool Engine::ForwardFromEmbedded(std::uint32_t position, std::string* error) {
           std::snprintf(itag, sizeof(itag), "%s_r%u", tag, position);
           DumpKdaInputs(itag, m.qn, m.kn, m.cv, m.kda_gate, m.beta, kda_inner, heads,
                         stream);
+          // The post-norm hidden this row's q/k/v/gate/beta all derive from.
+          char hpath[96];
+          std::snprintf(hpath, sizeof(hpath), "/work/hid_%s.bin", itag);
+          hipStreamSynchronize(stream);
+          std::vector<float> hidden(n_embd);
+          hipMemcpy(hidden.data(), m.h, n_embd * sizeof(float), hipMemcpyDeviceToHost);
+          if (FILE* file = std::fopen(hpath, "wb")) {
+            std::fwrite(hidden.data(), sizeof(float), hidden.size(), file);
+            std::fclose(file);
+          }
           // Every row, so the first drifting row can be named instead of bracketed.
           char when[16];
           std::snprintf(when, sizeof(when), "r%u", position);
@@ -1364,6 +1374,18 @@ bool Engine::PrefillChunk(const std::int32_t* tokens, std::size_t count,
           std::snprintf(itag, sizeof(itag), "%s_r%u", tag, position);
           DumpKdaInputs(itag, m.qn, m.kn, m.cv, m.kda_gate, m.beta, kda_inner, heads,
                         stream);
+          // The post-norm hidden this row's q/k/v/gate/beta all derive from.
+          char hpath[96];
+          std::snprintf(hpath, sizeof(hpath), "/work/hid_%s.bin", itag);
+          hipStreamSynchronize(stream);
+          std::vector<float> hidden(n_embd);
+          hipMemcpy(hidden.data(),
+                    m.bh + static_cast<std::size_t>(position - start_position) * n_embd,
+                    n_embd * sizeof(float), hipMemcpyDeviceToHost);
+          if (FILE* file = std::fopen(hpath, "wb")) {
+            std::fwrite(hidden.data(), sizeof(float), hidden.size(), file);
+            std::fclose(file);
+          }
           // Every row, so the first drifting row can be named instead of bracketed.
           char when[16];
           std::snprintf(when, sizeof(when), "r%u", position);

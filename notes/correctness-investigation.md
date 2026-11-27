@@ -485,6 +485,29 @@ and the delta-rule *inputs* at block 1, per row:
 | 1 | **2.1e-04** | **1.2e-04** | **4.0e-05** | **1.8e-04** | 4.6e-08 |
 | 2 | 9.9e-05 | 1.8e-04 | 1.4e-04 | 1.3e-07 | 5.3e-08 |
 
+and the *input* those derive from matches at every row:
+
+| row | post-norm hidden (the GEMV input) |
+| --- | --- |
+| 0 | 9.7e-08 |
+| 1 | 1.2e-07 |
+| 2 | 1.1e-07 |
+
+**Conclusion — this is quantisation amplification, not different math.** Identical inputs (to 1e-7)
+produce outputs that differ by 1e-4, because the GEMV quantises the activation to int8 with a
+per-block scale: a last-bit difference in the activation flips one code near a rounding boundary,
+which is about 1/127 = 0.8 % on that element and 1e-4 relative on the output, and then compounds with
+depth to the 5e-2 measured at block 33. `beta` matches only because its matvec is small/F32, where
+nothing is quantised mid-flow.
+
+Consequences, and they are the important part of this whole investigation:
+
+- the two prefill implementations agree on their arithmetic; the divergence is a numerical property of
+  quantised matvecs, not a coding defect;
+- bit-for-bit agreement between two implementations requires *identical* pre-quantisation values, i.e.
+  the reference's exact summation order per block, not merely the same formula;
+- the same mechanism explains the 0.3-4 % reference gap and the near-tie token flips.
+
 So the state after row 0 is identical, and at row 1 the conv/L2-normed q/k/v and the decay gate already
 differ while `beta` does not — the divergence enters through the projection/conv/gate path at the
 second row, not through the recurrent state. `gate` and `beta` come from the *same* `m.bh + row`, and
