@@ -467,7 +467,32 @@ attention contribution) and the seed of everything downstream. The remaining sus
 per-row inputs the chunked path hands that kernel (L2-normed q/k, the gated v, the decay gate, beta)
 or the buffer it accumulates into.
 
-Position-resolved measurement (the chunk dump now writes every row of the chunk, so positions
+Onset, now exact (per-row dumps). Block 1's delta state compared after every row:
+
+| row | delta-state rel |
+| --- | --- |
+| 0 | 0.0 |
+| 1 | 1.2e-07 |
+| 2 | 8.1e-05 |
+| 8 | 9.7e-04 |
+| 22 | 5.0e-04 |
+
+and the delta-rule *inputs* at block 1, per row:
+
+| row | qn | kn | cv | gate | beta |
+| --- | --- | --- | --- | --- | --- |
+| 0 | 1.0e-07 | 1.0e-07 | 7.4e-08 | 1.6e-07 | 4.1e-08 |
+| 1 | **2.1e-04** | **1.2e-04** | **4.0e-05** | **1.8e-04** | 4.6e-08 |
+| 2 | 9.9e-05 | 1.8e-04 | 1.4e-04 | 1.3e-07 | 5.3e-08 |
+
+So the state after row 0 is identical, and at row 1 the conv/L2-normed q/k/v and the decay gate already
+differ while `beta` does not — the divergence enters through the projection/conv/gate path at the
+second row, not through the recurrent state. `gate` and `beta` come from the *same* `m.bh + row`, and
+`beta` matches while `gate` does not, so the difference is in the gate projection/output rather than in
+the hidden input — the next thing to check is `kda_gate_pre` (the GEMV output) versus `kda_gate` (the
+activation kernel) at row 1.
+
+Earlier position-resolved measurement (the chunk dump now writes every row of the chunk, so positions
 compare directly with the per-token path's `x_<block>_<position>.bin`):
 
 | block | positions matching | first divergence |

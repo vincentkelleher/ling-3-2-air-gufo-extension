@@ -763,12 +763,16 @@ bool Engine::ForwardFromEmbedded(std::uint32_t position, std::string* error) {
       mark(il, 4);
       if (il == 1) {
         if (const char* tag = std::getenv("LING3_STATE_TAG")) {
-          DumpKdaInputs(tag, m.qn, m.kn, m.cv, m.kda_gate, m.beta, kda_inner, heads, stream);
-          if (position == 0) {
-            DumpState(tag, "p0", m.conv_state[il], m.delta_state[il],
-                      9 * static_cast<std::size_t>(kda_inner),
-                      static_cast<std::size_t>(heads) * kda_dim * kda_dim, stream);
-          }
+          char itag[32];
+          std::snprintf(itag, sizeof(itag), "%s_r%u", tag, position);
+          DumpKdaInputs(itag, m.qn, m.kn, m.cv, m.kda_gate, m.beta, kda_inner, heads,
+                        stream);
+          // Every row, so the first drifting row can be named instead of bracketed.
+          char when[16];
+          std::snprintf(when, sizeof(when), "r%u", position);
+          DumpState(tag, when, m.conv_state[il], m.delta_state[il],
+                    9 * static_cast<std::size_t>(kda_inner),
+                    static_cast<std::size_t>(heads) * kda_dim * kda_dim, stream);
         }
       }
       hip::LaunchDeltaRuleStep(m.qn, m.kn, m.cv, m.kda_gate, m.beta,
@@ -1356,12 +1360,16 @@ bool Engine::PrefillChunk(const std::int32_t* tokens, std::size_t count,
         hip::LaunchL2Norm(m.ck, m.kn, heads, kda_dim, eps, stream);
       if (il == 1) {
         if (const char* tag = std::getenv("LING3_STATE_TAG")) {
-          DumpKdaInputs(tag, m.qn, m.kn, m.cv, m.kda_gate, m.beta, kda_inner, heads, stream);
-          if (position == 0) {
-            DumpState(tag, "p0", m.conv_state[il], m.delta_state[il],
-                      9 * static_cast<std::size_t>(kda_inner),
-                      static_cast<std::size_t>(heads) * kda_dim * kda_dim, stream);
-          }
+          char itag[32];
+          std::snprintf(itag, sizeof(itag), "%s_r%u", tag, position);
+          DumpKdaInputs(itag, m.qn, m.kn, m.cv, m.kda_gate, m.beta, kda_inner, heads,
+                        stream);
+          // Every row, so the first drifting row can be named instead of bracketed.
+          char when[16];
+          std::snprintf(when, sizeof(when), "r%u", position);
+          DumpState(tag, when, m.conv_state[il], m.delta_state[il],
+                    9 * static_cast<std::size_t>(kda_inner),
+                    static_cast<std::size_t>(heads) * kda_dim * kda_dim, stream);
         }
       }
       hip::LaunchDeltaRuleStep(m.qn, m.kn, m.cv, m.kda_gate, m.beta,
