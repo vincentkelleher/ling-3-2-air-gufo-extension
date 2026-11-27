@@ -447,6 +447,17 @@ quantisers in both paths (`QuantizeGemmActivationsKernel` and `ActivationScale` 
 `amax/127` with the same rounding and clamp), so the next suspect is a projection that reaches the
 batched path through a different kernel than the per-token path uses.
 
+That suspicion is now excluded for block 1: blocks 0 and 1 are *both* entirely Q8_0 (attn_q/k/v,
+attn_output, ffn_gate/up/down), block 0 agrees to 1.3e-07 after the fix, and block 1 still differs by
+9.2e-04 with inputs that match to 1.3e-07. So the residue is inside the KDA per-row computation with
+identical inputs and identical matvecs — the conv step, the delta rule, the gate, or the L2 norm —
+reached through different buffers (`m.bq`/`m.bk`/`m.bv` rows versus `m.q`/`m.k`/`m.v`).
+
+Next concrete step, using the instrument that localized block 0: dump the chunked path's per-row KDA
+intermediates (`cq`/`ck`/`cv` after conv + SiLU, `kda_gate`, `beta`, the delta-rule output) next to
+the per-token path's `p_convq_<pos>`/`ling3_cq0` dumps, and compare them in order. The first of those
+that differs names the defect.
+
 Two discriminators have been tried and are not usable as-is: `LING3_CHUNK_BLOCK` returns before the
 FFN, and `LING3_CHUNK_SIZE` did not change any result in this mode (the run with size 1 was
 bit-identical to size 8), so the chunk-width lever needs verifying before it can attribute the
