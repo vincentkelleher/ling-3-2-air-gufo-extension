@@ -6,6 +6,7 @@
 
 #include <sys/mman.h>
 
+#include <array>
 #include <chrono>
 #include <cstddef>
 #include <cstdio>
@@ -842,6 +843,21 @@ bool Engine::ForwardFromEmbedded(std::uint32_t position, std::string* error) {
                               c.n_expert, c.n_group, c.n_group_used,
                               c.n_expert_used, c.expert_weights_scale, m.moe_ids,
                               m.moe_weights, stream);
+      if ((il == 2 || il == 40) && std::getenv("LING3_ROUTER_TRACE") != nullptr) {
+        // Print from the call site: the file dumps in this engine have needed a staging
+        // fix or a stream synchronise before telling the truth.
+        hipStreamSynchronize(stream);
+        std::array<std::int32_t, 8> ids{};
+        std::array<float, 8> weights{};
+        const std::size_t used = std::min<std::size_t>(c.n_expert_used, 8);
+        hipMemcpy(ids.data(), m.moe_ids, used * sizeof(std::int32_t), hipMemcpyDeviceToHost);
+        hipMemcpy(weights.data(), m.moe_weights, used * sizeof(float), hipMemcpyDeviceToHost);
+        float total = 0.0f;
+        for (std::size_t i = 0; i < used; ++i) total += weights[i];
+        std::fprintf(stderr, "[router] layer %u pos %u ids", il, position);
+        for (std::size_t i = 0; i < used; ++i) std::fprintf(stderr, " %d", ids[i]);
+        std::fprintf(stderr, " weight_sum %.4f\n", total);
+      }
       if (il == 2 || il == 40) {
         char path[64];
         std::snprintf(path, sizeof(path), "/work/moe_ids_%u.bin", il);

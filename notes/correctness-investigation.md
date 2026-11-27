@@ -238,3 +238,20 @@ With routing indistinguishable at block 40 and blocks 0-39 matching to four deci
 remaining explanations for the block-40 overshoot are (a) a routing difference that only the
 stderr trace can settle, or (b) the expert arithmetic for that layer, e.g. a per-layer expert
 tensor whose quantization type our dequantiser mishandles.
+
+### Router trace (stderr, reliable)
+
+With `LING3_ROUTER_TRACE=1`, printed from the call site:
+
+| layer | position | ids | weight sum |
+| --- | --- | --- | --- |
+| 2 | 0 | 326 468 499 498 454 330 188 270 | 2.5000 |
+| 40 | 0 | 425 324 176 0 134 54 172 345 | 2.5000 |
+| 2 | 1 | 486 326 169 511 69 339 471 65 | 2.5000 |
+| 40 | 1 | 277 315 319 317 296 112 282 256 | 2.5000 |
+
+Eight distinct experts each, weights summing to exactly the 2.5 scale, so the routing path behaves
+sanely at the layer that diverges — including a `0` id at layer 40, which also proves the earlier
+all-zero ids dump was the file, not the router. What is still missing is the reference's own top-k
+for comparison: extending the reference tool's selector to `ffn_moe_topk` produced no files, so
+that selector needs checking before the ids can be compared rather than just inspected.
