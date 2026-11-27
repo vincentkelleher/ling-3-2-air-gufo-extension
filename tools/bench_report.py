@@ -16,7 +16,10 @@ container path while `--roofline-model` uses the host path (the roofline model i
 computed on the host from the GGUF).
 
 The bandwidth default is the measured read bandwidth of this box; pass
-`--bandwidth` to use another. Prefill is reported as unavailable until the
+`--bandwidth` to use another. `tools/roofline.py` imports the `gguf` Python
+package (`pip install gguf`) to derive bytes/token from the shards; without it
+the roofline half fails while the measured bandwidth half still runs. Prefill is
+reported as unavailable until the
 engine has a batched pass (notes/prefill-design.md).
 """
 
