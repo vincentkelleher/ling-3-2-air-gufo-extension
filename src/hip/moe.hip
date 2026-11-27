@@ -86,12 +86,17 @@ __global__ void RouterKernel(const float* logits, const float* bias, int n_exper
                             int n_group, int group_used, int top_k, float scale,
                             int* ids, float* weights) {
   __shared__ float scores[kMaxExperts];
+  // The reference selects on sigmoid(logit) + bias but weights with the unbiased
+  // sigmoid (llama-graph.cpp: selection_probs = probs + exp_probs_b, weights come
+  // from probs). Folding the bias into the sigmoid changes every expert weight.
+  __shared__ float unbiased[kMaxExperts];
   __shared__ unsigned char used[kMaxExperts];
   if (blockIdx.x != 0) {
     return;
   }
   for (int e = threadIdx.x; e < n_expert; e += blockDim.x) {
-    scores[e] = 1.0f / (1.0f + expf(-(logits[e] + (bias == nullptr ? 0.0f : bias[e]))));
+    unbiased[e] = 1.0f / (1.0f + expf(-logits[e]));
+    scores[e] = unbiased[e] + (bias == nullptr ? 0.0f : bias[e]);
   }
   __syncthreads();
   if (threadIdx.x != 0) {
@@ -165,11 +170,11 @@ __global__ void RouterKernel(const float* logits, const float* bias, int n_exper
 
   float sum = 0.0f;
   for (int i = 0; i < top_k; ++i) {
-    sum += scores[ids[i]];
+    sum += unbiased[ids[i]];
   }
   const float inverse = sum > 0.0f ? 1.0f / sum : 0.0f;
   for (int i = 0; i < top_k; ++i) {
-    weights[i] = scores[ids[i]] * inverse * scale;
+    weights[i] = unbiased[ids[i]] * inverse * scale;
   }
 }
 

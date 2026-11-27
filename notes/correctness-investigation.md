@@ -167,3 +167,37 @@ made no difference to its output, and the rounding only injected error into late
 What remains after the fix is accumulation rather than a wrong formula: blocks 0-3 agree to
 0.3-0.6 %, the first MLA layer adds ~1.5 %, and the logits still differ (relative 0.19 at two
 tokens) because sub-percent residue in the residual stream flips router choices near their ties.
+
+## Router parity (fixed) and the last two blocks (open, 2026-11-27)
+
+The reference's MoE order, read from `llama-graph.cpp`: `probs = sigmoid(logits)`; the *bias*
+(`exp_probs_b`) is added only to form `selection_probs`; weights come from the **unbiased** probs
+(`ggml_get_rows(probs, selected_experts)`), are divided by their sum when `expert_weights_norm` is
+true, and only then multiplied by `expert_weights_scale` (2.5 here). Our router added the bias
+inside the sigmoid and normalised the biased values, so every expert weight was slightly wrong.
+
+After fixing it (selection biased, weights unbiased -> normalise -> scale):
+
+| context | rel logit error before | after |
+| --- | --- | --- |
+| `[156891, 156891]` | 0.158 | **0.095** |
+| `[156891, 156891, 156891]` | 0.153 | **0.070** |
+
+Attention contributions now agree to ~3 % at every block, including the last three.
+
+**Still open: blocks 40 and 41.** At position 0 the residual rms jumps in the reference
+(1.52 -> 3.53 between blocks 39 and 40) and jumps *further* in ours (1.53 -> 7.64). Isolating the
+block's FFN contribution (`l_out_n - l_out_(n-1) - attention_n`, all dumped):
+
+| block | ref ffn rms | our ffn rms | rel |
+| --- | --- | --- | --- |
+| 38 | 0.286 | 0.283 | 0.092 |
+| 39 | 0.241 | 0.256 | 0.131 |
+| **40** | **2.666** | **6.863** | **1.59** |
+| **41** | **2.608** | **1.843** | **0.77** |
+
+Two facts to explain: the reference's FFN contribution is ~10x larger at 40 and 41 than at 38-39,
+and ours is 2.6x too large at 40 while too small at 41. `leading_dense_block_count` is 2, so 40 is a
+Mixture-of-Experts block on both sides; the next thing to check is whether the last trunk blocks in
+this architecture carry a different expert layout (or are the NextN/MTP block) rather than being
+ordinary MoE layers, since a structural mismatch there would produce exactly this shape.
