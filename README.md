@@ -56,9 +56,9 @@ at the bottom.
 
 | case | engine | reference |
 | --- | --- | --- |
-| decode, short context | **16.2-17.0 tok/s** (median 17.0) | llama.cpp CPU: 12.52 tok/s |
+| decode, short context | **19.85 tok/s** (median of 3; 1.59x the reference, 39.8% of the 49.9 tok/s roofline) | llama.cpp CPU: 12.52 tok/s |
 | prefill, 104-token prompt | 12.52 tok/s sequential, **16.13 tok/s chunked (1.29x)** | llama.cpp CPU prompt eval: 24.20 tok/s |
-| prefill, pp2048 | **23.4-23.8 tok/s** = 0.37-0.38 % of the 6,277 tok/s roofline | llama.cpp prompt eval: 24.20 tok/s |
+| prefill, pp2420 | **27.9 tok/s** (median of 3; 0.44 % of the 6,277 tok/s roofline) | llama.cpp prompt eval: 24.20 tok/s |
 | weight load | 2.1 s warm, 35.9 s cold | llama.cpp mmap: 1.58 s |
 
 Machine ceilings measured in-repo (`tools/bandwidth_probe.hip`,
