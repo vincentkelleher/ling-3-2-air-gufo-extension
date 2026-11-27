@@ -78,6 +78,31 @@ void DumpKdaInputs(const char* tag, const float* qn, const float* kn, const floa
 }
 }  // namespace
 
+
+namespace {
+/// Recurrent state at a named moment, so the two prefill implementations can be compared
+/// after the first row. Debug only, gated by LING3_STATE_TAG at the call sites.
+void DumpState(const char* tag, const char* when, const float* conv, const float* delta,
+               std::size_t conv_floats, std::size_t delta_floats, hipStream_t stream) {
+  hipStreamSynchronize(stream);
+  std::vector<float> host(conv_floats);
+  hipMemcpy(host.data(), conv, conv_floats * sizeof(float), hipMemcpyDeviceToHost);
+  char path[128];
+  std::snprintf(path, sizeof(path), "/work/st_%s_conv_%s.bin", when, tag);
+  if (FILE* file = std::fopen(path, "wb")) {
+    std::fwrite(host.data(), sizeof(float), host.size(), file);
+    std::fclose(file);
+  }
+  host.assign(delta_floats, 0.0f);
+  hipMemcpy(host.data(), delta, delta_floats * sizeof(float), hipMemcpyDeviceToHost);
+  std::snprintf(path, sizeof(path), "/work/st_%s_delta_%s.bin", when, tag);
+  if (FILE* file = std::fopen(path, "wb")) {
+    std::fwrite(host.data(), sizeof(float), host.size(), file);
+    std::fclose(file);
+  }
+}
+}  // namespace
+
 struct Engine::Impl {
   Ling3Config config;
   Ling3Weights weights;
@@ -739,6 +764,11 @@ bool Engine::ForwardFromEmbedded(std::uint32_t position, std::string* error) {
       if (il == 1) {
         if (const char* tag = std::getenv("LING3_STATE_TAG")) {
           DumpKdaInputs(tag, m.qn, m.kn, m.cv, m.kda_gate, m.beta, kda_inner, heads, stream);
+          if (position == 0) {
+            DumpState(tag, "p0", m.conv_state[il], m.delta_state[il],
+                      9 * static_cast<std::size_t>(kda_inner),
+                      static_cast<std::size_t>(heads) * kda_dim * kda_dim, stream);
+          }
         }
       }
       hip::LaunchDeltaRuleStep(m.qn, m.kn, m.cv, m.kda_gate, m.beta,
@@ -1327,6 +1357,11 @@ bool Engine::PrefillChunk(const std::int32_t* tokens, std::size_t count,
       if (il == 1) {
         if (const char* tag = std::getenv("LING3_STATE_TAG")) {
           DumpKdaInputs(tag, m.qn, m.kn, m.cv, m.kda_gate, m.beta, kda_inner, heads, stream);
+          if (position == 0) {
+            DumpState(tag, "p0", m.conv_state[il], m.delta_state[il],
+                      9 * static_cast<std::size_t>(kda_inner),
+                      static_cast<std::size_t>(heads) * kda_dim * kda_dim, stream);
+          }
         }
       }
       hip::LaunchDeltaRuleStep(m.qn, m.kn, m.cv, m.kda_gate, m.beta,
