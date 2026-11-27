@@ -620,3 +620,23 @@ vocabulary* — an HF run would use a vocabulary that has the tokens, so the con
 request now fails with an explicit `invalid_argument` rather than an empty 200. Unblocking this needs
 a text GGUF whose vocabulary carries the vision specials, which is a model-artifact question, not an
 implementation one.
+
+## Image over HTTP: working (2026-11-27)
+
+`POST /v1/chat/completions` with a base64 image now returns 200 and a coherent completion. Three
+things were needed, each found by the failure it produced:
+
+1. **The markers are CONTROL tokens** (`<|image_pad|>` 157157, `<|vision_start|>` 157158,
+   `<|vision_end|>` 157159), so encoding the literal text does not produce them. They are spliced by
+   id from `Encode("<|image_pad|>", parse_special=true)`, and each span is recorded where it is placed
+   — the earlier attempt rescanned the tokens and counted markers by decoding, which reported 0 and
+   threw "no image marker token". That message was misleading: the vocabulary does carry them.
+2. **`Prefill` must consume a whole span.** The host rejects a pass that ends inside one
+   (`text runner stopped prefill inside an indivisible input`), so a pass whose end falls inside a
+   span is extended to the span's end, beyond the 32-token budget. Each of the 576 rows then enters
+   through `Engine::ForwardEmbedding`.
+3. `supports_vision` follows `options.vision_model_path`, and the encoder is built lazily from the
+   mmproj and cached.
+
+`ctest` stays 10/10 with this in place. The image path runs the span row by row (sequential), so it is
+correct but not fast — batching it belongs with the prefill work in `notes/prefill-design.md`.
