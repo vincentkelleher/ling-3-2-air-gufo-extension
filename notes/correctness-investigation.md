@@ -337,3 +337,31 @@ results differ by a fraction of a percent per matvec, which accumulates to the o
 Reproducing llama.cpp token-for-token therefore most likely means reproducing its Q8_K activation
 quantisation for Q4_K/Q6_K matvecs, not further tuning of the f32 paths. That is a contained but
 real piece of work, and it is where the next session should start.
+
+## Consolidated: what is left between this engine and token-for-token parity
+
+Everything below was checked against the reference source or measured, not assumed. The order is
+"closest to the truth first", because each item narrows the next.
+
+1. **Fixed and verified** — uniform softmax (every head 0.5/0.5), fp16-rounded cache stores,
+   stream-synchronised dumps, `LING3_ROPE` reaching the kernel, and the text-based golden harness
+   that compared two different contexts (now `tools/golden_set_ids.py`).
+2. **Checked and found equivalent** — the Q4_K activation quantisation. llama.cpp uses
+   `iscale = -127/max` with `d = 1/iscale`; ours uses `amax/127`. The two reconstruct identically
+   because `q_ref = -q_ours` and `d_ref = -d_ours`, so the product is unchanged; only exact `.5`
+   ties round differently (`nearest_int` versus `__float2int_rn`). Not the gap.
+3. **Checked and found matching** — the Q4_K dequantiser: `d*sc*code - dmin*m` per 32-value
+   sub-block with `Q4ScaleMin` mirroring `get_scale_min_k4`, which is the reference formula. The
+   "0.25 %" figure in `docs/quality.md` refers to the Q4_0 MTP-block comparison, not Q4_K.
+4. **Still different, and the likely remaining cause** — accumulation arithmetic. llama.cpp's CPU
+   path dots int8-quantised activations against Q4_K weights in integer arithmetic with int16
+   sub-sums and one f32 scale per 256-block, while this engine's kernels accumulate in f32 per
+   sub-block. Both are quantised; the *rounding at every accumulation step* differs, which is the
+   right size to explain a 0.3-4 % residual spread that grows with depth and flips near ties
+   (golden divergences at tokens 19 / 16 / 2 with `arithmetic` exact).
+
+So the next honest attempt at parity is not another hypothesis hunt: it is to reproduce
+`ggml_vec_dot_q4_K_q8_K`'s accumulation exactly (int16 sub-sums per 16 values, single f32 scale
+application per super-block) and measure with `tools/golden_set_ids.py`. If that still leaves ties
+flipping, the conclusion is that parity needs the reference's whole arithmetic, and the documented
+divergence indices are the honest deliverable.
