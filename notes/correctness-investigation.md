@@ -365,3 +365,18 @@ So the next honest attempt at parity is not another hypothesis hunt: it is to re
 application per super-block) and measure with `tools/golden_set_ids.py`. If that still leaves ties
 flipping, the conclusion is that parity needs the reference's whole arithmetic, and the documented
 divergence indices are the honest deliverable.
+
+### The reference dumper cannot be extended reliably
+
+Three attempts to add a tensor to the reference dumper (`q_b`, `result_output`/`result_norm`,
+`ffn_moe_weights`) each produced **no files**, while `l_out`, `kda_out` and `mla_out` dump fine and
+the run exits 0. The selected node apparently does not survive the scheduler's node selection unless
+it is already reported for another reason, so "add a selector" is not a working method here. Any
+further reference-side measurement should use `llama_greedy_ids` / the row tool (explicit ids,
+final logits), which have been reliable, rather than new selectors.
+
+Consequence for the open question: the reference's own MoE weights per layer are still unmeasured,
+so the 2.5 scale placement (normalise then scale, which we do, versus scale then normalise, which
+the source suggests is equivalent) is not verified against data — only against reading. With the dot
+paths pinned to 1e-4, a 0.26 % difference at block 0 remains unexplained and would be settled fastest
+by a reference that reports `ffn_moe_weights`, which this fork's dumper does not.
