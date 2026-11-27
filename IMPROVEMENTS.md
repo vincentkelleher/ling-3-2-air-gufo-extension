@@ -636,3 +636,25 @@ So the honest expectation for `prefill-opt` is launch-overhead removal on the ex
 different algorithm — which is why the 70 % gate (≈4,400 tok/s against 23.8) is not reachable without
 relaxing the identity rule. That trade-off is the user's call, not something to decide silently.
 
+## Prefill +9 %: batched KDA (adopted 2026-11-27)
+
+The chunked path ran the KDA delta rule, the decay gate and the output gate once per token, so a
+32-token chunk re-read the gate projections' weights (41 MB each) for every row. Batching them:
+
+| variant | pp2420 tok/s (median of 3) |
+| --- | --- |
+| per-row KDA (previous) | 25.5 |
+| batched delta rule only | 25.8 |
+| batched delta + batched gate/beta/output-gate GEMMs | **27.8** |
+
+The batched path is **byte-identical** to the per-row one — 966 of 966 residual rows across 42 blocks
+and 23 positions, verified with the same instrument that proved the chunked/per-token parity — and
+`ctest` is 10/10. It is now the default (`LING3_KDA_ROW=1` forces the old path).
+
+What the measurement also changed: the gain is 9 %, not the ~30x the byte arithmetic predicted for
+hoisting those weight reads, so the weights were already cache-resident between rows. Prefill is
+therefore **latency-bound, not bandwidth-bound**: ~2,420 tokens in 87 s is 36 ms per token, and with
+roughly 500 small kernels per token that is ~70 us per launch. Reaching the 2,000 tok/s target needs
+far fewer, far larger kernels — a different design, not more hoisting. That is the honest position for
+`prefill-opt`: each admissible increment is single-digit percent while the target is 70x away.
+

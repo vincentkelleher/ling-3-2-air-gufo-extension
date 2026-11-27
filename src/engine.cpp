@@ -164,6 +164,14 @@ struct Engine::Impl {
   float* bk{nullptr};
   float* bv{nullptr};
   float* bgated{nullptr};
+  /// Row-indexed KDA buffers for the batched delta rule (state stays resident across rows).
+  float* kchg_q{nullptr};
+  float* kchg_k{nullptr};
+  float* kchg_v{nullptr};
+  float* kchg_gate{nullptr};
+  float* kchg_out{nullptr};
+  float* kchg_beta{nullptr};
+  float* kchg_ga{nullptr};
   float* battn{nullptr};
   float* bffnh{nullptr};
   float* bffa{nullptr};
@@ -440,7 +448,15 @@ std::unique_ptr<Engine> Engine::Create(const core::GgufReader& reader,
       alloc(&m.bx, Impl::kMaxChunk * n_embd) && alloc(&m.bh, Impl::kMaxChunk * n_embd) &&
       alloc(&m.bq, Impl::kMaxChunk * q_dim) &&
       alloc(&m.bk, Impl::kMaxChunk * (kda_inner > kv_dim ? kda_inner : kv_dim)) &&
-      alloc(&m.bv, Impl::kMaxChunk * kda_inner) && alloc(&m.bgated, Impl::kMaxChunk * q_dim) &&
+      alloc(&m.bv, Impl::kMaxChunk * kda_inner) &&
+      alloc(&m.kchg_q, Impl::kMaxChunk * kda_inner) &&
+      alloc(&m.kchg_k, Impl::kMaxChunk * kda_inner) &&
+      alloc(&m.kchg_v, Impl::kMaxChunk * kda_inner) &&
+      alloc(&m.kchg_gate, Impl::kMaxChunk * kda_inner) &&
+      alloc(&m.kchg_out, Impl::kMaxChunk * kda_inner) &&
+      alloc(&m.kchg_beta, Impl::kMaxChunk * heads) &&
+      alloc(&m.kchg_ga, Impl::kMaxChunk * kda_inner) &&
+      alloc(&m.bgated, Impl::kMaxChunk * q_dim) &&
       alloc(&m.battn, Impl::kMaxChunk * n_embd) && alloc(&m.bffnh, Impl::kMaxChunk * n_embd) &&
       alloc(&m.bffa, Impl::kMaxChunk * config.n_ff) && alloc(&m.bffb, Impl::kMaxChunk * config.n_ff) &&
       alloc(&m.bffout, Impl::kMaxChunk * n_embd) &&
@@ -1427,9 +1443,65 @@ bool Engine::PrefillChunk(const std::int32_t* tokens, std::size_t count,
                       m.bh, M, n_embd, m.bk, kv_row, stream);
     }
 
+    // Batched KDA: one delta-rule launch per chunk so the recurrent state stays resident across
+    // rows. Opt-in until measured; the per-row maths is identical.
+    // Default: batched (measured +9 % at pp2048 and byte-identical to the per-row path).
+    // LING3_KDA_ROW=1 forces the old per-row path for comparison.
+    const bool kda_batched = kda && std::getenv("LING3_KDA_ROW") == nullptr;
+    if (kda_batched) {
+      // The gate, beta and output-gate projections are per chunk, not per row: as per-row GEMVs
+      // they re-read ~41 MB of weights for every row (about 92 GB per 32-token chunk), which is
+      // what actually limited prefill. One GEMM each reads them once.
+      hip::LaunchGemm(dev(layer.kda_f_a), Storage(layer.kda_f_a.type), kda_inner, n_embd,
+                      m.bh, M, n_embd, m.kchg_gate, kda_inner, stream);
+      hip::LaunchGemm(dev(layer.kda_beta), Storage(layer.kda_beta.type), heads, n_embd,
+                      m.bh, M, n_embd, m.kchg_beta, heads, stream);
+      hip::LaunchGemm(dev(layer.kda_g_a), Storage(layer.kda_g_a.type), kda_inner, n_embd,
+                      m.bh, M, n_embd, m.kchg_ga, kda_inner, stream);
+      for (int i = 0; i < M; ++i) {
+        const std::size_t row = static_cast<std::size_t>(i) * n_embd;
+        const std::size_t slot = static_cast<std::size_t>(i) * kda_inner;
+        hip::LaunchConv1dStep(m.bq + slot, static_cast<const float*>(dev(layer.kda_conv_q)),
+                              m.conv_state[il], kda_inner, 0, m.kchg_q + slot, stream);
+        hip::LaunchSilu(m.kchg_q + slot, m.kchg_q + slot, kda_inner, stream);
+        hip::LaunchConv1dStep(m.bk + slot, static_cast<const float*>(dev(layer.kda_conv_k)),
+                              m.conv_state[il], kda_inner, 1, m.kchg_k + slot, stream);
+        hip::LaunchSilu(m.kchg_k + slot, m.kchg_k + slot, kda_inner, stream);
+        hip::LaunchConv1dStep(m.bv + slot, static_cast<const float*>(dev(layer.kda_conv_v)),
+                              m.conv_state[il], kda_inner, 2, m.kchg_v + slot, stream);
+        hip::LaunchSilu(m.kchg_v + slot, m.kchg_v + slot, kda_inner, stream);
+        hip::LaunchL2Norm(m.kchg_q + slot, m.kchg_q + slot, heads, kda_dim, eps, stream);
+        hip::LaunchL2Norm(m.kchg_k + slot, m.kchg_k + slot, heads, kda_dim, eps, stream);
+        hip::LaunchKdaGate(m.kchg_gate + slot,
+                           static_cast<const float*>(dev(layer.kda_dt)),
+                           static_cast<const float*>(dev(layer.kda_a)), m.kchg_gate + slot,
+                           kda_inner, kda_dim, c.kda_gate_lower_bound, stream);
+        hip::LaunchSigmoid(m.kchg_beta + static_cast<std::size_t>(i) * heads,
+                           m.kchg_beta + static_cast<std::size_t>(i) * heads, heads,
+                           stream);
+      }
+      hip::LaunchDeltaRuleChunk(m.kchg_q, m.kchg_k, m.kchg_v, m.kchg_gate, m.kchg_beta,
+                                m.delta_state[il], m.kchg_out, heads, kda_dim,
+                                static_cast<std::size_t>(M), kda_inner, kda_inner,
+                                kda_inner, stream);
+      for (int i = 0; i < M; ++i) {
+        const std::size_t row = static_cast<std::size_t>(i) * n_embd;
+        const std::size_t slot = static_cast<std::size_t>(i) * kda_inner;
+        hip::LaunchRmsNorm(m.kchg_out + slot,
+                           static_cast<const float*>(dev(layer.kda_o_norm)),
+                           m.kchg_q + slot, heads, kda_dim, eps, stream);
+        hip::LaunchMulSigmoid(m.kchg_q + slot, m.kchg_ga + slot, kda_inner, stream);
+        hipMemcpyAsync(m.bgated + slot, m.kchg_q + slot, kda_inner * sizeof(float),
+                       hipMemcpyDeviceToDevice, stream);
+      }
+    }
+
     for (int i = 0; i < M; ++i) {
       const std::size_t row = static_cast<std::size_t>(i) * n_embd;
       const std::uint32_t position = start_position + static_cast<std::uint32_t>(i);
+      if (kda_batched) {
+        continue;
+      }
       if (kda) {
         const float* q_row = m.bq + static_cast<std::size_t>(i) * kda_inner;
         const float* k_row = m.bk + static_cast<std::size_t>(i) * kda_inner;

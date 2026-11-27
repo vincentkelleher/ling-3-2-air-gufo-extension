@@ -163,6 +163,52 @@ __global__ void DeltaRuleKernel(const float* q, const float* k, const float* v,
   }
 }
 
+/// The delta rule for a whole chunk in one launch: the per-row maths is identical to
+/// DeltaRuleKernel (same order, same layout), but the recurrent state stays resident across the
+/// chunk's rows instead of being read and written to global memory once per row.
+__global__ void DeltaRuleChunkKernel(const float* q, const float* k, const float* v,
+                                     const float* g, const float* beta, float* state,
+                                     float* out, int heads, int head_dim, int rows,
+                                     int qkv_stride, int g_stride, int out_stride) {
+  const int head = blockIdx.x;
+  if (head >= heads || threadIdx.x >= head_dim) {
+    return;
+  }
+  const int j = threadIdx.x;
+  extern __shared__ float shared[];
+  float* decay = shared;
+  float* k_shared = decay + head_dim;
+  const std::size_t head_base = static_cast<std::size_t>(head) * head_dim;
+  const auto at = [&](int i) {
+    return state + (head_base + static_cast<std::size_t>(i)) * head_dim + j;
+  };
+  for (int row = 0; row < rows; ++row) {
+    const std::size_t qkv = static_cast<std::size_t>(row) * qkv_stride + head_base;
+    __syncthreads();  // previous row's readers are done with the shared arrays
+    decay[j] = expf(g[static_cast<std::size_t>(row) * g_stride + head_base + j]);
+    k_shared[j] = k[qkv + j];
+    __syncthreads();
+    for (int i = 0; i < head_dim; ++i) {
+      *at(i) *= decay[i];
+    }
+    float dot = 0.0f;
+    for (int i = 0; i < head_dim; ++i) {
+      dot += *at(i) * k_shared[i];
+    }
+    const float beta_row = beta[static_cast<std::size_t>(row) * heads + head];
+    const float delta = (v[qkv + j] - dot) * beta_row;
+    for (int i = 0; i < head_dim; ++i) {
+      *at(i) += k_shared[i] * delta;
+    }
+    float sum = 0.0f;
+    for (int i = 0; i < head_dim; ++i) {
+      sum += *at(i) * q[qkv + i];
+    }
+    out[static_cast<std::size_t>(row) * out_stride + head_base + j] =
+        sum / sqrtf(static_cast<float>(head_dim));
+  }
+}
+
 __global__ void ArgmaxKernel(const float* x, int count, std::int32_t* result) {
   // Phase 1: each thread's best over its stride, reduced within the warp and
   // then across warps. Ties resolve to the lower index (deterministic).
@@ -253,6 +299,19 @@ void LaunchDeltaRuleStep(const float* q, const float* k, const float* v,
                     shared, stream>>>(q, k, v, g, beta, state, out,
                                       static_cast<int>(heads),
                                       static_cast<int>(head_dim), debug);
+}
+
+void LaunchDeltaRuleChunk(const float* q, const float* k, const float* v,
+                          const float* g, const float* beta, float* state, float* out,
+                          std::size_t heads, std::size_t head_dim, std::size_t rows,
+                          std::size_t qkv_stride, std::size_t g_stride,
+                          std::size_t out_stride, hipStream_t stream) {
+  const std::size_t shared = 2 * head_dim * sizeof(float);
+  DeltaRuleChunkKernel<<<static_cast<int>(heads), static_cast<int>(head_dim), shared,
+                         stream>>>(q, k, v, g, beta, state, out,
+                                   static_cast<int>(heads), static_cast<int>(head_dim),
+                                   static_cast<int>(rows), static_cast<int>(qkv_stride),
+                                   static_cast<int>(g_stride), static_cast<int>(out_stride));
 }
 
 void LaunchArgmax(const float* x, std::size_t count, std::int32_t* result,

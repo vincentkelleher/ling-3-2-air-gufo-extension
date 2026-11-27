@@ -41,6 +41,14 @@ void LaunchRope(float* x, std::size_t heads, std::size_t head_dim,
 ///   3. `M[j][i] += k[h][i] * delta[j]`
 ///   4. `out[h][j] = dot(M[j], q[h]) / sqrt(head_dim)`
 /// `g` is `[heads][head_dim]`, `beta` is `[heads]`; the state updates in place.
+/// The delta rule for a whole chunk in one launch, so the recurrent state stays resident
+/// across the chunk's rows. Per-row maths is identical to LaunchDeltaRuleStep.
+void LaunchDeltaRuleChunk(const float* q, const float* k, const float* v,
+                          const float* g, const float* beta, float* state, float* out,
+                          std::size_t heads, std::size_t head_dim, std::size_t rows,
+                          std::size_t qkv_stride, std::size_t g_stride,
+                          std::size_t out_stride, hipStream_t stream);
+
 void LaunchDeltaRuleStep(const float* q, const float* k, const float* v,
                          const float* g, const float* beta, float* state,
                          float* out, std::size_t heads, std::size_t head_dim,
