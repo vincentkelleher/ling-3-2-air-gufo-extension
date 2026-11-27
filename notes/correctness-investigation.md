@@ -467,6 +467,21 @@ attention contribution) and the seed of everything downstream. The remaining sus
 per-row inputs the chunked path hands that kernel (L2-normed q/k, the gated v, the decay gate, beta)
 or the buffer it accumulates into.
 
+Position-resolved measurement (the chunk dump now writes every row of the chunk, so positions
+compare directly with the per-token path's `x_<block>_<position>.bin`):
+
+| block | positions matching | first divergence |
+| --- | --- | --- |
+| 0 | 0-6 (about 1e-07) | position 7 (1.4e-03) |
+| 1 | 0 (1.3e-07) | position 1 (1.7e-03) |
+
+This rules out a pure per-position arithmetic difference: block 1's input at position 1 is block 0's
+output there, which matches to 1.3e-07, yet block 1's own output at position 1 differs. Whatever
+differs is carried *between* positions — the recurrent state after the previous row — and it starts
+earlier in block 1 than in block 0, so two mechanisms may be involved. Also measured: all five
+delta-rule inputs at block 1's last row match to about 1e-07, which is consistent with the state being
+the carrier rather than the inputs.
+
 Inspected since: the delta step *is* inside the per-row loop (`for (int i = 0; i < M; ++i)`, only
 mis-indented), the conv state proves `cq/ck/cv` match, and the L2 norms, the decay gate and beta are
 deterministic functions of that same data — so the kernel inputs should be identical. Before

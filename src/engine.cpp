@@ -54,6 +54,30 @@ int RawType(core::GgmlType type) {
 
 }  // namespace
 
+
+namespace {
+/// Writes the per-row inputs of the KDA delta step, so the batched and per-token paths can
+/// be compared where their state first differs. Debug only, gated by LING3_STATE_TAG.
+void DumpKdaInputs(const char* tag, const float* qn, const float* kn, const float* cv,
+                   const float* gate, const float* beta, std::size_t inner,
+                   std::size_t heads, hipStream_t stream) {
+  hipStreamSynchronize(stream);
+  std::vector<float> host(4 * inner + heads);
+  hipMemcpy(host.data(), qn, inner * sizeof(float), hipMemcpyDeviceToHost);
+  hipMemcpy(host.data() + inner, kn, inner * sizeof(float), hipMemcpyDeviceToHost);
+  hipMemcpy(host.data() + 2 * inner, cv, inner * sizeof(float), hipMemcpyDeviceToHost);
+  hipMemcpy(host.data() + 3 * inner, gate, inner * sizeof(float), hipMemcpyDeviceToHost);
+  hipMemcpy(host.data() + 4 * inner, beta, heads * sizeof(float), hipMemcpyDeviceToHost);
+  char path[96];
+  std::snprintf(path, sizeof(path), "/work/kda_%s.bin", tag);
+  FILE* file = std::fopen(path, "wb");
+  if (file != nullptr) {
+    std::fwrite(host.data(), sizeof(float), host.size(), file);
+    std::fclose(file);
+  }
+}
+}  // namespace
+
 struct Engine::Impl {
   Ling3Config config;
   Ling3Weights weights;
@@ -712,6 +736,11 @@ bool Engine::ForwardFromEmbedded(std::uint32_t position, std::string* error) {
       // `cq` is free after the L2 normalisation; the delta step reads `kn`
       // while writing, so it needs a different buffer.
       mark(il, 4);
+      if (il == 1) {
+        if (const char* tag = std::getenv("LING3_STATE_TAG")) {
+          DumpKdaInputs(tag, m.qn, m.kn, m.cv, m.kda_gate, m.beta, kda_inner, heads, stream);
+        }
+      }
       hip::LaunchDeltaRuleStep(m.qn, m.kn, m.cv, m.kda_gate, m.beta,
                                m.delta_state[il], m.cq, heads, kda_dim, stream,
                                (il == 0 && std::getenv("LING3_DUMP") != nullptr)
@@ -1295,6 +1324,11 @@ bool Engine::PrefillChunk(const std::int32_t* tokens, std::size_t count,
         hip::LaunchSigmoid(m.beta_pre, m.beta, heads, stream);
         hip::LaunchL2Norm(m.cq, m.qn, heads, kda_dim, eps, stream);
         hip::LaunchL2Norm(m.ck, m.kn, heads, kda_dim, eps, stream);
+      if (il == 1) {
+        if (const char* tag = std::getenv("LING3_STATE_TAG")) {
+          DumpKdaInputs(tag, m.qn, m.kn, m.cv, m.kda_gate, m.beta, kda_inner, heads, stream);
+        }
+      }
       hip::LaunchDeltaRuleStep(m.qn, m.kn, m.cv, m.kda_gate, m.beta,
                                  m.delta_state[il], m.cq, heads, kda_dim, stream);
       hip::LaunchRmsNorm(m.cq, static_cast<const float*>(dev(layer.kda_o_norm)), m.qn,
@@ -1405,15 +1439,16 @@ bool Engine::PrefillChunk(const std::int32_t* tokens, std::size_t count,
       // Post-block residual of the chunk's last row: the same quantity the per-token path
       // writes to x_<block>_<position>.bin, so the two paths can be compared directly.
       // (The LING3_CHUNK_BLOCK hook returns before the FFN, so it is not comparable.)
-      std::vector<float> row(n_embd);
+      // Every row of the chunk, so positions can be compared one by one with the
+      // per-token path (which writes x_<block>_<position>.bin per position).
+      std::vector<float> rows(static_cast<std::size_t>(M) * n_embd);
       hipStreamSynchronize(stream);
-      hipMemcpy(row.data(), m.bx + static_cast<std::size_t>(M - 1) * n_embd,
-                n_embd * sizeof(float), hipMemcpyDeviceToHost);
+      hipMemcpy(rows.data(), m.bx, rows.size() * sizeof(float), hipMemcpyDeviceToHost);
       char path[64];
       std::snprintf(path, sizeof(path), "/work/xc_%u.bin", il);
       FILE* file = std::fopen(path, "wb");
       if (file != nullptr) {
-        std::fwrite(row.data(), sizeof(float), n_embd, file);
+        std::fwrite(rows.data(), sizeof(float), rows.size(), file);
         std::fclose(file);
       }
     }
