@@ -414,7 +414,25 @@ read with the *same* instrument — each run's final decode step dumps `x_<block
 whatever state its prefill produced, so the delta between the two files is the prefill divergence.
 The existing bisect hook (`LING3_CHUNK_BLOCK`, which writes `chunk_x.bin`) is **not** comparable: the
 same comparison through it reports 30-70 %, i.e. three orders of magnitude more, so its contents are
-not the post-block chunk residual I assumed. The next step is therefore to add a dump *inside*
-`PrefillChunk` that writes the chunk's post-residual rows per block, verified to agree with the
-sequential instrument on a one-token prefill, before drawing any conclusion about which of the two
-paths is wrong.
+not the post-block chunk residual I assumed. That dump now exists: `PrefillChunk` writes the chunk's **post-block** residual for its last row to
+`/work/xc_<block>.bin` when `LING3_DUMP_BLOCKS` is set, the same quantity the per-token path writes to
+`x_<block>_<position>.bin`. Measured like-for-like at position 22 on the small prompt:
+
+| block | rel (chunked vs sequential) |
+| --- | --- |
+| 0 | 6.1e-03 |
+| 1 | 7.2e-03 |
+| 2 | 1.6e-02 |
+| 10 | 3.9e-02 |
+| 20 | 2.2e-01 |
+| 33 | 2.8e-01 |
+| 41 | 2.1e-01 |
+
+So the two paths are not equivalent: they agree to 0.6 % at the first block and diverge by up to 28 %.
+This is the strongest defect signal found in this repository, and it explains why served output
+(chunked prefill) and harness output (sequential) behave differently on the same prompt.
+
+Two discriminators have been tried and are not usable as-is: `LING3_CHUNK_BLOCK` returns before the
+FFN, and `LING3_CHUNK_SIZE` did not change any result in this mode (the run with size 1 was
+bit-identical to size 8), so the chunk-width lever needs verifying before it can attribute the
+difference to the batched GEMM versus the per-token kernels inside the chunk.

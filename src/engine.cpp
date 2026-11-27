@@ -1364,6 +1364,22 @@ bool Engine::PrefillChunk(const std::int32_t* tokens, std::size_t count,
                       c.n_ff_shexp, m.bffa, M, c.n_ff_shexp, m.bffout, n_embd, stream);
       hip::LaunchAxpy(m.bx, m.bffout, 1.0f, static_cast<std::size_t>(M) * n_embd, stream);
     }
+    if (std::getenv("LING3_DUMP_BLOCKS") != nullptr) {
+      // Post-block residual of the chunk's last row: the same quantity the per-token path
+      // writes to x_<block>_<position>.bin, so the two paths can be compared directly.
+      // (The LING3_CHUNK_BLOCK hook returns before the FFN, so it is not comparable.)
+      std::vector<float> row(n_embd);
+      hipStreamSynchronize(stream);
+      hipMemcpy(row.data(), m.bx + static_cast<std::size_t>(M - 1) * n_embd,
+                n_embd * sizeof(float), hipMemcpyDeviceToHost);
+      char path[64];
+      std::snprintf(path, sizeof(path), "/work/xc_%u.bin", il);
+      FILE* file = std::fopen(path, "wb");
+      if (file != nullptr) {
+        std::fwrite(row.data(), sizeof(float), n_embd, file);
+        std::fclose(file);
+      }
+    }
   }
 
   const std::size_t last = static_cast<std::size_t>(M - 1) * n_embd;
