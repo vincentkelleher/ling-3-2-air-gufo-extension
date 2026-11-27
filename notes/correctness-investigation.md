@@ -611,3 +611,17 @@ Q6_K expert GEMV alone is 13.48 ms, 63 % of the gather. The unprofiled control r
 and all 24 generated token ids matched, so the trace is trustworthy. This is the first profiler-backed
 breakdown this project has had, and it names two concrete targets for `decode-opt`: the Q6_K expert
 GEMV and the KDA attention.
+
+
+## Resolved: the two prefill paths are now byte-identical (2026-11-27)
+
+Lane B matched the batched `Q8_0` dot and the `F32` router reduction to the per-token path's order
+(branch `lane-b-parity`, merged as `477dd9b`). Independently verified by the parent with
+`/work/verify-parity2.sh`: **966 of 966** residual rows (42 blocks x 23 positions) and all 42
+final-position attention contributions compare byte-for-byte between `PrefillChunk` and
+`ForwardToken`. `ctest` 10/10 and `tools/build-and-test.sh` green on the merged tree.
+
+The golden set is unchanged (plain 19, arithmetic none, tool-call 16, thinking-on 2) — expected,
+because that harness drives prompts through `ForwardToken`, so it measures the engine against
+llama.cpp, not one path against the other. What changed is that served prefill and decode now agree,
+so a served completion and the harness's completion are computed by the same arithmetic.
