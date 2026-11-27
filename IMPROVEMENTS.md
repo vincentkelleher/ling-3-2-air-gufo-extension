@@ -531,3 +531,30 @@ changes numerics. This project's rule is that a faster run with different greedy
 rejection, so the prepared Q8_0 path has to wait for the 32-value quantiser and its buffer rather than
 buy speed with accuracy.
 
+
+## Decode +13 %: the projections finally quantise the activation once (adopted 2026-11-27)
+
+The measurement chain that led here: decode read exactly the roofline's 4.753 GB/token
+(`tools/bytes_per_token.py`) yet ran at 16.9 tok/s where bandwidth allows 49.9; forcing perfect expert
+locality bought only 4 %, which excluded scatter; that left effective bandwidth — the engine was
+achieving ~84 GB/s of 237 GB/s. The cause was in the dot itself: `DotRow` re-read and re-quantised the
+f32 activation **for every output row**, so a 4096-row projection quantised the same 2560 values 4096
+times.
+
+Fix: a 32-value activation quantiser (`LaunchQuantizeActivations32`, the granularity Q8_0 weights use)
+plus a `GemvPreparedKernel<kQ8_0>` branch that consumes it, and the projection call sites routed
+through `LaunchGemvPrepared` — one quantisation per matvec instead of one per row. The activation
+quantisation is the same scheme as before (`amax/127`, `__float2int_rn`, clamp ±127), so the numerics
+are unchanged by construction.
+
+| stage | decode tok/s (median of 3) |
+| --- | --- |
+| before | 16.9 |
+| + KDA q projection | 17.34 |
+| + KDA k, v, f_a, g_a | 18.99 |
+| + MLA q, kv_a, out | **19.15** |
+
+Correctness held at every step: `ctest` 10/10 and `tools/golden_set_ids.py` unchanged at plain 19 /
+arithmetic none / tool-call 16 / thinking-on 2, i.e. identical greedy output at +13 % throughput. That
+is 38 % of the roofline, up from 34 %, with the 60 % gate still ahead.
+

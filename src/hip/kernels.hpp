@@ -103,6 +103,10 @@ void LaunchQuantizeActivations(const float* x, std::size_t cols,
                                signed char* values, float* scales,
                                hipStream_t stream);
 
+/// One scale per 32 values (Q8_0 layout): the activation granularity a Q8_0 prepared dot needs.
+void LaunchQuantizeActivations32(const float* x, std::size_t cols, signed char* values,
+                                 float* scales, hipStream_t stream);
+
 /// K-quant GEMV against activations prepared by LaunchQuantizeActivations.
 /// Reproduces the per-row path exactly; Q4_K and Q6_K only.
 void LaunchGemvPrepared(const void* weights, StorageType type, std::size_t rows,

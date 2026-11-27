@@ -863,6 +863,17 @@ __global__ void GemvPreparedKernel(const std::uint8_t* weights,
       }
       sum += inner * scales[b];
     }
+  } else if constexpr (TYPE == kQ8_0) {
+    // Prepared Q8_0 dot against 32-value activation quantisation: identical arithmetic to
+    // DotRow<kQ8_0>, with the activation quantised once per matvec instead of per output row.
+    const auto* blocks = reinterpret_cast<const BlockQ8_0*>(row);
+    for (int b = threadIdx.x & 31; b < cols / 32; b += 32) {
+      int total = 0;
+      for (int j = 0; j < 32; ++j) {
+        total += static_cast<int>(blocks[b].qs[j]) * static_cast<int>(values[b * 32 + j]);
+      }
+      sum += HalfToFloat(blocks[b].d) * scales[b] * static_cast<float>(total);
+    }
   } else if constexpr (TYPE == kQ6K) {
     const auto* blocks = reinterpret_cast<const BlockQ6K*>(row);
     for (int b = threadIdx.x & 31; b < cols / 256; b += 32) {
@@ -1233,6 +1244,40 @@ void LaunchGemm(const void* weights, StorageType type, std::size_t rows,
   }
 }
 
+/// One scale per 32 values (the Q8_0 layout). The 256-value quantiser above is what the
+/// Q4_K/Q6_K prepared dots take; Q8_0 weights carry one scale per 32 values, so their prepared
+/// dot needs the matching activation granularity to keep the numerics of DotRow<kQ8_0>.
+__global__ void QuantizeActivations32Kernel(const float* x, int blocks, signed char* values,
+                                            float* scales) {
+  const int b = blockIdx.x * blockDim.x + threadIdx.x;
+  if (b >= blocks) {
+    return;
+  }
+  const float* source = x + static_cast<std::size_t>(b) * 32;
+  float amax = 0.0f;
+  for (int j = 0; j < 32; ++j) {
+    amax = fmaxf(amax, fabsf(source[j]));
+  }
+  const float scale = amax > 0.0f ? amax / 127.0f : 1.0f;
+  const float inverse = 1.0f / scale;
+  for (int j = 0; j < 32; ++j) {
+    int a = __float2int_rn(source[j] * inverse);
+    a = a > 127 ? 127 : (a < -127 ? -127 : a);
+    values[b * 32 + j] = static_cast<signed char>(a);
+  }
+  scales[b] = scale;
+}
+
+void LaunchQuantizeActivations32(const float* x, std::size_t cols, signed char* values,
+                                 float* scales, hipStream_t stream) {
+  const int blocks = static_cast<int>(cols / 32);
+  if (blocks == 0) {
+    return;
+  }
+  QuantizeActivations32Kernel<<<(blocks + 31) / 32, 32, 0, stream>>>(x, blocks, values,
+                                                                    scales);
+}
+
 void LaunchQuantizeActivations(const float* x, std::size_t cols,
                                signed char* values, float* scales,
                                hipStream_t stream) {
@@ -1250,6 +1295,10 @@ void LaunchGemvPrepared(const void* weights, StorageType type, std::size_t rows,
   const auto* data = static_cast<const std::uint8_t*>(weights);
   if (type == kQ4K) {
     GemvPreparedKernel<kQ4K><<<blocks, kThreads, 0, stream>>>(
+        data, values, scales, y, static_cast<int>(rows), static_cast<int>(cols),
+        row_bytes);
+  } else if (type == kQ8_0) {
+    GemvPreparedKernel<kQ8_0><<<blocks, kThreads, 0, stream>>>(
         data, values, scales, y, static_cast<int>(rows), static_cast<int>(cols),
         row_bytes);
   } else if (type == kQ6K) {

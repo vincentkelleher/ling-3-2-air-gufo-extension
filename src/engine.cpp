@@ -147,6 +147,8 @@ struct Engine::Impl {
   int* moe_sums{nullptr};
   signed char* act_values{nullptr};
   float* act_scales{nullptr};
+  /// Scales for the 32-value (Q8_0) activation quantisation used by the prepared projection.
+  float* act_scales32{nullptr};
   int* act_sums{nullptr};
   float* expert_gate{nullptr};
   float* expert_up{nullptr};
@@ -427,6 +429,7 @@ std::unique_ptr<Engine> Engine::Create(const core::GgufReader& reader,
       hipMalloc(reinterpret_cast<void**>(&m.moe_sums), (std::max<std::size_t>(n_embd, static_cast<std::size_t>(config.n_expert_used) * config.n_ff_exp) / 256) * 8 * sizeof(int)) == hipSuccess &&
       hipMalloc(reinterpret_cast<void**>(&m.act_values), act_cols * sizeof(signed char)) == hipSuccess &&
       hipMalloc(reinterpret_cast<void**>(&m.act_scales), (act_cols / 256) * sizeof(float)) == hipSuccess &&
+      hipMalloc(reinterpret_cast<void**>(&m.act_scales32), (act_cols / 32) * sizeof(float)) == hipSuccess &&
       hipMalloc(reinterpret_cast<void**>(&m.act_sums), (act_cols / 256) * 8 * sizeof(int)) == hipSuccess &&
       alloc(&m.expert_gate, 8 * (config.n_ff > config.n_ff_exp ? config.n_ff : config.n_ff_exp)) &&
       alloc(&m.expert_up, 8 * (config.n_ff > config.n_ff_exp ? config.n_ff : config.n_ff_exp)) &&
@@ -683,12 +686,32 @@ bool Engine::ForwardFromEmbedded(std::uint32_t position, std::string* error) {
 
     mark(il, 0);
     if (c.IsKda(il)) {
-      hip::LaunchGemv(dev(layer.kda_q), Storage(layer.kda_q.type), kda_inner, n_embd,
-                      m.h, m.q, stream);
-      hip::LaunchGemv(dev(layer.kda_k), Storage(layer.kda_k.type), kda_inner, n_embd,
-                      m.h, m.k, stream);
-      hip::LaunchGemv(dev(layer.kda_v), Storage(layer.kda_v.type), kda_inner, n_embd,
-                      m.h, m.v, stream);
+      if (Storage(layer.kda_q.type) == hip::kQ8_0) {
+        // Quantise the activation once and reuse it across all rows; the per-row path was the
+        // measured bottleneck (35 % of peak bandwidth on a minimal byte count).
+        hip::LaunchQuantizeActivations32(m.h, n_embd, m.act_values, m.act_scales32, stream);
+        hip::LaunchGemvPrepared(dev(layer.kda_q), hip::kQ8_0, kda_inner, n_embd,
+                                m.act_values, m.act_scales32, m.q, stream);
+      } else {
+        hip::LaunchGemv(dev(layer.kda_q), Storage(layer.kda_q.type), kda_inner, n_embd,
+                        m.h, m.q, stream);
+      }
+      if (Storage(layer.kda_k.type) == hip::kQ8_0) {
+        hip::LaunchQuantizeActivations32(m.h, n_embd, m.act_values, m.act_scales32, stream);
+        hip::LaunchGemvPrepared(dev(layer.kda_k), hip::kQ8_0, kda_inner, n_embd,
+                                m.act_values, m.act_scales32, m.k, stream);
+      } else {
+        hip::LaunchGemv(dev(layer.kda_k), Storage(layer.kda_k.type), kda_inner,
+                        n_embd, m.h, m.k, stream);
+      }
+      if (Storage(layer.kda_v.type) == hip::kQ8_0) {
+        hip::LaunchQuantizeActivations32(m.h, n_embd, m.act_values, m.act_scales32, stream);
+        hip::LaunchGemvPrepared(dev(layer.kda_v), hip::kQ8_0, kda_inner, n_embd,
+                                m.act_values, m.act_scales32, m.v, stream);
+      } else {
+        hip::LaunchGemv(dev(layer.kda_v), Storage(layer.kda_v.type), kda_inner,
+                        n_embd, m.h, m.v, stream);
+      }
       if (il == 0 && std::getenv("LING3_DUMP") != nullptr) {
         auto dump = [&](const char* path, const float* device, std::size_t count) {
           std::vector<float> host(count);
@@ -739,8 +762,14 @@ bool Engine::ForwardFromEmbedded(std::uint32_t position, std::string* error) {
       }
       hip::LaunchSilu(m.cv, m.cv, kda_inner, stream);
 
-      hip::LaunchGemv(dev(layer.kda_f_a), Storage(layer.kda_f_a.type), kda_inner,
-                      n_embd, m.h, m.gate_pre, stream);
+      if (Storage(layer.kda_f_a.type) == hip::kQ8_0) {
+        hip::LaunchQuantizeActivations32(m.h, n_embd, m.act_values, m.act_scales32, stream);
+        hip::LaunchGemvPrepared(dev(layer.kda_f_a), hip::kQ8_0, kda_inner, n_embd,
+                                m.act_values, m.act_scales32, m.gate_pre, stream);
+      } else {
+        hip::LaunchGemv(dev(layer.kda_f_a), Storage(layer.kda_f_a.type), kda_inner,
+                        n_embd, m.h, m.gate_pre, stream);
+      }
       hip::LaunchKdaGate(m.gate_pre, static_cast<const float*>(dev(layer.kda_dt)),
                          static_cast<const float*>(dev(layer.kda_a)), m.kda_gate,
                          kda_inner, kda_dim, c.kda_gate_lower_bound, stream);
@@ -804,8 +833,14 @@ bool Engine::ForwardFromEmbedded(std::uint32_t position, std::string* error) {
       if (il == 0) {
         dump_raw("/work/d_onorm.bin", m.qn, kda_inner);
       }
-      hip::LaunchGemv(dev(layer.kda_g_a), Storage(layer.kda_g_a.type), kda_inner,
-                      n_embd, m.h, m.gate_pre, stream);
+      if (Storage(layer.kda_g_a.type) == hip::kQ8_0) {
+        hip::LaunchQuantizeActivations32(m.h, n_embd, m.act_values, m.act_scales32, stream);
+        hip::LaunchGemvPrepared(dev(layer.kda_g_a), hip::kQ8_0, kda_inner, n_embd,
+                                m.act_values, m.act_scales32, m.gate_pre, stream);
+      } else {
+        hip::LaunchGemv(dev(layer.kda_g_a), Storage(layer.kda_g_a.type), kda_inner,
+                        n_embd, m.h, m.gate_pre, stream);
+      }
       hip::LaunchMulSigmoid(m.qn, m.gate_pre, kda_inner, stream);
       if (il >= 28) {
         report_buf("kda gate", m.kda_gate, kda_inner);
@@ -822,11 +857,23 @@ bool Engine::ForwardFromEmbedded(std::uint32_t position, std::string* error) {
         report_buf("kda attn", m.attn_out, n_embd);
       }
     } else {
-      hip::LaunchGemv(dev(layer.mla_q), Storage(layer.mla_q.type), q_dim, n_embd,
+      if (Storage(layer.mla_q.type) == hip::kQ8_0) {
+        hip::LaunchQuantizeActivations32(m.h, n_embd, m.act_values, m.act_scales32, stream);
+        hip::LaunchGemvPrepared(dev(layer.mla_q), hip::kQ8_0, q_dim, n_embd,
+                                m.act_values, m.act_scales32, m.q, stream);
+      } else {
+        hip::LaunchGemv(dev(layer.mla_q), Storage(layer.mla_q.type), q_dim, n_embd,
                       m.h, m.q, stream);
+      }
       hip::LaunchSplitQ(m.q, m.qn, m.q_pe, heads, c.NopeDim(), c.n_rot, stream);
-      hip::LaunchGemv(dev(layer.mla_kv_a), Storage(layer.mla_kv_a.type),
+      if (Storage(layer.mla_kv_a.type) == hip::kQ8_0) {
+        hip::LaunchQuantizeActivations32(m.h, n_embd, m.act_values, m.act_scales32, stream);
+        hip::LaunchGemvPrepared(dev(layer.mla_kv_a), hip::kQ8_0, latent + c.n_rot, n_embd,
+                                m.act_values, m.act_scales32, m.kvq, stream);
+      } else {
+        hip::LaunchGemv(dev(layer.mla_kv_a), Storage(layer.mla_kv_a.type),
                       latent + c.n_rot, n_embd, m.h, m.kvq, stream);
+      }
       hip::LaunchRmsNorm(m.kvq, static_cast<const float*>(dev(layer.mla_kv_a_norm)),
                          m.latent, 1, latent, eps, stream);
       hip::LaunchRope(m.q_pe, heads, c.n_rot, c.n_rot, position, c.rope_freq_base,
@@ -889,8 +936,14 @@ bool Engine::ForwardFromEmbedded(std::uint32_t position, std::string* error) {
       if (il == 5) {
         report_buf("mla out", m.mla_out, v_dim);
       }
-      hip::LaunchGemv(dev(layer.mla_out), Storage(layer.mla_out.type), n_embd, v_dim,
+      if (Storage(layer.mla_out.type) == hip::kQ8_0) {
+        hip::LaunchQuantizeActivations32(m.mla_out, v_dim, m.act_values, m.act_scales32, stream);
+        hip::LaunchGemvPrepared(dev(layer.mla_out), hip::kQ8_0, n_embd, v_dim,
+                                m.act_values, m.act_scales32, m.attn_out, stream);
+      } else {
+        hip::LaunchGemv(dev(layer.mla_out), Storage(layer.mla_out.type), n_embd, v_dim,
                       m.mla_out, m.attn_out, stream);
+      }
     }
 
     // The attention contribution alone, comparable with the reference's `kda_out`/`mla_out`.
