@@ -568,3 +568,17 @@ another 2-3 %, and beyond them the cost sits in the Q4_K expert gather and the K
 which are already prepared and need kernel-level work (vectorised loads, fewer launches) rather than
 another quantisation hoist.
 
+
+### dot4 for the prepared Q8_0 dot: blocked on a target feature
+
+The prepared Q8_0 dot sums int8 products, and integer sums are exact and order-independent, so
+replacing its per-element multiply-adds with `__builtin_amdgcn_sdot4` cannot change any result — it
+would be a pure instruction-count win. It does not compile here:
+
+    error: '__builtin_amdgcn_sdot4' needs target feature dot1-insts
+
+So the kernel needs the feature enabled (a `__attribute__((target("dot1-insts")))` on the kernel, or
+`-mcpu` for the AMDGPU target in the extension's HIP build) before that path can be tried. Worth
+doing: the prepared dot is the hot loop of every projection, and four int8 products per instruction
+is the cheapest remaining lever now that the activation quantisation is hoisted.
+
