@@ -34,6 +34,38 @@ Hypotheses already excluded, each by reading the reference rather than guessing:
   the same concatenated row in `mla_cache`, normalises the latent (`d5_latnorm`), uses the same
   per-head gate (`beta_pre` -> sigmoid), and the same latent value sum.
 
+- **the dump harness itself.** The per-block dumps were wrong: `dump_lp` copied with a bare
+  `hipMemcpy`, ordered only against the default stream, while every block kernel runs on the
+  engine's `stream`. Consecutive blocks therefore dumped identical (stale) contents, and
+  `LING3_TOKEN_IDS`-style comparisons built on them measured nothing. `dump_raw`, `dump_at` and
+  `dump_lp` now synchronise the stream first; the dumps are distinct block to block (42 files, 0
+  duplicates).
+
+## Where it diverges, measured on corrected dumps (2026-11-27)
+
+Context `[156891, 156891]`, comparing our residual stream against the reference's `l_out-<n>` rows:
+
+| block | rel err @ position 0 | rel err @ position 1 |
+| --- | --- | --- |
+| 0 | 0.970 | 0.833 |
+| 1 | 0.870 | 1.444 |
+| 2 | 0.883 | 1.861 |
+| 4 | 0.217 | 1.323 |
+| 11 | 0.104 | 0.942 |
+| 20 | 0.046 | 1.321 |
+| 30 | 0.122 | 0.923 |
+
+Read it as a *shape*, not per-number: at position 0 the residuals converge as depth grows
+(4.6 % by block 20), while position 1 stays wrong at every depth. The engine reproduces the first
+token and loses the state that the second token needs, from the first block onward — a state-update
+defect, not a per-kernel arithmetic one. The small early denominators make the position-0 figures at
+blocks 0-3 noisy, so they should not be read as a second defect.
+
+KDA pieces already verified against the reference source: conv window order `[s0,s1,s2,x]` with
+`w[3]` on the newest sample, `silu` after the conv (both in the sequential path and in the chunked
+path), 3-channel conv state of `d_conv-1 = 3` rows at `slot * 3 * channels`, `sigmoid(gate*a) *
+lower_bound` then `exp(g)` in the delta rule, L2 norm of q/k, `o_norm` and the sigmoid output gate.
+
 Still open: which block first diverges, and therefore whether the cause is the conv1d state, the MLA
 path, the routed MoE, or the head. A per-block residual comparison against the reference's
 `l_out-<n>` nodes is in progress.

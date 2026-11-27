@@ -518,6 +518,10 @@ bool Engine::ForwardFromEmbedded(std::uint32_t position, std::string* error) {
     if (std::getenv("LING3_DUMP") == nullptr) {
       return;
     }
+    // The kernels run on `stream`; a bare hipMemcpy is ordered only against the default
+    // stream, so without this the copy can read a previous block's buffer (and consecutive
+    // blocks then dump identical contents, which silently invalidates a per-block diff).
+    hipStreamSynchronize(stream);
     std::vector<float> host(count);
     hipMemcpy(host.data(), device, count * sizeof(float), hipMemcpyDeviceToHost);
     FILE* file = std::fopen(path, "wb");
@@ -533,6 +537,7 @@ bool Engine::ForwardFromEmbedded(std::uint32_t position, std::string* error) {
     }
     char path[128];
     std::snprintf(path, sizeof(path), format, position);
+    hipStreamSynchronize(stream);
     std::vector<float> host(count);
     hipMemcpy(host.data(), device, count * sizeof(float), hipMemcpyDeviceToHost);
     FILE* file = std::fopen(path, "wb");
@@ -548,6 +553,7 @@ bool Engine::ForwardFromEmbedded(std::uint32_t position, std::string* error) {
     }
     char path[128];
     std::snprintf(path, sizeof(path), format, layer, position);
+    hipStreamSynchronize(stream);
     std::vector<float> host(count);
     hipMemcpy(host.data(), device, count * sizeof(float), hipMemcpyDeviceToHost);
     FILE* file = std::fopen(path, "wb");
