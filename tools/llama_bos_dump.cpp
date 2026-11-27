@@ -38,8 +38,11 @@ bool Callback(struct ggml_tensor* t, bool ask, void*) {
   // llama.cpp calls once with ask=true to learn what to report, then again after
   // evaluation, when the tensor's data is valid: dumping on the first call reads
   // an uninitialised buffer.
-  if (!Wanted(t)) return false;
+  // Request every node so the scheduler reports them back after evaluation; only the
+  // wanted names are written. Asking selectively made ggml report nothing but the input
+  // embedding, which is useless for a per-block diff.
   if (ask) return true;
+  if (!Wanted(t)) return false;
   if (!Dump(t)) {
     std::fprintf(stderr, "dump failed at %s\n", t->name);
     return true;

@@ -802,6 +802,8 @@ bool Engine::ForwardFromEmbedded(std::uint32_t position, std::string* error) {
                       m.mla_out, m.attn_out, stream);
     }
 
+    // The attention contribution alone, comparable with the reference's `kda_out`/`mla_out`.
+    dump_lp("/work/attn_%u_%u.bin", m.attn_out, n_embd, il, position);
     hip::LaunchAxpy(m.x, m.attn_out, 1.0f, n_embd, stream);
     hipMemcpyAsync(m.ffn_inp, m.x, n_embd * sizeof(float),
                    hipMemcpyDeviceToDevice, stream);
