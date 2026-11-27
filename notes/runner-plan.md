@@ -481,3 +481,33 @@ the engine in `Advance` and re-run the last token at the next select the way the
 Until one of those is in place, `cache-server`'s byte-exact restore clause fails for a repeated
 prompt independently of the cache. Until then, `cache-server`'s "restore equals an uninterrupted run" clause fails for a
 repeated prompt, independently of the cache itself.
+
+## The design that fixes both serving defects (2026-11-27)
+
+Both remaining serving failures have one cause: the engine's state advances with generation, while
+the host treats a session's state as "standing at the prompt frontier".
+
+- **Repeated prompt, cache off**: the host skips `Prefill` and decodes from a state that has already
+  generated 12 tokens (traced: `Advance` 24 times, no second `Prefill`).
+- **Repeated prompt, cache on**: our `CapturePrivate` copies whatever the state holds when the host
+  asks, but the host labels the checkpoint with the frontier (`cached_tokens=249`) while the state
+  may already be past it, so the restore is mislabelled.
+
+The fix is a **frontier snapshot in the engine**:
+
+1. `Engine` gains a second state buffer (`frontier`) beside `snapshot`, plus `CaptureFrontier()`
+   (device-to-device copy of the live state), `RestoreFrontier()` (the reverse) and a validity flag.
+   The extra 502 MB is the same size as the existing snapshot buffer.
+2. `Ling3Runner::Prefill` calls `CaptureFrontier()` when the pass completes, and the runner records
+   that position as the frontier.
+3. `Positions()` reports the **frontier**, not the live position, so every checkpoint the host
+   captures is labelled with the state it actually contains.
+4. `CapturePrivate` copies the frontier buffer (not the live state) and `LoadPrivate` loads into the
+   frontier buffer then `RestoreFrontier()`, so a restore lands exactly at the label.
+5. `CanContinue(state, prompt_tokens)` compares `prompt_tokens` with the frontier, and `Prefill` with
+   `offset == frontier` can then continue without re-running the prompt.
+
+With that, both a cache restore and a same-session reuse become "restore the frontier, then feed the
+tokens after it", which is the semantics the host assumes. The no-cache case additionally needs the
+host to ask for that restore — if it does not, the runner can still detect it in `SelectNext`
+(frontier != live position and a new prompt was prepared) and restore the frontier itself.
