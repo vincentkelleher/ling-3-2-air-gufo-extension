@@ -21,6 +21,10 @@ Hypotheses already excluded, each by reading the reference rather than guessing:
   the decay convention matches; a wrong convention here would have been the obvious candidate for an
   error this size.
 
+- **embedding dequantization.** `tests/forward_test.cpp`'s Q8_0 row check reports *worst absolute
+  error 0* against the file's own bytes, so the embedding path is exact and cannot explain position
+  zero.
+
 Still open: which block first diverges, and therefore whether the cause is the conv1d state, the MLA
 path, the routed MoE, or the head. A per-block residual comparison against the reference's
 `l_out-<n>` nodes is in progress.
