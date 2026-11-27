@@ -1,3 +1,26 @@
+# Correctness investigation: Ling 3.2 Air vs llama.cpp CPU
+
+## Read this first: how to instrument and rebuild without losing a day
+
+Everything below was measured, and several "results" were thrown away because the measurement was
+wrong. The working recipe:
+
+1. The extension's compile inputs are `/work/ext-build/src/*.cpp` — visible in
+   `/work/ext-gpu-test/build.ninja` as `extensions/build/ling3_air/build/CMakeFiles/gufo_l/work/ext-build/src/engine.cpp.o`.
+   That same `build.ninja` also builds gufo-src itself, so `rg ling3 build.ninja` shows nothing for
+   most files; search for `gufo_l/work/ext-build` instead.
+2. rsync the repo to `/work/ext-build`, then delete the object file and rebuild the target:
+   `rm -f ext-gpu-test/extensions/build/ling3_air/build/CMakeFiles/gufo_ling3_air_hip.dir/work/ext-build/src/engine.cpp.o`
+   then `cmake --build /work/ext-gpu-test --target ling3_air_forward_test`. Touching the source is
+   *not* enough — rsync preserves mtimes and ninja then considers the object current.
+3. Verify a new probe reached the binary by grepping for a *long* literal (for example the dump path
+   `st_%s_conv`), not a short one: `strings` drops very short fragments and reported a false negative
+   for `"r%u"`, which cost three turns chasing a "sealed build" that did not exist.
+4. Run the model through a **script file**, never inline through `dev-env.sh`: `$M` is not expanded
+   through the nested shell and the binary then receives `0` as the model path.
+5. Dumps are per-position and overwritten, so keep one instrument per directory and clear it per run;
+   mixing dumps from two runs produced two contradictory tables here.
+
 
 # Single-token / short-context mismatch (open, 2026-11-27)
 
