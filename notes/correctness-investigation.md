@@ -591,3 +591,23 @@ relative to the noise.
 
 So `engine-assembly` remains open for a measured reason, and its "RMS error of logits reported and
 documented" half is satisfied (1.07 RMS at a single token, 0.10-0.17 relative at two to three tokens).
+
+
+## Corrections from the delegated lanes (2026-11-27)
+
+**The vision markers do exist; my earlier conclusion was wrong.** A lane scanned the pinned shard
+properly: `tokenizer.ggml.tokens` contains `<|image_pad|>` at 157157, `<|vision_start|>` at 157158 and
+`<|vision_end|>` at 157159, all CONTROL. My token scan had read the array incorrectly and I recorded
+"the vocabulary has no image marker token" in `docs/conformance.md` on that basis. The conclusion was
+wrong; the marker is a CONTROL token, so it must be placed by **id**, not by encoding the literal text
+(the tokenizer does not map `<|image_pad|>` from a string). A splicing implementation was written and
+reached the served module, but HTTP image requests still returned `invalid_prompt` with the
+marker-count message, i.e. the id path needs one more iteration; that edit was reverted so HEAD stays
+at the last verified state.
+
+**Decode profile (rocprofv3, reproduced control).** Routed-MoE gather 21.42 ms/step (28.6 % of the
+75 ms budget), KDA attention 22.37 ms (29.8 %), router projection and selection 3.93 ms (5.2 %); the
+Q6_K expert GEMV alone is 13.48 ms, 63 % of the gather. The unprofiled control reproduced 16.94 tok/s
+and all 24 generated token ids matched, so the trace is trustworthy. This is the first profiler-backed
+breakdown this project has had, and it names two concrete targets for `decode-opt`: the Q6_K expert
+GEMV and the KDA attention.
