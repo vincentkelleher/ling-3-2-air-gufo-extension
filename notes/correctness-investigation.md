@@ -273,3 +273,19 @@ RMS is a proxy I chose, token-for-token agreement is what the contract asks for,
 disagreed. Most likely our `exp_probs_b` is not the tensor that reference code expects, so the two
 bias placements are not comparable until that tensor is verified — that is the follow-up, not
 another blind swap.
+
+## The arithmetic case: one token choice, not a broken stream
+
+`golden_arithmetic` diverges at character 3. Token level: both sides emit `17` then a space, then
+ours emits `" times"` (id 3105) while llama.cpp emits `" ×"`. Everything before that is identical,
+and the prompt tokenisation is byte-identical (the framed prompt is 54 tokens, printed via
+`LING3_PRINT_PROMPT_IDS`). So this is a single greedy choice at one position, not a mis-tokenised
+prompt or a drifting stream.
+
+Which of the two explanations it is — a near-tie our numerics nudged, or our logits ranking the
+reference's token far down — needs the logits at *that* step, and `forward_test` only prints its
+top-5 for the final step. Next step: dump logits after the prefill pass (before the first generated
+token) with `LING3_FINAL_LOGITS_F32`, feed the same prompt ids to the llama reference row tool
+(already supports an explicit id list), and compare the top-5 and the softmax margin for id `×`
+against id 3105. A margin of a few hundredths says numerics; a wide gap says something structural
+still remains.

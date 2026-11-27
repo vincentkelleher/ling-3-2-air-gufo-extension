@@ -103,6 +103,11 @@ int main(int argc, char** argv) {
                "<|role_end|><role>ASSISTANT</role>\n<think" ">");
     prompt_tokens = tokenizer->Encode(framed, /*parse_special=*/true);
     std::printf("prompt: %zu tokens\n", prompt_tokens.size());
+    if (std::getenv("LING3_PRINT_PROMPT_IDS") != nullptr) {
+      std::printf("prompt ids:");
+      for (const auto id : prompt_tokens) std::printf(" %d", static_cast<int>(id));
+      std::printf("\n");
+    }
   }
   // The embedding row is the engine's only custom dequantization path.
   {
