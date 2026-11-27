@@ -780,6 +780,12 @@ bool Engine::ForwardFromEmbedded(std::uint32_t position, std::string* error) {
       if (il == 5) {
         dump_raw("/work/d5_scores.bin", m.scores, heads * (position + 1));
       }
+      if (il == 5) {
+        // The row this step appended, so the score kernel can be re-checked on the host.
+        dump_raw("/work/d5_row_cur.bin",
+                 m.mla_cache[il] + static_cast<std::size_t>(position) * kv_dim,
+                 latent + c.n_rot);
+      }
       hip::LaunchMlaSoftmax(m.scores, heads, position + 1, stream);
       hip::LaunchMlaLatentSum(m.scores, m.mla_cache[il], heads, position + 1,
                               m.latent, stream);
@@ -1261,6 +1267,15 @@ bool Engine::PrefillChunk(const std::int32_t* tokens, std::size_t count,
         hip::LaunchMlaSoftmax(m.scores, heads, position + 1, stream);
         hip::LaunchMlaLatentSum(m.scores, m.mla_cache[il], heads, position + 1, m.latent,
                                 stream);
+        if (il == 5 && std::getenv("LING3_DUMP_BLOCKS") != nullptr) {
+          // Sequence-path probe: the score inputs, the row they read, and the probabilities
+          // they produce, so the kernel can be checked against a host recomputation.
+          dump_at("/work/s_qabs_%u.bin", m.q_abs, heads * latent, position);
+          dump_at("/work/s_qpe_%u.bin", m.q_pe, heads * c.n_rot, position);
+          dump_at("/work/s_probs_%u.bin", m.scores, heads * (position + 1), position);
+          dump_at("/work/s_row_%u.bin", m.mla_cache[il] + static_cast<std::size_t>(position) * kv_dim,
+                  kv_dim, position);
+        }
         hip::LaunchMlaValueAbsorb(m.latent, m.v_absorb[il], m.beta_pre, m.mla_out, heads,
                                   stream);
         hipMemcpyAsync(m.bgated + static_cast<std::size_t>(i) * v_dim, m.mla_out,
