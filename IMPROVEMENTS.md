@@ -553,7 +553,7 @@ are unchanged by construction.
 | + KDA q projection | 17.34 |
 | + KDA k, v, f_a, g_a | 18.99 |
 | + MLA q, kv_a, out | 19.15 |
-| + LM head (Q8_0, 0.43 GB/token) | **19.26** |
+| + LM head (Q8_0, 0.43 GB/token) | **19.34** (re-measured after the dot4 revert) |
 
 Correctness held at every step: `ctest` 10/10 and `tools/golden_set_ids.py` unchanged at plain 19 /
 arithmetic none / tool-call 16 / thinking-on 2, i.e. identical greedy output at +13 % throughput. That
