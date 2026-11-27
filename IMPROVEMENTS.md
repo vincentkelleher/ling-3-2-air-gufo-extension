@@ -577,8 +577,13 @@ would be a pure instruction-count win. It does not compile here:
 
     error: '__builtin_amdgcn_sdot4' needs target feature dot1-insts
 
-So the kernel needs the feature enabled (a `__attribute__((target("dot1-insts")))` on the kernel, or
-`-mcpu` for the AMDGPU target in the extension's HIP build) before that path can be tried. Worth
+Two routes were tried and both fail in this toolchain. A per-kernel
+`__attribute__((target("dot1-insts")))` compiles but the kernel is never registered — the runtime
+reports "Cannot find Symbol ... GemvPreparedQ8Dot4Kernel" — both inside an anonymous namespace and with
+external linkage, so the attribute and the HIP offload registration do not combine here. The remaining
+route is enabling the feature for the whole translation unit's HIP compile (an `extension.cmake`
+compile option for `kernels.hip`), which needs verifying against this ROCm/clang build before the
+kernel can be used. Worth
 doing: the prepared dot is the hot loop of every projection, and four int8 products per instruction
 is the cheapest remaining lever now that the activation quantisation is hoisted.
 
