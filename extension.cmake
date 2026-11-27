@@ -59,6 +59,20 @@ if(TARGET gufo_ling3_air_hip)
     src/hip/vision.hip)
 endif()
 
+# A replacement module can be loaded into a Gufo binary with an older Ling
+# built in. On ELF, hide our archive definitions from dynamic lookup in the
+# module: otherwise its new methods can receive an old Engine::Impl allocated
+# by the executable's Engine::Create. Leave the SDK entry points (generated
+# outside these archives) and imports from the host alone.
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+  foreach(lib IN ITEMS gufo_ling3_air gufo_ling3_air_hip)
+    if(TARGET ${lib})
+      target_link_options(${lib} INTERFACE
+        "$<$<STREQUAL:$<TARGET_PROPERTY:TYPE>,MODULE_LIBRARY>:LINKER:--exclude-libs,lib${lib}.a>")
+    endif()
+  endforeach()
+endif()
+
 # End-to-end forward: load, decode, report tokens and rate.
 gufo_extension_target(
   NAME ling3_air_forward_test

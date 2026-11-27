@@ -534,21 +534,17 @@ one).
 | 2 | same, with `ResetState` removed | SIGSEGV on the first request |
 | 3 | **capture only** (call `CaptureFrontier()` when prefill completes, label positions with the frontier), leaving `CapturePrivate`/`LoadPrivate` untouched | SIGSEGV immediately after `event=listening`, i.e. during the host's warm-up prefill |
 
-Each revert restores serving (200 OK), so the fault is localised to `CaptureFrontier()` being called
-from the runner. Its allocation is byte-identical to the snapshot buffer's (verified line by line:
-`n_layer_total * (9 * kda_inner + heads * kda_dim^2 + max_context * kv_dim)`), and the copy loop
-mirrors `SnapshotState` exactly — so the difference from the working code is not the arithmetic of
-the copy but **where it runs**: `SnapshotState` has only ever been exercised from the test harness's
-main thread, while `CaptureFrontier` runs on the server's scheduler thread against an engine whose
-`hipStream_t` was created on the loader thread.
+**Diagnosis corrected:** the crash was on the first request, not during warm-up. GDB stopped at
+`Engine::CaptureFrontier` in the MLA branch. That line does not establish a HIP affinity bug.
+With `LD_BIND_NOW=1 LD_DEBUG=bindings`, `gufo diagnose --section extensions --json` showed the
+installed module binding `Engine::Create` to the executable: this test host has an older Ling
+built in. A method compiled for the module's new `Engine::Impl` was reading an object constructed
+with the old layout. Changing the HIP copy style could not fix that mismatch.
 
-Both suspects were then tested and cleared: the capture now uses synchronous `hipMemcpy` on the
-default stream (removing the cross-thread queue use), and a fourth attempt still faults on the
-host's warm-up prefill. So the fault is inside the capture path itself, with the allocation verified
-byte-identical to the snapshot's and the copies verified synchronous.
-
-The engine keeps the frontier buffer and its (synchronous) capture, both unused, plus a
-`LING3_FRONTIER_TRACE` print at capture start and end. **This needs a gdb session on the serving
-process**, not another blind wiring attempt: four have failed, each reverted, and each revert
-restores serving 200. The trace is in place so that run can see whether the fault lands before the
-first copy, mid-loop, or after the loop.
+`extension.cmake` now keeps symbols from the two Ling archives local to a Linux module. The SDK's
+three generated module entry points remain visible. In a separately installed diagnostic build
+with only a `CaptureFrontier()` call added at the end of prefill, `The capital of France is` (greedy,
+four tokens) returned HTTP 200, and the scheduler-thread capture reached its end at **38,514,688
+floats**. No Gufo or HIP change was required. This test does not prove that the private cache saves
+or restores those bytes. `tools/check_module_exports.py` checks the binary boundary independently
+of model availability.

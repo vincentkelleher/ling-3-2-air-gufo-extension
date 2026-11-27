@@ -408,8 +408,10 @@ std::unique_ptr<ComponentCacheResources> Ling3Runner::CreateComponentCacheResour
     buffer.bytes = std::span<std::byte>(storage->data(), storage->size());
     buffer.allocation = storage->data();
     buffer.finish = [storage, charge = std::move(charge)]() mutable {
+      // PinRows uses owner.get() as the first payload byte. Keep the vector
+      // alive, but expose its data, not the address of the vector object.
       return cache::Payload::Committed(std::move(charge),
-                                       std::static_pointer_cast<const void>(storage));
+                                       std::shared_ptr<const void>(storage, storage->data()));
     };
     return buffer;
   };
