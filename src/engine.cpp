@@ -983,8 +983,10 @@ void Engine::CaptureFrontier() {
   std::size_t offset = 0;
   for (std::uint32_t il = 0; il < m.config.n_layer_total; ++il) {
     const auto copy = [&](const float* source, std::size_t count) {
-      hipMemcpyAsync(m.frontier + offset, source, count * sizeof(float),
-                     hipMemcpyDeviceToDevice, m.queue);
+      // Synchronous on the default stream: the frontier capture runs on the host's scheduler
+      // thread, while m.queue was created on the loader thread, and the async form faulted there.
+      hipMemcpy(m.frontier + offset, source, count * sizeof(float),
+                hipMemcpyDeviceToDevice);
       offset += count;
     };
     if (m.config.IsKda(il)) {
@@ -996,7 +998,6 @@ void Engine::CaptureFrontier() {
     }
   }
   m.frontier_floats = offset;
-  hipStreamSynchronize(m.queue);
 }
 
 void Engine::RestoreFrontier() {
@@ -1007,8 +1008,8 @@ void Engine::RestoreFrontier() {
   std::size_t offset = 0;
   for (std::uint32_t il = 0; il < m.config.n_layer_total; ++il) {
     const auto copy = [&](float* target, std::size_t count) {
-      hipMemcpyAsync(target, m.frontier + offset, count * sizeof(float),
-                     hipMemcpyDeviceToDevice, m.queue);
+      hipMemcpy(target, m.frontier + offset, count * sizeof(float),
+                hipMemcpyDeviceToDevice);
       offset += count;
     };
     if (m.config.IsKda(il)) {
