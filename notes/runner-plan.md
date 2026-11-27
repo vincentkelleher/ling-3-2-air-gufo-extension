@@ -596,3 +596,27 @@ by `image_forward_test`).
 Risk: the chunked prefill path batches tokens, and an image span must enter as embeddings, so a span
 that crosses a chunk boundary is the case most likely to be got wrong — the test in (5) should use an
 image whose span is longer than one 32-token chunk.
+
+## Image over HTTP: implemented, and blocked by the artifact (2026-11-27)
+
+The serving glue is in place and compiles: `Ling3Runner::PreparePrompt` encodes each
+`ImagePart` through the mmproj, renders `<|image_pad|>` per projected row, returns a
+`Ling3ImageContext` (rows, row width, spans, FNV cache identity) and `Prefill` pushes rows through
+`Engine::ForwardEmbedding` for span positions while leaving the chunked path untouched otherwise;
+`SetPromptContext` stores it on the state, and `supports_vision` follows `options.vision_model_path`.
+All 10 tests still pass with this in the tree.
+
+Live HTTP test with the pinned image: the runner reported **576 encoded rows against 0 markers**.
+The cause is the artifact, not the code:
+
+- the chat template emits `<|vision_start|><|image_pad|><|vision_end|>`;
+- the Q4_K_M text vocabulary has 157,184 tokens and **none** of them is an image marker (the three
+  strings appear in the file only inside the template text);
+- so the literal marker tokenises as ordinary pieces and no position exists for a row to occupy.
+
+Two consequences: the driver path's own marker check (`Decode(id) == "<|image_pad|>"`) can never
+match on this quant either, and matching an HF reference on images is impossible *with this
+vocabulary* — an HF run would use a vocabulary that has the tokens, so the contexts differ. The
+request now fails with an explicit `invalid_argument` rather than an empty 200. Unblocking this needs
+a text GGUF whose vocabulary carries the vision specials, which is a model-artifact question, not an
+implementation one.

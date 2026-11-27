@@ -40,6 +40,10 @@ class Ling3RunnerState final : public TextRunnerState {
   [[nodiscard]] Engine& engine();
   [[nodiscard]] std::size_t position() const;
   void set_position(std::size_t position);
+  /// Image rows travel with the request as a prompt context (text.hpp), so the state
+  /// keeps whatever the host last attached and the prefill step reads it from there.
+  void set_context(std::shared_ptr<const TextPromptContext> context);
+  [[nodiscard]] std::shared_ptr<const TextPromptContext> context() const;
 
   /// The cache asks the adapter for this slot's frontier, so the state reports where it
   /// has prefilled to.
@@ -62,7 +66,8 @@ class Ling3RunnerState final : public TextRunnerState {
 class Ling3Runner final : public TextModelRunner {
  public:
   Ling3Runner(Ling3Config config, std::unique_ptr<text::Tokenizer> tokenizer,
-              std::string model_id, std::uint32_t max_context);
+              std::string model_id, std::uint32_t max_context,
+              std::string vision_model_path = {});
   ~Ling3Runner() override;
 
   [[nodiscard]] TextRunnerDescriptor Descriptor() const override;
@@ -74,6 +79,12 @@ class Ling3Runner final : public TextModelRunner {
       const ChatRequest& request) const override;
   [[nodiscard]] std::string Decode(
       std::span<const TextRunnerToken> tokens) const override;
+  /// Image input: renders `<|image_pad|>` per projected row and carries the encoded rows
+  /// in a prompt context. Without images this is the host's default behaviour.
+  [[nodiscard]] std::optional<TextPreparedPrompt> PreparePrompt(
+      const ChatRequest& request) const override;
+  void SetPromptContext(TextRunnerState&,
+                        std::shared_ptr<const TextPromptContext>) const override;
   [[nodiscard]] std::unique_ptr<ComponentCacheResources>
   CreateComponentCacheResources(cache::ResourceLedger&, std::size_t) const override;
   [[nodiscard]] std::unique_ptr<TextRunnerState> BindComponentState(

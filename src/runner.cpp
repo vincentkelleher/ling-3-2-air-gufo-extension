@@ -10,12 +10,17 @@
 #include <algorithm>
 #include <cstdio>
 #include <cstring>
+#include <limits>
 #include <map>
 #include <mutex>
 #include <vector>
 #include <utility>
 
 #include "src/engine.hpp"
+#include "src/preprocess.hpp"
+#include "src/vision.hpp"
+
+#include <gufo/ext/image.hpp>
 
 namespace gufo::ext::ling3_air {
 namespace {
@@ -239,6 +244,25 @@ class Ling3ComponentAdapter final : public cache::Adapter,
   std::map<cache::Slot*, cache::Rows> positions_;
 };
 
+/// Encoded image rows and the token spans they replace. The spans keep prefill from
+/// ending inside them: rows are injected as embeddings, one per marker token.
+class Ling3ImageContext final : public TextPromptContext {
+ public:
+  std::vector<float> rows;
+  std::uint32_t row_width{0};
+  std::vector<std::pair<std::size_t, std::size_t>> spans;
+
+  [[nodiscard]] std::size_t PrefillStop(std::size_t position, bool up) const override {
+    for (const auto& span : spans) {
+      const std::size_t end = span.first + span.second;
+      if (position > span.first && position < end) {
+        return up ? end : span.first;
+      }
+    }
+    return position;
+  }
+};
+
 }  // namespace
 
 struct Ling3RunnerState::Impl {
@@ -247,6 +271,7 @@ struct Ling3RunnerState::Impl {
   std::size_t position{0};
   Ling3RunnerState::PositionSink* sink{nullptr};
   void* slot{nullptr};
+  std::shared_ptr<const TextPromptContext> context;
 };
 
 Ling3RunnerState::Ling3RunnerState(Engine& engine, Ling3Config config)
@@ -266,6 +291,14 @@ std::unique_lock<std::mutex> Ling3RunnerState::LockEngine() {
 Engine& Ling3RunnerState::engine() { return *impl_->engine; }
 
 std::size_t Ling3RunnerState::position() const { return impl_->position; }
+
+void Ling3RunnerState::set_context(std::shared_ptr<const TextPromptContext> context) {
+  impl_->context = std::move(context);
+}
+
+std::shared_ptr<const TextPromptContext> Ling3RunnerState::context() const {
+  return impl_->context;
+}
 
 void Ling3RunnerState::Attach(PositionSink* sink, void* slot) {
   impl_->sink = sink;
@@ -289,15 +322,23 @@ struct Ling3Runner::Impl {
   std::unique_ptr<text::Tokenizer> tokenizer;
   std::string model_id;
   std::uint32_t max_context{0};
+  /// Image input: the mmproj path, the encoder built from it, and the reader that owns
+  /// the mapping the encoder points into.
+  std::string vision_model_path;
+  mutable std::mutex vision_mutex;
+  mutable std::shared_ptr<const core::GgufReader> mmproj;
+  mutable std::unique_ptr<VisionEncoder> vision;
 };
 
 Ling3Runner::Ling3Runner(Ling3Config config, std::unique_ptr<text::Tokenizer> tokenizer,
-                         std::string model_id, std::uint32_t max_context)
+                         std::string model_id, std::uint32_t max_context,
+                         std::string vision_model_path)
     : impl_(std::make_unique<Impl>()) {
   impl_->config = config;
   impl_->tokenizer = std::move(tokenizer);
   impl_->model_id = std::move(model_id);
   impl_->max_context = max_context;
+  impl_->vision_model_path = std::move(vision_model_path);
 }
 
 Ling3Runner::~Ling3Runner() = default;
@@ -307,7 +348,7 @@ TextRunnerDescriptor Ling3Runner::Descriptor() const {
   descriptor.model_id = impl_->model_id;
   descriptor.state_abi = "ling3_air/2";
   descriptor.max_context = impl_->max_context;
-  descriptor.capabilities.supports_vision = false;
+  descriptor.capabilities.supports_vision = !impl_->vision_model_path.empty();
   descriptor.capabilities.incremental_prefill = false;
 
 
@@ -453,6 +494,137 @@ void Ling3Runner::ReconcileComponentState(TextRunnerState& state,
   static_cast<Ling3RunnerState&>(state).set_position(position);
 }
 
+namespace {
+constexpr const char* kImageMarker = "<|image_pad|>";
+}  // namespace
+
+std::optional<TextPreparedPrompt> Ling3Runner::PreparePrompt(
+    const ChatRequest& request) const {
+  std::size_t image_count = 0;
+  for (const auto& message : request.messages) {
+    image_count += message.images.size();
+  }
+  if (image_count == 0) {
+    auto tokens = RenderAndTokenize(request);
+    if (!tokens) {
+      return std::nullopt;
+    }
+    return TextPreparedPrompt{std::move(*tokens), nullptr, 0};
+  }
+  if (impl_->vision_model_path.empty() || impl_->tokenizer == nullptr) {
+    return std::nullopt;
+  }
+  std::string error;
+  std::unique_lock<std::mutex> lock(impl_->vision_mutex);
+  if (impl_->vision == nullptr) {
+    auto reader = core::GgufReader::OpenFile(impl_->vision_model_path, &error);
+    auto encoder = reader ? VisionEncoder::Create(*reader, &error) : nullptr;
+    if (encoder == nullptr) {
+      if (Trace()) {
+        std::fprintf(stderr, "[runner] mmproj: %s\n", error.c_str());
+      }
+      return std::nullopt;
+    }
+    impl_->mmproj = std::move(reader);
+    impl_->vision = std::move(encoder);
+  }
+  VisionEncoder& vision = *impl_->vision;
+  const std::uint32_t rows_per_image = vision.tokens_per_image();
+  const int side = static_cast<int>(vision.image_side());
+  const int grid = side / static_cast<int>(vision.Config().patch);
+
+  auto context = std::make_shared<Ling3ImageContext>();
+  context->row_width = impl_->config.n_embd;
+  std::string text;
+  for (const auto& message : request.messages) {
+    text += "<role>";
+    text += RoleName(message.role);
+    text += "</role>";
+    for (const auto& part : message.images) {
+      if (!part.bytes || part.bytes->empty()) {
+        continue;
+      }
+      core::Image image;
+      try {
+        image = core::DecodeImage(std::span<const std::uint8_t>(*part.bytes));
+      } catch (const std::exception& failure) {
+        if (Trace()) {
+          std::fprintf(stderr, "[runner] image: %s\n", failure.what());
+        }
+        return std::nullopt;
+      }
+      const std::vector<float> chw =
+          ResizeToChw(image.pixels.data(), static_cast<int>(image.width),
+                      static_cast<int>(image.height), side, ImageNorm{});
+      std::vector<float> encoded;
+      if (!vision.EncodeImage(chw.data(), static_cast<std::uint32_t>(grid),
+                              static_cast<std::uint32_t>(grid), &encoded, &error)) {
+        return std::nullopt;
+      }
+      context->rows.insert(context->rows.end(), encoded.begin(), encoded.end());
+      for (std::uint32_t row = 0; row < rows_per_image; ++row) {
+        text += kImageMarker;
+      }
+    }
+    text += message.content;
+    text += "<|role_end|>";
+  }
+  text += "<role>ASSISTANT</role>\n<think" ">";
+  const auto tokens = impl_->tokenizer->Encode(text, /*parse_special=*/true);
+  if (tokens.empty()) {
+    return std::nullopt;
+  }
+  std::vector<TextRunnerToken> prepared(tokens.begin(), tokens.end());
+  // One span per contiguous run of markers; each marker carries one encoded row.
+  bool in_run = false;
+  std::size_t run_start = 0;
+  for (std::size_t i = 0; i < prepared.size(); ++i) {
+    const bool marker =
+        impl_->tokenizer->Decode({prepared[i]}, /*skip_special=*/false) == kImageMarker;
+    if (marker && !in_run) {
+      in_run = true;
+      run_start = i;
+    } else if (!marker && in_run) {
+      in_run = false;
+      context->spans.emplace_back(run_start, i - run_start);
+    }
+  }
+  if (in_run) {
+    context->spans.emplace_back(run_start, prepared.size() - run_start);
+  }
+  std::size_t marker_tokens = 0;
+  for (const auto& span : context->spans) {
+    marker_tokens += span.second;
+  }
+  if (context->row_width == 0 ||
+      marker_tokens != context->rows.size() / context->row_width) {
+    // Not a transient failure: the pinned Q4_K_M vocabulary carries no `<|image_pad|>`
+    // token at all (the string appears only inside the chat template), so this model
+    // cannot express its own vision template. Failing loudly is better than serving an
+    // empty completion.
+    throw std::invalid_argument(
+        "image input cannot be represented: the model vocabulary has no image marker "
+        "token to place the encoded rows on");
+  }
+  // The rendered prompt does not identify the rows, so they join the cache identity.
+  std::uint64_t hash = 1469598103934665603ull;
+  for (const float value : context->rows) {
+    std::uint32_t bits = 0;
+    std::memcpy(&bits, &value, sizeof(bits));
+    hash = (hash ^ bits) * 1099511628211ull;
+  }
+  context->cache_identity.resize(sizeof(hash));
+  for (std::size_t byte = 0; byte < sizeof(hash); ++byte) {
+    context->cache_identity[byte] = static_cast<std::uint8_t>((hash >> (8 * byte)) & 0xFF);
+  }
+  return TextPreparedPrompt{std::move(prepared), std::move(context), 0};
+}
+
+void Ling3Runner::SetPromptContext(TextRunnerState& state,
+                                  std::shared_ptr<const TextPromptContext> context) const {
+  static_cast<Ling3RunnerState&>(state).set_context(std::move(context));
+}
+
 TextPrefillStep Ling3Runner::Prefill(TextRunnerState& state,
                                      std::span<const TextRunnerToken> prompt,
                                      std::size_t offset,
@@ -469,6 +641,42 @@ TextPrefillStep Ling3Runner::Prefill(TextRunnerState& state,
   const std::size_t limit = std::min<std::size_t>(max_input_tokens, 32);
   const std::size_t end = std::min(prompt.size(), offset + limit);
   std::vector<std::int32_t> ids(prompt.begin() + offset, prompt.begin() + end);
+  // Image rows enter as embeddings, one marker at a time, because the chunked path takes
+  // token ids. Without an image context nothing below changes.
+  const auto image_context = runner_state.context();
+  const auto* images = dynamic_cast<const Ling3ImageContext*>(image_context.get());
+  if (images != nullptr && !images->spans.empty() && images->row_width > 0) {
+    std::string error;
+    std::size_t consumed = 0;
+    for (std::size_t position = offset; position < end; ++position) {
+      std::size_t row = std::numeric_limits<std::size_t>::max();
+      std::size_t before = 0;
+      for (const auto& span : images->spans) {
+        if (position >= span.first && position < span.first + span.second) {
+          row = before + (position - span.first);
+          break;
+        }
+        before += span.second;
+      }
+      const bool ok =
+          row == std::numeric_limits<std::size_t>::max()
+              ? runner_state.engine().ForwardToken(ids[position - offset], position, &error)
+              : runner_state.engine().ForwardEmbedding(
+                    images->rows.data() + row * images->row_width, position, &error);
+      if (!ok) {
+        if (Trace()) {
+          std::fprintf(stderr, "[runner] image prefill: %s\n", error.c_str());
+        }
+        step.interrupted = true;
+        return step;
+      }
+      ++consumed;
+    }
+    runner_state.set_position(end);
+    step.consumed_tokens = consumed;
+    step.decode_ready = end == prompt.size();
+    return step;
+  }
   std::string error;
   auto lock = runner_state.LockEngine();
   if (!ids.empty() &&

@@ -519,7 +519,8 @@ std::shared_ptr<gufo::ext::TextModelRunner> CreateLing3Runner(
   }
   Ling3Runner::SetEngineFactory(&CreateServingEngine);
   return std::make_shared<Ling3Runner>(g_serving.config, std::move(tokenizer),
-                                       options.model_path, kServingContext);
+                                       options.model_path, kServingContext,
+                                       options.vision_model_path);
 }
 
 }  // namespace gufo::ext::ling3_air
