@@ -407,5 +407,14 @@ served request and is the most likely cause of the golden divergence indices.
 
 Block 0 is dense (`leading_dense_block_count = 2`), so the suspects are narrow: the batched GEMM used
 for the chunk (`LaunchGemm` on Q4_K/Q6_K) versus the per-token GEMV the sequential path uses, or the
-chunked KDA step. Bisect with a two-token prompt so the prefill covers exactly one token, and compare
-that token's block-0 residual between the two paths.
+chunked KDA step.
+
+Measurement note, so this is not repeated: the numbers above are trustworthy because both sides were
+read with the *same* instrument — each run's final decode step dumps `x_<block>_<pos>.bin` from
+whatever state its prefill produced, so the delta between the two files is the prefill divergence.
+The existing bisect hook (`LING3_CHUNK_BLOCK`, which writes `chunk_x.bin`) is **not** comparable: the
+same comparison through it reports 30-70 %, i.e. three orders of magnitude more, so its contents are
+not the post-block chunk residual I assumed. The next step is therefore to add a dump *inside*
+`PrefillChunk` that writes the chunk's post-residual rows per block, verified to agree with the
+sequential instrument on a one-token prefill, before drawing any conclusion about which of the two
+paths is wrong.
