@@ -521,3 +521,13 @@ That is the concrete next step for `decode-opt`, and it is where the measured 35
 says the time is: the projections are 2.6 of the 4.753 GB a token reads, and they are the rows that
 re-quantise per row today.
 
+
+### A shortcut that was rejected before shipping
+
+Routing the Q8_0 projections through the prepared path *without* a 32-value activation quantiser is
+easy (reuse the 256-value scales and index `scales[b/8]` in the kernel), and it compiles. It was
+rejected: it coarsens the activation quantisation from 32 to 256 values for those weights, which
+changes numerics. This project's rule is that a faster run with different greedy output is a
+rejection, so the prepared Q8_0 path has to wait for the 32-value quantiser and its buffer rather than
+buy speed with accuracy.
+
