@@ -1484,16 +1484,13 @@ bool Engine::PrefillChunk(const std::int32_t* tokens, std::size_t count,
                                 m.delta_state[il], m.kchg_out, heads, kda_dim,
                                 static_cast<std::size_t>(M), kda_inner, kda_inner,
                                 kda_inner, stream);
-      for (int i = 0; i < M; ++i) {
-        const std::size_t row = static_cast<std::size_t>(i) * n_embd;
-        const std::size_t slot = static_cast<std::size_t>(i) * kda_inner;
-        hip::LaunchRmsNorm(m.kchg_out + slot,
-                           static_cast<const float*>(dev(layer.kda_o_norm)),
-                           m.kchg_q + slot, heads, kda_dim, eps, stream);
-        hip::LaunchMulSigmoid(m.kchg_q + slot, m.kchg_ga + slot, kda_inner, stream);
-        hipMemcpyAsync(m.bgated + slot, m.kchg_q + slot, kda_inner * sizeof(float),
-                       hipMemcpyDeviceToDevice, stream);
-      }
+      // Same maths as the per-row loop, but two launches for the whole chunk: the output-gate
+      // normalisation is per head, so it is a (rows x heads) batch, and the sigmoid gate is
+      // elementwise over all rows. The copy into `bgated` goes away with it.
+      hip::LaunchRmsNorm(m.kchg_out, static_cast<const float*>(dev(layer.kda_o_norm)),
+                         m.bgated, static_cast<std::size_t>(M) * heads, kda_dim, eps, stream);
+      hip::LaunchMulSigmoid(m.bgated, m.kchg_ga, static_cast<std::size_t>(M) * kda_inner,
+                            stream);
     }
 
     for (int i = 0; i < M; ++i) {

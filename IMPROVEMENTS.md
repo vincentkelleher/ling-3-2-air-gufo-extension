@@ -645,7 +645,8 @@ The chunked path ran the KDA delta rule, the decay gate and the output gate once
 | --- | --- |
 | per-row KDA (previous) | 25.5 |
 | batched delta rule only | 25.8 |
-| batched delta + batched gate/beta/output-gate GEMMs | **27.8** |
+| batched delta + batched gate/beta/output-gate GEMMs | 27.8 |
+| + batched output-gate norm and sigmoid, copy removed | **27.9** |
 
 The batched path is **byte-identical** to the per-row one — 966 of 966 residual rows across 42 blocks
 and 23 positions, verified with the same instrument that proved the chunked/per-token parity — and
