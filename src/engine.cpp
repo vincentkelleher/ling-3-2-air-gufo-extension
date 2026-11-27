@@ -977,6 +977,10 @@ std::vector<double> Engine::DebugStateDigest() {
 
 void Engine::CaptureFrontier() {
   Impl& m = *impl_;
+  if (std::getenv("LING3_FRONTIER_TRACE") != nullptr) {
+    std::fprintf(stderr, "[frontier] capture start, buffer %p\n",
+                 static_cast<void*>(m.frontier));
+  }
   if (m.frontier == nullptr) {
     return;
   }
@@ -996,6 +1000,10 @@ void Engine::CaptureFrontier() {
     } else {
       copy(m.mla_cache[il], m.options.max_context * (m.config.n_lora_kv + m.config.n_rot));
     }
+  }
+  if (std::getenv("LING3_FRONTIER_TRACE") != nullptr) {
+    std::fprintf(stderr, "[frontier] capture done, %zu floats, buffer %p\n", offset,
+                 static_cast<void*>(m.frontier));
   }
   m.frontier_floats = offset;
 }

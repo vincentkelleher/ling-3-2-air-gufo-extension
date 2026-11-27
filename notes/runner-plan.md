@@ -542,8 +542,13 @@ the copy but **where it runs**: `SnapshotState` has only ever been exercised fro
 main thread, while `CaptureFrontier` runs on the server's scheduler thread against an engine whose
 `hipStream_t` was created on the loader thread.
 
-Next step, in order of likelihood: create the engine (and therefore its queue) on the thread that
-will drive it, or make the queue creation explicitly device-scoped before cross-thread use; then
-retry the capture-only wiring. If that still faults, capture the frontier with `hipMemcpy`
-(synchronous, default stream) instead of `hipMemcpyAsync` on `m.queue`, which the adapter's own
-copies already do.
+Both suspects were then tested and cleared: the capture now uses synchronous `hipMemcpy` on the
+default stream (removing the cross-thread queue use), and a fourth attempt still faults on the
+host's warm-up prefill. So the fault is inside the capture path itself, with the allocation verified
+byte-identical to the snapshot's and the copies verified synchronous.
+
+The engine keeps the frontier buffer and its (synchronous) capture, both unused, plus a
+`LING3_FRONTIER_TRACE` print at capture start and end. **This needs a gdb session on the serving
+process**, not another blind wiring attempt: four have failed, each reverted, and each revert
+restores serving 200. The trace is in place so that run can see whether the fault lands before the
+first copy, mid-loop, or after the loop.
