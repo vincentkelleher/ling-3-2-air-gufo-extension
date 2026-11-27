@@ -552,9 +552,19 @@ are unchanged by construction.
 | before | 16.9 |
 | + KDA q projection | 17.34 |
 | + KDA k, v, f_a, g_a | 18.99 |
-| + MLA q, kv_a, out | **19.15** |
+| + MLA q, kv_a, out | 19.15 |
+| + LM head (Q8_0, 0.43 GB/token) | **19.26** |
 
 Correctness held at every step: `ctest` 10/10 and `tools/golden_set_ids.py` unchanged at plain 19 /
 arithmetic none / tool-call 16 / thinking-on 2, i.e. identical greedy output at +13 % throughput. That
-is 38 % of the roofline, up from 34 %, with the 60 % gate still ahead.
+is 39 % of the roofline, up from 34 %, with the 60 % gate still ahead. Re-verified at the final state:
+`ctest` 10/10 and the golden set unchanged at plain 19 / arithmetic none / tool-call 16 /
+thinking-on 2.
+
+One attempt failed and was reverted: routing the shared expert and dense FFN through the same
+prepared path (inside `LaunchFfn`, 35 layers in one place) crashed with a GPU core dump, so it was
+backed out rather than debugged in the hot path; the remaining per-row GEMV sites are worth roughly
+another 2-3 %, and beyond them the cost sits in the Q4_K expert gather and the KDA delta-rule kernels,
+which are already prepared and need kernel-level work (vectorised loads, fewer launches) rather than
+another quantisation hoist.
 
