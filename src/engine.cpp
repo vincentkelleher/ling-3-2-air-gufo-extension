@@ -847,8 +847,15 @@ bool Engine::ForwardFromEmbedded(std::uint32_t position, std::string* error) {
         report_buf("kda conv q", m.cq, kda_inner);
         report_buf("kda dn out", m.kn, kda_inner);
       }
-      hip::LaunchGemv(dev(layer.kda_out), Storage(layer.kda_out.type), n_embd,
-                      kda_inner, m.qn, m.attn_out, stream);
+      if (Storage(layer.kda_out.type) == hip::kQ8_0) {
+        hip::LaunchQuantizeActivations32(m.qn, kda_inner, m.act_values, m.act_scales32,
+                                         stream);
+        hip::LaunchGemvPrepared(dev(layer.kda_out), hip::kQ8_0, n_embd, kda_inner,
+                                m.act_values, m.act_scales32, m.attn_out, stream);
+      } else {
+        hip::LaunchGemv(dev(layer.kda_out), Storage(layer.kda_out.type), n_embd,
+                        kda_inner, m.qn, m.attn_out, stream);
+      }
       if (il == 0) {
         dump_raw("/work/d0_onorm_gated.bin", m.qn, kda_inner);
         dump_raw("/work/d0_attnout.bin", m.attn_out, n_embd);
