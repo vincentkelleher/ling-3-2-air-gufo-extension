@@ -201,3 +201,23 @@ and ours is 2.6x too large at 40 while too small at 41. `leading_dense_block_cou
 Mixture-of-Experts block on both sides; the next thing to check is whether the last trunk blocks in
 this architecture carry a different expert layout (or are the NextN/MTP block) rather than being
 ordinary MoE layers, since a structural mismatch there would produce exactly this shape.
+
+### Reading the rms trace
+
+Per-block residual rms at position 0, reference versus ours, agrees to four decimals from block 0
+through 39 (e.g. 2.2836 vs 2.2831 at block 20, 1.5209 vs 1.5358 at block 39) and then splits:
+
+| block | ref rms | our rms |
+| --- | --- | --- |
+| 39 | 1.5209 | 1.5358 |
+| 40 | 3.5326 | **7.6410** |
+| 41 | 3.6703 | **5.9903** |
+
+Both sides jump ~10x in contribution at block 40, so that amplification is real in the reference
+too; ours overshoots. `block_count` is 43 with `nextn_predict_layers` 1, so the trunk is 42 blocks
+on both sides and 40/41 are ordinary trunk layers — this is not an off-by-one in the layer count.
+
+The precise next step, cheap and decisive: dump the router's selected expert ids at block 40 (the
+existing `d2_ids` dump covers block 2 only) and compare them with the reference's `ffn_moe_topk`
+tensor, which `build_moe_ffn` reports through `cb`. If the ids differ, the fault is in routing at
+that layer (group config or bias); if they match, it is in the expert arithmetic itself.
