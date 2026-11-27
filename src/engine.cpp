@@ -1250,7 +1250,7 @@ bool Engine::PrefillChunk(const std::int32_t* tokens, std::size_t count,
         hip::LaunchRope(m.q_pe, heads, c.n_rot, c.n_rot, position, c.rope_freq_base,
                         m.rope_neox, stream);
         hip::LaunchRope(kv_ptr + latent, 1, c.n_rot, c.n_rot, position,
-                        c.rope_freq_base, true, stream);
+                        c.rope_freq_base, m.rope_neox, stream);
         hip::LaunchMlaAppend(m.latent, kv_ptr + latent, m.mla_cache[il], position, latent,
                              c.n_rot, stream);
         hip::LaunchGemv(dev(layer.mla_gate), Storage(layer.mla_gate.type), heads, n_embd,

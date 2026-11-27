@@ -111,3 +111,10 @@ written from the chunked prefill branch, while the decode route runs `ForwardFro
 That is the next step, and it is well defined: dump `m.scores` inside the sequential MLA branch, then
 recompute the expected probabilities in numpy from the reference's `q_b` and the cached row, and
 compare probabilities rather than outputs.
+
+Also excluded: the cache's storage type. `MlaAppendKernel` rounds the latent row to fp16
+("llama.cpp keeps the KV cache in f16 by default"). Re-running the reference with
+`type_k`/`type_v = GGML_TYPE_F32` produced byte-identical `mla_out-5` values, so this hybrid model's
+reference cache does not follow those parameters and the fp16 store is not what separates the two
+sides. It is still an approximation worth recording: with an f32 expectation it would cap the latent
+row at ~5e-4 relative, which is the same order as the 0.1-0.8 % seen at the KDA blocks.
