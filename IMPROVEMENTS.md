@@ -405,3 +405,34 @@ The 32-step explicit-ID golden result was unchanged after each fix: plain
 first diverged at 19, arithmetic matched, tool-call diverged at 16, thinking-on
 at 2 (1/4 exact). This harness ingests the prompt with `ForwardToken`, so it
 checks decode/reference behavior, not the changed prefill kernels.
+
+## Decode: the traffic is already minimal; the bandwidth is not (analysis, 2026-11-27)
+
+`tools/bytes_per_token.py` derives what a decode token must read from the GGUF table itself, using
+this engine's execution path (KDA projections, MLA projections plus the absorbed matrices, the shared
+expert, TOP_K of 512 routed experts, and the LM head):
+
+| group | GB per token |
+| --- | --- |
+| KDA projections (35 layers) | 0.799 |
+| MLA projections (7 layers) | 1.800 |
+| shared expert + norms | 0.561 |
+| routed experts (8 of 512) | 1.166 |
+| LM head | 0.428 |
+| **total** | **4.753** |
+
+That is *exactly* the 4.753 GB/token `tools/roofline.py` assumes, so the roofline model is right and the
+49.9 tok/s figure is the machine's true floor for this model. Nothing is being read twice.
+
+The consequence is that decode's gap is not traffic but effective bandwidth: 16.9 tok/s at 237 GB/s
+implies **14 GB/token** of *effective* traffic, so the engine realises roughly a third of peak
+bandwidth on the bytes it does read. The likely cause is locality — the routed experts are 8 random
+rows out of a 512-expert table spanning several GB, so each token's gather is a scatter of large,
+poorly prefetched reads — which is consistent with the profiler's finding that the Q6_K expert GEMV
+alone takes 13.5 ms and with the nine kernel variants that changed nothing: they tuned arithmetic
+that was never the limit.
+
+So `decode-opt`'s real target is memory behaviour: expert-order locality (hot-expert caching or
+reordering), access granularity per expert, and whether the zero-copy weight mapping is being read in
+a pattern the memory system likes. Arithmetic-level tuning of the same reads cannot reach the gate.
+
