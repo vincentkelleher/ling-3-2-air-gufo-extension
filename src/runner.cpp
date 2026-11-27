@@ -27,8 +27,13 @@ Ling3Runner::EngineFactory g_engine_factory = nullptr;
 /// components there is never a transfer to wait for.
 class ReadySignal final : public cache::CompletionSignal {
  public:
+  explicit ReadySignal(bool ok) : ok_(ok) {}
   [[nodiscard]] bool Ready() const noexcept override { return true; }
-  [[nodiscard]] cache::TransferResult Wait() noexcept override { return {}; }
+  [[nodiscard]] cache::TransferResult Wait() noexcept override {
+    return ok_ ? cache::TransferResult::kSucceeded : cache::TransferResult::kFailed;
+  }
+ private:
+  bool ok_;
 };
 
 /// The chat template spells roles in upper case.
@@ -53,8 +58,8 @@ bool Trace() {
   return enabled;
 }
 
-[[nodiscard]] cache::Completion Ready() {
-  return cache::Completion(std::make_unique<ReadySignal>());
+[[nodiscard]] cache::Completion Ready(bool success = true) {
+  return cache::Completion(std::make_unique<ReadySignal>(success));
 }
 
 /// The cache owns streams but only requires `Synchronize`: this adapter copies with
@@ -70,6 +75,7 @@ class DeviceStream final : public cache::Stream {
 /// A slot with no components: it only has to be valid and empty.
 class NullSlot final : public cache::Slot {
  public:
+  bool loaded{false};
   [[nodiscard]] bool IsValid() const noexcept override { return true; }
 };
 
@@ -90,7 +96,7 @@ class Ling3ComponentAdapter final : public cache::Adapter,
                         std::uint32_t context)
       : identity_(std::move(identity)), context_(context) {
     component_.id = cache::ComponentId{0};
-    component_.layout_version = 1;
+    component_.layout_version = 2;
     component_.kind = cache::ComponentKind::kPrivateState;
     component_.state_bytes = state_bytes;
   }
@@ -134,6 +140,7 @@ class Ling3ComponentAdapter final : public cache::Adapter,
   /// slot's state has prefilled to. An empty vector is "incomplete capture positions".
   [[nodiscard]] std::vector<cache::ComponentPosition> Positions(
       const cache::Slot& slot) const override {
+    const std::lock_guard<std::mutex> lock(mutex_);
     cache::ComponentPosition position;
     position.id = component_.id;
     const auto found = positions_.find(const_cast<cache::Slot*>(&slot));
@@ -160,7 +167,9 @@ class Ling3ComponentAdapter final : public cache::Adapter,
     rows.push_back(end);
     return rows;
   }
-  void BeginRestore(cache::Slot&, std::span<const cache::ComponentPosition>) override {}
+  void BeginRestore(cache::Slot& slot, std::span<const cache::ComponentPosition>) override {
+    static_cast<NullSlot&>(slot).loaded = false;
+  }
 
   [[nodiscard]] cache::Completion CapturePrivate(const cache::Slot& slot,
                                                  cache::ComponentId,
@@ -171,23 +180,16 @@ class Ling3ComponentAdapter final : public cache::Adapter,
                    payload.size());
     }
     Engine* engine = EngineFor(slot);
-    if (engine == nullptr || payload.size() < component_.state_bytes) {
-      return Ready();
-    }
-    hipMemcpy(payload.data(), engine->SnapshotData(), component_.state_bytes,
-              hipMemcpyDeviceToHost);
-    return Ready();
+    return Ready(engine && engine->SaveServingState(payload));
   }
   [[nodiscard]] cache::Completion LoadPrivate(cache::Slot& slot, cache::ComponentId,
                                               std::span<const std::byte> payload,
                                               cache::Stream&) override {
     Engine* engine = EngineFor(slot);
-    if (engine == nullptr || payload.size() < component_.state_bytes) {
-      return Ready();
-    }
-    hipMemcpy(const_cast<float*>(engine->SnapshotData()), payload.data(),
-              component_.state_bytes, hipMemcpyHostToDevice);
-    return Ready();
+    bool ok = engine && engine->LoadServingState(payload);
+    static_cast<NullSlot&>(slot).loaded = ok;
+    if (Trace()) std::fprintf(stderr, "[runner] restore %zu bytes ok=%d\n", payload.size(), ok);
+    return Ready(ok);
   }
   [[nodiscard]] cache::Completion CopyRowsOut(const cache::Slot&, cache::ComponentId,
                                               cache::Rows, cache::Rows,
@@ -201,11 +203,19 @@ class Ling3ComponentAdapter final : public cache::Adapter,
                                              cache::Stream&) override {
     return Ready();
   }
-  [[nodiscard]] bool Validate(cache::Slot&,
-                              std::span<const cache::ComponentPosition>) override {
+  [[nodiscard]] bool Validate(cache::Slot& slot,
+                              std::span<const cache::ComponentPosition> positions) override {
+    if (!static_cast<NullSlot&>(slot).loaded || positions.size() != 1 ||
+        positions[0].id != component_.id || positions[0].valid_rows > context_) return false;
+    OnPosition(&slot, positions[0].valid_rows);
     return true;
   }
-  [[nodiscard]] bool Invalidate(cache::Slot&) noexcept override { return true; }
+  [[nodiscard]] bool Invalidate(cache::Slot& slot) noexcept override {
+    static_cast<NullSlot&>(slot).loaded = false;
+    Engine* engine = EngineFor(slot);
+    if (engine && !engine->ClearServingState()) return false;
+    return true;
+  }
 
  private:
   [[nodiscard]] Engine* EngineFor(const cache::Slot& slot) const {
@@ -265,17 +275,6 @@ void Ling3Runner::SetEngineFactory(EngineFactory factory) {
   g_engine_factory = factory;
 }
 
-/// Floats the engine allocates for its snapshot: the private-state component's exact size
-/// and therefore what the RAM cache has to grant per session.
-[[nodiscard]] std::size_t SnapshotBytes(const Ling3Config& c, std::uint32_t context) {
-  const std::size_t heads = c.n_head;
-  const std::size_t kda_inner = c.KdaInner();
-  const std::size_t kda_dim = c.n_kda_head_dim;
-  const std::size_t kv_dim = c.n_lora_kv + c.n_rot;
-  const std::size_t floats_per_layer =
-      9 * kda_inner + heads * kda_dim * kda_dim + static_cast<std::size_t>(context) * kv_dim;
-  return static_cast<std::size_t>(c.n_layer_total) * floats_per_layer * sizeof(float);
-}
 
 struct Ling3Runner::Impl {
   Ling3Config config;
@@ -298,7 +297,7 @@ Ling3Runner::~Ling3Runner() = default;
 TextRunnerDescriptor Ling3Runner::Descriptor() const {
   TextRunnerDescriptor descriptor;
   descriptor.model_id = impl_->model_id;
-  descriptor.state_abi = "ling3_air/1";
+  descriptor.state_abi = "ling3_air/2";
   descriptor.max_context = impl_->max_context;
   descriptor.capabilities.supports_vision = false;
   descriptor.capabilities.incremental_prefill = false;
@@ -316,7 +315,7 @@ TextRunnerResourceClaim Ling3Runner::ResourceClaim() const {
   TextRunnerResourceClaim claim;
   // The cache grants this much host memory for one session's state; without it the
   // prepared-session pass refuses with budget 0.
-  const std::size_t state_bytes = SnapshotBytes(impl_->config, impl_->max_context);
+  const std::size_t state_bytes = Engine::ServingBytes(impl_->config, impl_->max_context);
   claim.state_capacity_bytes = state_bytes;
   claim.per_request_state_bytes = state_bytes;
   // A prompt token writes one row into each MLA layer's latent cache.
@@ -387,9 +386,7 @@ std::unique_ptr<ComponentCacheResources> Ling3Runner::CreateComponentCacheResour
   auto resources = std::make_unique<ComponentCacheResources>();
   // Identity is an opaque byte blob: the model id distinguishes two checkpoints.
   cache::Identity identity(impl_->model_id.begin(), impl_->model_id.end());
-  // The snapshot is n_layer_total x (9 * kda_inner + heads * kda_dim^2 + context * kv_dim)
-  // floats; the engine allocates exactly that (see Engine::Create).
-  const std::size_t state_bytes = SnapshotBytes(impl_->config, impl_->max_context);
+  const std::size_t state_bytes = Engine::ServingBytes(impl_->config, impl_->max_context);
   resources->adapter =
       std::make_unique<Ling3ComponentAdapter>(identity, state_bytes, impl_->max_context);
   // The host asks this for the buffer it captures a component into, then takes ownership
@@ -511,12 +508,11 @@ void Ling3Runner::Advance(TextRunnerState& state, TextRunnerToken token) const {
   runner_state.set_position(runner_state.position() + 1);
 }
 
-bool Ling3Runner::CanContinue(const TextRunnerState& state,
-                              std::size_t prompt_tokens) const {
-  // The state stands wherever the last select/advance left it; that equals the prompt frontier
-  // only when nothing has been generated since. Claiming otherwise made the host skip prefill for
-  // a repeated prompt and decode from a state that had already advanced past it.
-  return static_cast<const Ling3RunnerState&>(state).position() == prompt_tokens;
+bool Ling3Runner::CanContinue(const TextRunnerState&, std::size_t prompt_tokens) const {
+  // Gufo checks prefix identity and boundary first. This query runs before it
+  // reconciles the newly bound runner position. All rows and the head output
+  // are present, including when the entire prompt was restored.
+  return prompt_tokens <= impl_->max_context;
 }
 
 std::size_t Ling3Runner::CheckpointPosition(const TextRunnerState& state) const {

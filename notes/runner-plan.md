@@ -548,3 +548,17 @@ four tokens) returned HTTP 200, and the scheduler-thread capture reached its end
 floats**. No Gufo or HIP change was required. This test does not prove that the private cache saves
 or restores those bytes. `tools/check_module_exports.py` checks the binary boundary independently
 of model availability.
+
+## One-slot serving cache: verified implementation
+
+The cache now serializes the live slot when Gufo requests a capture, rather than keeping a
+second GPU snapshot and assuming every checkpoint means end-of-prefill. The byte ranges are
+recorded at allocation. They include KDA/MLA state, the head logits, greedy selection and final
+hidden state. The format and runner ABI are version 2. At context 4096 the payload is 154,697,732
+bytes (the old claim was 502,317,056). Transfers report failure on a wrong size or HIP error.
+
+`ling3_air.mtp` saves the payload, clears the engine, restores, and compares all bytes and eight
+subsequent greedy steps with their logits. `tools/check_http_restore.py --gufo GUFO --model GGUF`
+compares repeated and edited completions with fresh servers; it requires a successful private
+restore in the request log, so a cold fallback alone cannot pass. This covers one serving slot,
+not concurrent sessions or disk persistence.

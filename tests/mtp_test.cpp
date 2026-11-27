@@ -138,6 +138,23 @@ int main(int argc, char** argv) {
     return 1;
   }
 
+  // Serving restores without replaying the last token: even the head output
+  // must survive a cold reset. Compare every byte of the published payload.
+  {
+    std::vector<std::byte> saved(Model::ServingBytes(config, options.max_context)), copy(saved.size());
+    if (!engine->SaveServingState(saved) || !engine->ClearServingState() ||
+        engine->LoadServingState(std::span(saved).first(saved.size() - 1)) ||
+        !engine->LoadServingState(saved) || !engine->SaveServingState(copy) || saved != copy) {
+      std::fprintf(stderr, "serving checkpoint byte round-trip failed\n");
+      return 1;
+    }
+    std::vector<std::int32_t> after;
+    std::vector<std::vector<float>> rows;
+    if (!Greedy(*engine, start, steps, &after, &rows, &error) || after != reference ||
+        rows != reference_logits || !rewind()) return 1;
+    std::printf("ok   serving checkpoint %zu bytes, %d decode rows\n", saved.size(), steps);
+  }
+
   // 1. Restore round-trip: the same decode after a rewind must reproduce tokens and logits.
   {
     std::vector<std::int32_t> again;

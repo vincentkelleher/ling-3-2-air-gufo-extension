@@ -129,8 +129,9 @@ struct Engine::Impl {
   float* blogits{nullptr};
   float* snapshot{nullptr};
   std::size_t snapshot_floats{0};
-  float* frontier{nullptr};
-  std::size_t frontier_floats{0};
+  // Built alongside the actual allocations. This is the serialization order.
+  std::vector<std::pair<void*, std::size_t>> serving_ranges;
+  std::size_t serving_bytes{0};
   hipStream_t queue{nullptr};
   float* kernel_debug{nullptr};
 
@@ -396,10 +397,6 @@ std::unique_ptr<Engine> Engine::Create(const core::GgufReader& reader,
       alloc(&m.bup, Impl::kMaxChunk * config.n_ff_exp) &&
       alloc(&m.bout, Impl::kMaxChunk * n_embd) &&
       alloc(&m.blogits, 8 * static_cast<std::size_t>(config.n_vocab)) &&
-      alloc(&m.frontier, config.n_layer_total *
-                             (9 * kda_inner +
-                              static_cast<std::size_t>(heads) * kda_dim * kda_dim +
-                              options.max_context * kv_dim)) &&
       alloc(&m.snapshot, config.n_layer_total *
                              (9 * kda_inner +
                               static_cast<std::size_t>(heads) * kda_dim * kda_dim +
@@ -408,6 +405,13 @@ std::unique_ptr<Engine> Engine::Create(const core::GgufReader& reader,
     return fail("engine: device scratch allocation failed");
   }
 
+  auto range = [&](void* address, std::size_t bytes) {
+    m.serving_ranges.emplace_back(address, bytes);
+    m.serving_bytes += bytes;
+  };
+  range(m.argmax, sizeof(*m.argmax));
+  range(m.logits, config.n_vocab * sizeof(float));
+  range(m.base_hidden, n_embd * sizeof(float));
   m.conv_state.assign(config.n_layer_total, nullptr);
   m.delta_state.assign(config.n_layer_total, nullptr);
   m.mla_cache.assign(config.n_layer_total, nullptr);
@@ -419,14 +423,21 @@ std::unique_ptr<Engine> Engine::Create(const core::GgufReader& reader,
           !alloc(&m.delta_state[il], heads * kda_dim * kda_dim)) {
         return fail("engine: KDA state allocation failed");
       }
+      range(m.conv_state[il], 9 * kda_inner * sizeof(float));
+      range(m.delta_state[il], heads * kda_dim * kda_dim * sizeof(float));
       hipMemset(m.conv_state[il], 0, 9 * kda_inner * sizeof(float));
       hipMemset(m.delta_state[il], 0, heads * kda_dim * kda_dim * sizeof(float));
     } else {
       if (!alloc(&m.mla_cache[il], context * kv_dim)) {
         return fail("engine: MLA cache allocation failed");
       }
+      range(m.mla_cache[il], context * kv_dim * sizeof(float));
       hipMemset(m.mla_cache[il], 0, context * kv_dim * sizeof(float));
     }
+  }
+
+  if (m.serving_bytes != ServingBytes(config, options.max_context)) {
+    return fail("engine: serving cache layout differs from allocated state");
   }
 
   // attn_k_b and attn_v_b are quantized per-head matrices the absorb kernels
@@ -975,65 +986,42 @@ std::vector<double> Engine::DebugStateDigest() {
 }
 
 
-void Engine::CaptureFrontier() {
-  Impl& m = *impl_;
-  if (std::getenv("LING3_FRONTIER_TRACE") != nullptr) {
-    std::fprintf(stderr, "[frontier] capture start, buffer %p\n",
-                 static_cast<void*>(m.frontier));
+std::size_t Engine::ServingBytes(const Ling3Config& c, std::uint32_t context) {
+  std::size_t floats = static_cast<std::size_t>(c.n_vocab) + c.n_embd;
+  for (std::uint32_t il = 0; il < c.n_layer_total; ++il) {
+    floats += c.IsKda(il) ? 9ULL * c.KdaInner() +
+                  static_cast<std::size_t>(c.n_head) * c.n_kda_head_dim * c.n_kda_head_dim
+                : static_cast<std::size_t>(context) * (c.n_lora_kv + c.n_rot);
   }
-  if (m.frontier == nullptr) {
-    return;
-  }
-  std::size_t offset = 0;
-  for (std::uint32_t il = 0; il < m.config.n_layer_total; ++il) {
-    const auto copy = [&](const float* source, std::size_t count) {
-      // Synchronous on the default stream: the frontier capture runs on the host's scheduler
-      // thread, while m.queue was created on the loader thread, and the async form faulted there.
-      hipMemcpy(m.frontier + offset, source, count * sizeof(float),
-                hipMemcpyDeviceToDevice);
-      offset += count;
-    };
-    if (m.config.IsKda(il)) {
-      copy(m.conv_state[il], 9 * m.config.KdaInner());
-      copy(m.delta_state[il], static_cast<std::size_t>(m.config.n_head) *
-                                  m.config.n_kda_head_dim * m.config.n_kda_head_dim);
-    } else {
-      copy(m.mla_cache[il], m.options.max_context * (m.config.n_lora_kv + m.config.n_rot));
-    }
-  }
-  if (std::getenv("LING3_FRONTIER_TRACE") != nullptr) {
-    std::fprintf(stderr, "[frontier] capture done, %zu floats, buffer %p\n", offset,
-                 static_cast<void*>(m.frontier));
-  }
-  m.frontier_floats = offset;
+  return floats * sizeof(float) + sizeof(std::int32_t);
 }
 
-void Engine::RestoreFrontier() {
-  Impl& m = *impl_;
-  if (m.frontier == nullptr || m.frontier_floats == 0) {
-    return;
+bool Engine::SaveServingState(std::span<std::byte> dst) {
+  if (dst.size() != impl_->serving_bytes || hipStreamSynchronize(impl_->queue) != hipSuccess)
+    return false;
+  for (const auto& [device, bytes] : impl_->serving_ranges) {
+    if (hipMemcpy(dst.data(), device, bytes, hipMemcpyDeviceToHost) != hipSuccess) return false;
+    dst = dst.subspan(bytes);
   }
-  std::size_t offset = 0;
-  for (std::uint32_t il = 0; il < m.config.n_layer_total; ++il) {
-    const auto copy = [&](float* target, std::size_t count) {
-      hipMemcpy(target, m.frontier + offset, count * sizeof(float),
-                hipMemcpyDeviceToDevice);
-      offset += count;
-    };
-    if (m.config.IsKda(il)) {
-      copy(m.conv_state[il], 9 * m.config.KdaInner());
-      copy(m.delta_state[il], static_cast<std::size_t>(m.config.n_head) *
-                                  m.config.n_kda_head_dim * m.config.n_kda_head_dim);
-    } else {
-      copy(m.mla_cache[il], m.options.max_context * (m.config.n_lora_kv + m.config.n_rot));
-    }
-  }
-  hipStreamSynchronize(m.queue);
+  return true;
 }
 
-const float* Engine::FrontierData() const { return impl_->frontier; }
+bool Engine::LoadServingState(std::span<const std::byte> src) {
+  if (src.size() != impl_->serving_bytes || hipStreamSynchronize(impl_->queue) != hipSuccess)
+    return false;
+  for (const auto& [device, bytes] : impl_->serving_ranges) {
+    if (hipMemcpy(device, src.data(), bytes, hipMemcpyHostToDevice) != hipSuccess) return false;
+    src = src.subspan(bytes);
+  }
+  return true;
+}
 
-std::size_t Engine::FrontierFloats() const { return impl_->frontier_floats; }
+bool Engine::ClearServingState() {
+  for (const auto& [device, bytes] : impl_->serving_ranges) {
+    if (hipMemsetAsync(device, 0, bytes, impl_->queue) != hipSuccess) return false;
+  }
+  return hipStreamSynchronize(impl_->queue) == hipSuccess;
+}
 
 void Engine::SnapshotState() {
   Impl& m = *impl_;
