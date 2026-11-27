@@ -466,3 +466,35 @@ It does not pay, and the numbers say why: 0 of 8 drafts were accepted with this 
 each rejected draft costs a full verification pass. At 58 % acceptance with a verifier 1.29x
 cheaper per token the modeled gain is ~1.15x; at 0 % it is a loss. Speculation therefore stays
 out of the serving path, which is a measured decision rather than an unfinished one.
+
+## Chunked KDA: the scan we would need (design, 2026-11-27)
+
+The delta rule the engine runs per token is, for one head, with `g_t` the decay gate, `beta_t` the
+write strength and `k_t, v_t, q_t` the conv outputs:
+
+    M_t = M_{t-1} * exp(g_t)  +  k_t (v_t - M_{t-1} k_t)^T beta_t
+    o_t = M_t^T q_t
+
+`M_{t-1} k_t` makes the update non-linear in `M`, so it is not a plain linear scan; it is a rank-1
+update with a state-dependent correction. Two known decompositions apply:
+
+1. **Sequential-in-blocks, parallel-in-block.** Split the chunk into sub-blocks of size `B` (8 or 16).
+   Within a sub-block keep the sequential recurrence (it is what we already have and it is cheap at
+   `B` steps), and express each sub-block's effect on the state as a pair `(decay, additive term)` so
+   sub-blocks can be composed with a small scan when the cross-block correction is negligible. This is
+   the approximation mamba-style chunked kernels use, and it must be validated against the per-token
+   path token-for-token — `tools/golden_set_ids.py` is the instrument, and a change that alters output
+   is a rejection.
+2. **Exact two-pass.** First pass computes, for each row, the decay from the chunk start
+   (`prod exp(g)`), so `M_t` can be written as `D_t * M_0 + sum_j (coefficient)`. Because the update is
+   affine in `M` for a *fixed* set of `k`, one can solve for the `beta`-weighted contributions with a
+   triangular solve over the chunk (an `O(B^2)` per-block matrix), then evaluate all rows as matmuls.
+   Exact, more work to implement, and the right choice if (1) perturbs the greedy output.
+
+Before either: the conv is already a per-channel sliding window and batches trivially; the scan is the
+only genuinely sequential part. Expected ceiling from batching it: the measured per-token cost is
+42 ms in prefill against 59 ms in decode, so attention+recurrence is roughly 70 % of the step; batching
+it would move pp2048 from ~24 tok/s to the same order as the batched GEMM half, i.e. tens of times
+faster, still far from the 4,400 tok/s the 70 % gate asks for. That gap is the honest headline for
+`prefill-opt`.
+
