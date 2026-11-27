@@ -309,5 +309,13 @@ the engine) and decoded greedily. Measured at 32 tokens:
 | tool-call | no | token 0 (engine 678, llama 156896) |
 | thinking-on | no | token 2 (engine 341, llama 18549) |
 
-`tool-call` diverging at the first token is the sharpest remaining lead: the context is identical,
-so that is a model difference on that prompt, not an index or framing error.
+`tool-call` first appeared to diverge at token 0, but that was a second bug in the *new* harness: it
+carried its own approximation of the tool-call framing instead of the real one. With the renderer
+imported from `golden_set.py` (one renderer, both harnesses) the case diverges at token 16, and the
+four indices become 19 / none / 16 / 2 — a uniform, small numerical difference rather than one
+prompt behaving specially.
+
+Trying to isolate the last few percent at the head did not converge: selecting `result_output` /
+`result_norm` in the reference dumper produced no files even though the run completed, so that
+observer is still not reporting what it selects. Treat the head comparison as open until the dumper
+is proven to write those tensors.

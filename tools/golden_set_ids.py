@@ -11,25 +11,10 @@ import os
 import subprocess
 import sys
 
-ASSISTANT = "<role>ASSISTANT</role>\n<think" + ">"
-
-CASES = {
-    "plain": ("The capital of France is", True),
-    "arithmetic": ("What is 17 times 23?", True),
-    "tool-call": ("What is the price of AAPL? Use the get_stock_price tool.", True, True),
-    "thinking-on": ("Explain why the sky is blue in one sentence.", False),
-}
-
-
-def render(prompt, thinking_off, tools=False):
-    text = "<role>SYSTEM</role>"
-    text += "detailed thinking off" if thinking_off else "detailed thinking on"
-    text += "<|role_end|>"
-    if tools:
-        text += ("<role>SYSTEM</role>You may call tools. "
-                 "get_stock_price(symbol: str) -> float<|role_end|>")
-    text += f"<role>HUMAN</role>{prompt}<|role_end|>" + ASSISTANT
-    return text
+# One renderer for both harnesses: a second copy of the chat framing is how the tool-call case
+# ended up compared through a context neither side was meant to see.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from golden_set import ASSISTANT, CASES, render  # noqa: E402
 
 
 def run(cmd, env=None):
