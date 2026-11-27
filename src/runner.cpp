@@ -535,6 +535,27 @@ std::optional<TextPreparedPrompt> Ling3Runner::PreparePrompt(
 
   auto context = std::make_shared<Ling3ImageContext>();
   context->row_width = impl_->config.n_embd;
+  // The image markers are CONTROL tokens: they cannot be produced by encoding the literal text,
+  // so their id is spliced in and each span is recorded where it is placed. That also removes the
+  // fragile "rescan the token list and count markers" step, which is what failed before.
+  const auto marker_ids = impl_->tokenizer->Encode(kImageMarker, /*parse_special=*/true);
+  if (marker_ids.size() != 1) {
+    if (Trace()) {
+      std::fprintf(stderr, "[runner] %s resolves to %zu tokens, not 1\n", kImageMarker,
+                   marker_ids.size());
+    }
+    return std::nullopt;
+  }
+  const auto marker = static_cast<TextRunnerToken>(marker_ids.front());
+  std::vector<TextRunnerToken> prepared;
+  const auto flush = [&](std::string& pending) {
+    if (pending.empty()) {
+      return;
+    }
+    const auto encoded = impl_->tokenizer->Encode(pending, /*parse_special=*/true);
+    prepared.insert(prepared.end(), encoded.begin(), encoded.end());
+    pending.clear();
+  };
   std::string text;
   for (const auto& message : request.messages) {
     text += "<role>";
@@ -562,49 +583,31 @@ std::optional<TextPreparedPrompt> Ling3Runner::PreparePrompt(
         return std::nullopt;
       }
       context->rows.insert(context->rows.end(), encoded.begin(), encoded.end());
+      flush(text);
+      const std::size_t start = prepared.size();
       for (std::uint32_t row = 0; row < rows_per_image; ++row) {
-        text += kImageMarker;
+        prepared.push_back(marker);
       }
+      context->spans.emplace_back(start, rows_per_image);
     }
     text += message.content;
     text += "<|role_end|>";
   }
   text += "<role>ASSISTANT</role>\n<think" ">";
-  const auto tokens = impl_->tokenizer->Encode(text, /*parse_special=*/true);
-  if (tokens.empty()) {
+  flush(text);
+  if (prepared.empty() || context->row_width == 0) {
     return std::nullopt;
   }
-  std::vector<TextRunnerToken> prepared(tokens.begin(), tokens.end());
-  // One span per contiguous run of markers; each marker carries one encoded row.
-  bool in_run = false;
-  std::size_t run_start = 0;
-  for (std::size_t i = 0; i < prepared.size(); ++i) {
-    const bool marker =
-        impl_->tokenizer->Decode({prepared[i]}, /*skip_special=*/false) == kImageMarker;
-    if (marker && !in_run) {
-      in_run = true;
-      run_start = i;
-    } else if (!marker && in_run) {
-      in_run = false;
-      context->spans.emplace_back(run_start, i - run_start);
-    }
-  }
-  if (in_run) {
-    context->spans.emplace_back(run_start, prepared.size() - run_start);
-  }
-  std::size_t marker_tokens = 0;
+  std::size_t placed = 0;
   for (const auto& span : context->spans) {
-    marker_tokens += span.second;
+    placed += span.second;
   }
-  if (context->row_width == 0 ||
-      marker_tokens != context->rows.size() / context->row_width) {
-    // Not a transient failure: the pinned Q4_K_M vocabulary carries no `<|image_pad|>`
-    // token at all (the string appears only inside the chat template), so this model
-    // cannot express its own vision template. Failing loudly is better than serving an
-    // empty completion.
-    throw std::invalid_argument(
-        "image input cannot be represented: the model vocabulary has no image marker "
-        "token to place the encoded rows on");
+  if (placed * context->row_width != context->rows.size()) {
+    if (Trace()) {
+      std::fprintf(stderr, "[runner] %zu markers placed vs %zu row values\n", placed,
+                   context->rows.size());
+    }
+    return std::nullopt;
   }
   // The rendered prompt does not identify the rows, so they join the cache identity.
   std::uint64_t hash = 1469598103934665603ull;
@@ -639,7 +642,20 @@ TextPrefillStep Ling3Runner::Prefill(TextRunnerState& state,
   // larger request would run past it. Clamping here also gives the host the frontier it
   // expects: it simply asks for the next pass.
   const std::size_t limit = std::min<std::size_t>(max_input_tokens, 32);
-  const std::size_t end = std::min(prompt.size(), offset + limit);
+  std::size_t end = std::min(prompt.size(), offset + limit);
+  // A pass must not end inside an image span: the host rejects that ("stopped prefill inside an
+  // indivisible input"), and the rows are only meaningful together, so the span is consumed whole
+  // even beyond the token budget.
+  if (const auto context = runner_state.context()) {
+    if (const auto* images = dynamic_cast<const Ling3ImageContext*>(context.get())) {
+      for (const auto& span : images->spans) {
+        const std::size_t span_end = span.first + span.second;
+        if (span.first < end && end < span_end) {
+          end = std::min(prompt.size(), span_end);
+        }
+      }
+    }
+  }
   std::vector<std::int32_t> ids(prompt.begin() + offset, prompt.begin() + end);
   // Image rows enter as embeddings, one marker at a time, because the chunked path takes
   // token ids. Without an image context nothing below changes.
