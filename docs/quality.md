@@ -111,12 +111,20 @@ byte-level diff that would localise it.
 
 ### Single-token forward and first-token agreement
 
-**Bare BOS does not pass.** For context `[156891]` (one token, position zero) on the pinned
-Q4_K_M, llama.cpp CPU `e95426f` selects **90827**, whereas the extension selects **128206**.
-Over all 157,184 finite FP32 logits, the RMS difference is **1.069405** and the maximum absolute
-difference is **7.808860**. This is a first-step discrepancy, not a tokenizer or CLI framing
-difference. Its cause has not been localized. Agreement over prefixes of chat prompts does not
-establish agreement on this input.
+**Bare BOS does not pass.** Feeding explicit ids to both sides (no tokenizer, no chat framing), on
+the pinned Q4_K_M against llama.cpp CPU `e95426f`:
+
+| context | llama.cpp argmax | extension argmax | relative logit error |
+| --- | --- | --- | --- |
+| `[156891]` | 90827 | 128206 | 5.9e-01 |
+| `[156891, 156891]` | 2496 | 2496 | 1.6e-01 |
+| `[156891, 156891, 156891]` | 2496 | 678 | 1.9e-01 |
+
+The single-token case (all 157,184 logits finite) differs by RMS **1.069405** and maximum
+**7.808860**. Because the error stays near 1.6e-01 even where the argmax agrees, it is systematic
+rather than the rounding order that explains the 0.048 margin on longer prompts. The block where it
+first appears is being localized; until then this input does not meet `engine-assembly`. Agreement
+over chat-prompt prefixes does not establish agreement here.
 
 Reproduce using a matching llama.cpp source checkout (`$LLAMA`) and CPU build (`$LIB` points
 to its `bin` directory). Run the forward test with no prompt environment overrides:

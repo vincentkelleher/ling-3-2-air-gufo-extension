@@ -224,6 +224,29 @@ int main(int argc, char** argv) {
     return 0;
   }
 
+  // An explicit id list, so the same contexts as the llama.cpp reference can be fed.
+  if (const char* ids = std::getenv("LING3_TOKEN_IDS")) {
+    std::size_t position = 0;
+    for (const char* p = ids; *p != '\0';) {
+      char* end = nullptr;
+      const long value = std::strtol(p, &end, 10);
+      if (end == p) { if (*p == ',') { ++p; continue; } break; }
+      if (!engine->ForwardToken(static_cast<std::int32_t>(value),
+                                static_cast<std::uint32_t>(position++), &error)) {
+        std::fprintf(stderr, "token id: %s\n", error.c_str());
+        return 1;
+      }
+      p = end;
+    }
+    std::vector<float> logits(engine->VocabSize());
+    engine->ReadLogits(logits.data());
+    const char* out_path = std::getenv("LING3_FINAL_LOGITS_F32");
+    if (out_path == nullptr) { std::fprintf(stderr, "set LING3_FINAL_LOGITS_F32\n"); return 2; }
+    std::ofstream out(out_path, std::ios::binary);
+    out.write(reinterpret_cast<const char*>(logits.data()), logits.size() * sizeof(float));
+    std::printf("token ids: %zu steps, argmax %d\n", position, static_cast<int>(engine->Argmax()));
+    return out ? 0 : 1;
+  }
   std::int32_t token = use_prompt ? prompt_tokens.front() : 156891;
   std::vector<ling::text::TokenId> produced;
   std::size_t position = 0;
