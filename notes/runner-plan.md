@@ -562,3 +562,37 @@ subsequent greedy steps with their logits. `tools/check_http_restore.py --gufo G
 compares repeated and edited completions with fresh servers; it requires a successful private
 restore in the request log, so a cold fallback alone cannot pass. This covers one serving slot,
 not concurrent sessions or disk persistence.
+
+## Image input over HTTP: the contract, read from the installed headers (2026-11-27)
+
+The host's override point is `TextModelRunner::PreparePrompt(const ChatRequest&)`, whose default
+implementation throws `"model does not support image input"` when any message carries images
+(`gufo-src/src/ext/text.hpp`). It returns `TextPreparedPrompt{tokens, shared_ptr<const
+TextPromptContext>, cache_prefix_tokens}`, so image data travels in a runner-defined subclass of
+`TextPromptContext` (`text.hpp`, which also carries `cache_identity`, `cache_prefixes` and a
+`PrefillStop(position, up)` hook that keeps prefill from ending inside a span — "a model whose input
+rows must be evaluated in one forward, such as image rows attending each other" returns the span's
+first row or the position after its last).
+
+The expensive parts already exist in this repository:
+
+- `src/drivers.cpp` `EncodeImages()` — opens the mmproj, builds `VisionEncoder`, resizes to `image_side`,
+  encodes and concatenates rows, reporting `tokens_per_image`.
+- `src/drivers.cpp` `GenerateWithImages()` — walks the prompt's image markers and enters each row
+  through `Engine::ForwardEmbedding` instead of a token id; the trunk is unchanged.
+- `tests/image_forward_test.cpp` proves the encoder and the injected-row path against the numpy and
+  llama.cpp references.
+
+So the remaining work is serving glue, in this order: (1) store `options.vision_model_path` and set
+`capabilities.supports_vision` when it is configured; (2) override `PreparePrompt` to decode
+`ImagePart::bytes`, encode, render the prompt with image markers, and return a context carrying the
+rows, their spans and a cache identity derived from the row bytes; (3) make `Prefill` consume a span
+through `ForwardEmbedding` — the sequential path can do this today, a chunked span needs the chunk
+buffer to accept rows; (4) implement `PrefillStop` from the spans; (5) one end-to-end test: one
+pinned image over `POST /v1/chat/completions`, compared with the driver path's own output for the same
+image, which is the cheapest meaningful oracle (the HF reference for the *encoder* is already covered
+by `image_forward_test`).
+
+Risk: the chunked prefill path batches tokens, and an image span must enter as embeddings, so a span
+that crosses a chunk boundary is the case most likely to be got wrong — the test in (5) should use an
+image whose span is longer than one 32-token chunk.
