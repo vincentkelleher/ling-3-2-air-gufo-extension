@@ -582,10 +582,12 @@ would be a pure instruction-count win. It does not compile here:
 Two routes were tried and both fail in this toolchain. A per-kernel
 `__attribute__((target("dot1-insts")))` compiles but the kernel is never registered — the runtime
 reports "Cannot find Symbol ... GemvPreparedQ8Dot4Kernel" — both inside an anonymous namespace and with
-external linkage, so the attribute and the HIP offload registration do not combine here. The remaining
-route is enabling the feature for the whole translation unit's HIP compile (an `extension.cmake`
-compile option for `kernels.hip`), which needs verifying against this ROCm/clang build before the
-kernel can be used. Worth
+external linkage, so the attribute and the HIP offload registration do not combine here. The remaining route — enabling the feature for the translation unit — was then tested directly on a
+standalone probe (`/work/dot4-probe.hip`, comparing `sdot4` against the scalar sum of four signed int8
+products) and is **not available in this toolchain**: `-mllvm -amdgpu-enable-dot1-insts` is an unknown
+LLVM option, and `-Xclang -target-feature -Xclang +{dot1,dot5,dot7,dot10}-insts` all fail to compile
+for `--offload-arch=gfx1151`. So dot4 is ruled out here, not pending: the remaining decode headroom
+has to come from load width and launch count in the existing shapes. Worth
 doing: the prepared dot is the hot loop of every projection, and four int8 products per instruction
 is the cheapest remaining lever now that the activation quantisation is hoisted.
 
