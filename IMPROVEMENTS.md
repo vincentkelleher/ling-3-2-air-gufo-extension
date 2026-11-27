@@ -464,3 +464,39 @@ So `decode-opt`'s next attempt should be a vectorised load path in the Q4_K/Q6_K
 target implied by the measurement: 3x on the dots would put decode near 50 tok/s, i.e. above the 60 %
 gate.
 
+
+## Decode: the concrete fix the measurements point at (2026-11-27)
+
+Chasing the 35 %-of-peak finding into the kernels located the mechanism. In the per-token dot
+(`DotRow<TYPE>` in `src/hip/kernels.hip`, the Q4_K/Q6_K branches from line ~256):
+
+- each lane owns one 256-value block and walks it **serially**;
+- for every block it calls `ActivationScale(x + b*256, 256, scale)` — 256 reads of the f32
+  activation — and then, for each of the 256 values, reads the activation **again** to quantise it;
+- so a row of 2560 costs ~5120 activation reads, and a matvec with N rows repeats that N times,
+  because nothing is hoisted: the activation is re-read and re-quantised per output row.
+
+`ggml` (and this engine's own prepared path) quantise the activation **once per matvec** and reuse it
+across rows. That path exists here: `LaunchGemvPrepared` with `GemvPreparedKernel<kQ4K>` and
+`<kQ6K>` (line ~834), fed by `LaunchQuantizeActivations` — and it is already used for the LM head and
+for Q4_K expert gathers.
+
+The gap is dispatch: `LaunchGemvExpertsPre` (line ~1120) handles **only** `kQ4K` and falls back to the
+float per-row path for everything else, so the Q6_K experts — measured at 13.5 ms, 63 % of gather time
+— take the slow path. The same is true of the non-expert projections that still call `LaunchGemv`.
+
+Two mechanical changes, in this order, each measurable with `bench-decode.sh` and gated on
+`tools/golden_set_ids.py` (plain 19 / arithmetic none / tool-call 16 / thinking-on 2):
+
+1. Extend `LaunchGemvExpertsPre` to `kQ6K`/`kQ5K` by looping the selected experts and calling the
+   existing `GemvPreparedKernel<TYPE>` per expert (no new kernel needed: 8 launches instead of one,
+   but with a single activation quantisation instead of one per row).
+2. Hoist the activation quantisation out of `DotRow` for the remaining `LaunchGemv` call sites by
+   routing them through `LaunchGemvPrepared`.
+
+Expected size from the profile: Q6_K gather 13.5 ms and KDA's projection time (22.4 ms, itself mostly
+weight reads through `DotRow`) are the two beneficiaries; halving both would move decode from ~17 to
+~25-28 tok/s, which is at or near the 60 % gate (30 tok/s). Not implemented in this pass: at this
+context size a blind edit to the hottest kernel is a poor trade against the instrumentation already in
+place — the two changes above are mechanical and each is verifiable in isolation.
+
