@@ -54,7 +54,7 @@ committed under `tools/` (`bandwidth_probe.hip`, `roofline.py`, `bench_report.py
 | operator GPU suite | 31 checks, 0 failures |
 | tokenizer | byte-exact on 184 reference cases (9,807 tokens) with ICU NFC |
 | chat template | byte-identical to the reference jinja output on 18 cases |
-| golden set vs llama.cpp CPU | prefixes 93 / 30 / 27 / 9 characters, `arithmetic` identical end to end (1 of 4 cases token-identical); deviations documented with indices |
+| golden set vs llama.cpp CPU | prefixes **93 / 3 / 110 / 157** characters with `thinking-on` token-identical end to end (1 of 4 cases); measured after the softmax and fp32-cache fixes, deviations documented with indices. An earlier build reported 93 / 30 / 27 / 9 — both are 1 of 4, the current build matches on a different case and further overall |
 | MTP | acceptance measured (18 of 31 drafts, 58 %), spec loop not implemented — reason documented |
 
 ## Limitations and performance, published

@@ -255,3 +255,21 @@ sanely at the layer that diverges — including a `0` id at layer 40, which also
 all-zero ids dump was the file, not the router. What is still missing is the reference's own top-k
 for comparison: extending the reference tool's selector to `ffn_moe_topk` produced no files, so
 that selector needs checking before the ids can be compared rather than just inspected.
+
+## The router "fix" measured worse on the actual criterion, so it was reverted
+
+Reading `build_moe_ffn` suggested weights must come from the unbiased sigmoid (bias only for
+selection). Implemented, it improved the raw number it was tuned against (two-token logit error
+0.158 -> 0.095) and looked right in every dump. The criterion the contract actually names told a
+different story:
+
+| router variant | plain | arithmetic | tool-call | thinking-on | full matches |
+| --- | --- | --- | --- | --- | --- |
+| biased (original) | 93 | 3 | **110** | **157** | **1 / 4** |
+| unbiased weights (reference reading) | 94 | 3 | 0 | 9 | 0 / 4 |
+
+Reverted, keeping the softmax fix and the fp32 cache. The lesson is about the evidence order: logit
+RMS is a proxy I chose, token-for-token agreement is what the contract asks for, and here they
+disagreed. Most likely our `exp_probs_b` is not the tensor that reference code expects, so the two
+bias placements are not comparable until that tensor is verified — that is the follow-up, not
+another blind swap.

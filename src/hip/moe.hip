@@ -95,8 +95,8 @@ __global__ void RouterKernel(const float* logits, const float* bias, int n_exper
     return;
   }
   for (int e = threadIdx.x; e < n_expert; e += blockDim.x) {
+    scores[e] = 1.0f / (1.0f + expf(-(logits[e] + (bias == nullptr ? 0.0f : bias[e]))));
     unbiased[e] = 1.0f / (1.0f + expf(-logits[e]));
-    scores[e] = unbiased[e] + (bias == nullptr ? 0.0f : bias[e]);
   }
   __syncthreads();
   if (threadIdx.x != 0) {
@@ -170,11 +170,11 @@ __global__ void RouterKernel(const float* logits, const float* bias, int n_exper
 
   float sum = 0.0f;
   for (int i = 0; i < top_k; ++i) {
-    sum += unbiased[ids[i]];
+    sum += scores[ids[i]];
   }
   const float inverse = sum > 0.0f ? 1.0f / sum : 0.0f;
   for (int i = 0; i < top_k; ++i) {
-    weights[i] = unbiased[ids[i]] * inverse * scale;
+    weights[i] = scores[ids[i]] * inverse * scale;
   }
 }
 
