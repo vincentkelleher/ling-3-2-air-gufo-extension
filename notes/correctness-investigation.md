@@ -118,3 +118,22 @@ Also excluded: the cache's storage type. `MlaAppendKernel` rounds the latent row
 reference cache does not follow those parameters and the fp16 store is not what separates the two
 sides. It is still an approximation worth recording: with an f32 expectation it would cap the latent
 row at ~5e-4 relative, which is the same order as the 0.1-0.8 % seen at the KDA blocks.
+
+### An unresolved contradiction worth picking up first
+
+On the current build, with the sequential-path dumps working (a staged-source problem had been
+hiding them: the CMake tree compiles the extension's staged copy, so `gufo extension install` must
+run before every rebuild — that is what made several earlier probes look like no-ops):
+
+- the score kernel matches a host recomputation from the dumped `q_abs`, `q_pe` and the two cache
+  rows to 3e-06, so the kernel and those inputs are self-consistent;
+- the rope term dominates the score (mean |rope| 4.60 at position 0, 1.26 at position 1, against
+  scores of order 1-5), and `d5_qpe.bin` demonstrably differs between `LING3_ROPE=neox` and
+  `interleaved`;
+- yet `attn_5_1.bin` is **byte-identical** between those two rope conventions.
+
+Attention output cannot be independent of a term that dominates the score, so either the output is
+not a function of the probabilities the dumps show, or the two dumps come from different executions.
+The next step is therefore not another file comparison: print the post-softmax probabilities from
+inside the run (both rope modes) and confirm they differ; if they do, trace which probability array
+`MlaLatentSum` actually reads.
