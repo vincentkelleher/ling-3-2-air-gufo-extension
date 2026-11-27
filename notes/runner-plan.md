@@ -463,7 +463,21 @@ Three hooks were tried, and none changed it:
   intent) — the host did not act on it for this case.
 
 `Engine::ResetState()` (new) clears the KDA conv/delta state and every MLA cache, which is what a
-fresh prompt must start from; the remaining work is finding which hook the host consults before it
-skips prefill — `PreparePrefixReuse`, `HasDecodeFrontier` or a checkpoint-boundary decision — and
-satisfying it. Until then, `cache-server`'s "restore equals an uninterrupted run" clause fails for a
+fresh prompt must start from.
+
+The trace also shows how the protocol is *supposed* to work, which is where the mismatch is:
+`Advance` **is** called for every generated token (24 calls for two 12-token requests), so the
+runner's position ends at 261 after the first request — while the host, on the identical second
+prompt, reuses the session without a `Prefill` at all. The host therefore assumes the runner keeps
+its state at the prompt frontier and can re-run from there; this runner has advanced past it, and
+the only mechanism that could rewind it (`RestoreState` to a snapshot taken at the frontier) is not
+something the host asks for on this path. `CanContinue` is consulted
+(`component_text_cache.cpp:1694-1695`) but only on the cache path, not for same-session reuse.
+
+So the remaining work is to capture a frontier snapshot at the end of `Prefill` and restore it when
+a new request is prepared (the hook that fires per request has not yet been confirmed — the
+`SetPromptContext` trace did not land, so that is the first thing to check), or to stop advancing
+the engine in `Advance` and re-run the last token at the next select the way the CLI driver does.
+Until one of those is in place, `cache-server`'s byte-exact restore clause fails for a repeated
+prompt independently of the cache. Until then, `cache-server`'s "restore equals an uninterrupted run" clause fails for a
 repeated prompt, independently of the cache itself.

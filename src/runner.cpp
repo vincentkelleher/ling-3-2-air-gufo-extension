@@ -303,6 +303,7 @@ TextRunnerDescriptor Ling3Runner::Descriptor() const {
   descriptor.capabilities.supports_vision = false;
   descriptor.capabilities.incremental_prefill = false;
 
+
   // One pass covers the chunk the engine's prefill actually batches (PrefillChunk's
   // width); it is not split across layer groups, and one decoder is stepped at a time.
   descriptor.scheduling.pass_tokens = 32;
