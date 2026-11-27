@@ -344,3 +344,32 @@ effective against a 237 GB/s box: still 5.6x below the bound, so the quantised d
 more to give (vectorised block loads are the next step, since the current kernel reads
 each 144-byte block field by field). Attention is now the larger half and has had no
 optimisation pass at all.
+
+## Prefill: why batching bought only 1.4x (analysis, 2026-11-27)
+
+Measured on this box: decode 16.9 tok/s (59 ms per token), chunked prefill 23.8 tok/s (42 ms per
+token). The chunked pass turns the projections, the dense FFN, the routed-expert group and the shared
+expert into batched GEMMs over the chunk, yet a token still costs 42 ms against 59 ms sequential —
+i.e. about 70 % of a decode step's work is *unchanged* by chunking.
+
+That is consistent with what the chunked path deliberately leaves per token: the KDA convolution and
+delta-rule recurrence and the MLA attention are still executed once per row inside the chunk loop. For
+a 32-token chunk that is 32 sequential attention steps, so the attention half of the step dominates and
+the batched GEMM half is hidden behind it.
+
+Consequence for the gate: pp2048 >= 70 % of the 6,277 tok/s roofline needs ~4,400 tok/s, i.e. roughly
+185x the current rate. No amount of GEMM tuning reaches that while attention stays sequential — the
+recurrence and the attention must be batched over the chunk. Two candidates, in the order they should
+be attempted:
+
+1. **KDA as a chunked associative scan.** The delta rule is a linear recurrence over rows
+   (`M <- M * exp(g) ; M <- M + k (v - M k)^T beta`), so it can be composed pairwise and evaluated as a
+   scan over the chunk instead of 32 dependent steps. This is the same shape as the mamba-style scan
+   llama.cpp performs for its chunked KDA path.
+2. **MLA attention over the chunk's rows.** Scores for all rows against the cache, softmax per row, and
+   the latent sum as one batched matmul, instead of a per-row kernel sequence.
+
+Both are kernel work with a clear measurement (pp2048 in tok/s and % of roofline, greedy output
+unchanged), and both must keep the per-token path as the reference: `tools/golden_set_ids.py` already
+compares token-for-token from identical ids, so a batching change that alters output is caught.
+
