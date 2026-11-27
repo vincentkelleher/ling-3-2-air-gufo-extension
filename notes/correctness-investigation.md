@@ -69,3 +69,32 @@ lower_bound` then `exp(g)` in the delta rule, L2 norm of q/k, `o_norm` and the s
 Still open: which block first diverges, and therefore whether the cause is the conv1d state, the MLA
 path, the routed MoE, or the head. A per-block residual comparison against the reference's
 `l_out-<n>` nodes is in progress.
+
+## Localised to the MLA score path (2026-11-27)
+
+Full-precision comparison against the reference's own tensors, context `[156891, 156891]`,
+position 1:
+
+| block | tensor | rel error |
+| --- | --- | --- |
+| 0-4 | `kda_out` (KDA attention contribution) | 0.001 - 0.008 |
+| **5** | **`mla_out` (first MLA attention contribution)** | **0.420** |
+| 6-8 | `kda_out` | 0.10 - 0.11 (inherited from block 5) |
+
+The KDA attention blocks reproduce the reference to under 1 %, so the recurrent path is sound and
+the routed MoE and the head are not implicated. The first MLA layer is.
+
+Splitting block 5 by position isolates the half:
+
+| position | rel error | what it exercises |
+| --- | --- | --- |
+| 0 | **0.005** | softmax over one key is 1, so only the value path: latent norm, `wv_b` absorb, gate, `wo` |
+| 1 | **0.420** | the first position where the *scores* matter |
+
+So the value path is right and the **score path** is wrong. Checked and found correct: the `wk_b`
+absorb indexing (`q_abs[h][i] = sum_d q_nope[h][d] * wk_b[h][i][d]`, matching ggml's `{128,512,H}`
+row-major layout), the `1/sqrt(192)` scale, and the cached row's value bytes (proven by position 0).
+Not yet excluded: the `q_pe` rope at position >= 1, and what the score reads from a cached row.
+
+`LING3_ROPE` cannot be used as a probe on the sequential path: that call hardcodes `true` (neox), so
+the option has no effect there and must be fixed before the switch means anything.

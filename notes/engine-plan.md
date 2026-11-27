@@ -150,7 +150,7 @@ sum, v absorb); router (sigmoid, group top-k, normalise); expert gather GEMV
 2. Per-operator checks against a host reference computed from the same GGUF
    rows (extend the operator test with real rows once the runner can read them).
 3. Whole-model: greedy token equality against llama.cpp CPU
-   (`/home/ai-box/ling32-work/llama-cpu/bin/llama-completion --model <shard 1>`)
+   (`llama-completion --model <shard 1>`)
    on the pinned golden set; then `gufo bench` numbers against the roofline.
 
 ## Build and run

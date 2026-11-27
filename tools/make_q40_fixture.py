@@ -19,7 +19,7 @@ from gguf import GGUFReader
 from gguf.constants import GGMLQuantizationType as QT
 from gguf.quants import dequantize
 
-DEFAULT = ('/home/ai-box/Models/bartowski/Ling-3.2-air-GGUF/Ling-3.2-air-Q4_K_M/'
+DEFAULT = (os.environ.get('LING3_MODEL_DIR', 'models/Ling-3.2-air-GGUF/') + 'Ling-3.2-air-Q4_K_M/'
            'Ling-3.2-air-Q4_K_M-0000%d-of-00003.gguf')
 
 
