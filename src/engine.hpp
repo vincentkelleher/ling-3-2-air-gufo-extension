@@ -76,6 +76,14 @@ class Engine {
 
   /// Snapshots / restores the trunk state (KDA conv+delta, MLA caches).
   void SnapshotState();
+
+  /// Captures the live state into the frontier buffer: the state at the end of a prefill pass,
+  /// which is what a checkpoint means to the host. Same structure as SnapshotState, separate
+  /// buffer, so the scratch snapshot and the published frontier cannot clobber each other.
+  void CaptureFrontier();
+  void RestoreFrontier();
+  [[nodiscard]] const float* FrontierData() const;
+  [[nodiscard]] std::size_t FrontierFloats() const;
   /// The snapshot buffer's device address and size in floats: the same bytes
   /// `SnapshotState` writes and `RestoreState` reads. The serving cache captures and
   /// loads exactly this, which is what makes a private-state component possible.

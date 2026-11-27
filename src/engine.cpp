@@ -129,6 +129,8 @@ struct Engine::Impl {
   float* blogits{nullptr};
   float* snapshot{nullptr};
   std::size_t snapshot_floats{0};
+  float* frontier{nullptr};
+  std::size_t frontier_floats{0};
   hipStream_t queue{nullptr};
   float* kernel_debug{nullptr};
 
@@ -394,6 +396,10 @@ std::unique_ptr<Engine> Engine::Create(const core::GgufReader& reader,
       alloc(&m.bup, Impl::kMaxChunk * config.n_ff_exp) &&
       alloc(&m.bout, Impl::kMaxChunk * n_embd) &&
       alloc(&m.blogits, 8 * static_cast<std::size_t>(config.n_vocab)) &&
+      alloc(&m.frontier, config.n_layer_total *
+                             (9 * kda_inner +
+                              static_cast<std::size_t>(heads) * kda_dim * kda_dim +
+                              options.max_context * kv_dim)) &&
       alloc(&m.snapshot, config.n_layer_total *
                              (9 * kda_inner +
                               static_cast<std::size_t>(heads) * kda_dim * kda_dim +
@@ -968,6 +974,57 @@ std::vector<double> Engine::DebugStateDigest() {
   return digest;
 }
 
+
+void Engine::CaptureFrontier() {
+  Impl& m = *impl_;
+  if (m.frontier == nullptr) {
+    return;
+  }
+  std::size_t offset = 0;
+  for (std::uint32_t il = 0; il < m.config.n_layer_total; ++il) {
+    const auto copy = [&](const float* source, std::size_t count) {
+      hipMemcpyAsync(m.frontier + offset, source, count * sizeof(float),
+                     hipMemcpyDeviceToDevice, m.queue);
+      offset += count;
+    };
+    if (m.config.IsKda(il)) {
+      copy(m.conv_state[il], 9 * m.config.KdaInner());
+      copy(m.delta_state[il], static_cast<std::size_t>(m.config.n_head) *
+                                  m.config.n_kda_head_dim * m.config.n_kda_head_dim);
+    } else {
+      copy(m.mla_cache[il], m.options.max_context * (m.config.n_lora_kv + m.config.n_rot));
+    }
+  }
+  m.frontier_floats = offset;
+  hipStreamSynchronize(m.queue);
+}
+
+void Engine::RestoreFrontier() {
+  Impl& m = *impl_;
+  if (m.frontier == nullptr || m.frontier_floats == 0) {
+    return;
+  }
+  std::size_t offset = 0;
+  for (std::uint32_t il = 0; il < m.config.n_layer_total; ++il) {
+    const auto copy = [&](float* target, std::size_t count) {
+      hipMemcpyAsync(target, m.frontier + offset, count * sizeof(float),
+                     hipMemcpyDeviceToDevice, m.queue);
+      offset += count;
+    };
+    if (m.config.IsKda(il)) {
+      copy(m.conv_state[il], 9 * m.config.KdaInner());
+      copy(m.delta_state[il], static_cast<std::size_t>(m.config.n_head) *
+                                  m.config.n_kda_head_dim * m.config.n_kda_head_dim);
+    } else {
+      copy(m.mla_cache[il], m.options.max_context * (m.config.n_lora_kv + m.config.n_rot));
+    }
+  }
+  hipStreamSynchronize(m.queue);
+}
+
+const float* Engine::FrontierData() const { return impl_->frontier; }
+
+std::size_t Engine::FrontierFloats() const { return impl_->frontier_floats; }
 
 void Engine::SnapshotState() {
   Impl& m = *impl_;
