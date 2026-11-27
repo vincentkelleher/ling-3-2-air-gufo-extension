@@ -172,7 +172,9 @@ int main(int argc, char** argv) {
     const float projection = engine->DebugChunkProjectionDiff(rows);
     std::printf("chunk stage2: batched projection vs per-row GEMV worst abs diff %.3g\n",
                 projection);
-    return (worst <= 1e-5 && projection <= 1e-4) ? 0 : 1;
+    const double projection_tolerance =
+        weights.layers[0].kda_q.type == gufo::core::GgmlType::kQ8_0 ? 0.0 : 1e-4;
+    return (worst <= 1e-5 && projection <= projection_tolerance) ? 0 : 1;
   }
 
   // Bisect hook: run the chunked path up to block N and dump its activations, so

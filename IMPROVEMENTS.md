@@ -344,3 +344,36 @@ effective against a 237 GB/s box: still 5.6x below the bound, so the quantised d
 more to give (vectorised block loads are the next step, since the current kernel reads
 each 144-byte block field by field). Attention is now the larger half and has had no
 optimisation pass at all.
+
+## Exact prefill/decode dot products (Ling-3.2-air-Q4_K_M)
+
+For Q8_0, `GemmKernel` already rounded the activation per 32-value block and
+multiplied the integer dot by the weight and activation scales. It still split
+blocks over 256 threads rather than 32. Keeping one warp per token and calling
+`DotRow` gives the same lane partial sums and the same final reduction as GEMV.
+This alone made blocks 0 and 1 exact. Block 2 is the first MoE block: its
+**F32 router** also needs GEMV's reduction order. Its Q4_K/Q6_K expert weights
+already go through `LaunchMoeGather` in both paths; those kernels did not change.
+
+Maximum relative L2 residual error across the 23 ingested positions of
+`small-prompt.txt` (`ForwardToken` as denominator; separate clean dump runs):
+
+| block | baseline (d95418f) | Q8_0 fix | Q8_0 + F32 fix |
+|---|---:|---:|---:|
+| 0 | 1.432e-3 | 0 | 0 |
+| 1 | 3.900e-3 | 0 | 0 |
+| 2 | 6.806e-2 | 1.400e-7 | 0 |
+| 3 | 6.203e-2 | 3.021e-3 | 0 |
+| 4 | 6.444e-2 | 7.379e-3 | 0 |
+| 5 | 5.817e-2 | 5.674e-2 | 0 |
+
+With both changes, all 966 residual rows and all 42 final-row attention
+contributions compared byte-for-byte equal. The eight-row Q8_0 projection
+probe also measured zero maximum absolute difference. Instrumented 23-token
+chunk timings were 0.896 s baseline, 0.882 s Q8_0-only, and 1.041 s with both
+fixes (single runs with dumps enabled, not a throughput benchmark).
+
+The 32-step explicit-ID golden result was unchanged after each fix: plain
+first diverged at 19, arithmetic matched, tool-call diverged at 16, thinking-on
+at 2 (1/4 exact). This harness ingests the prompt with `ForwardToken`, so it
+checks decode/reference behavior, not the changed prefill kernels.
