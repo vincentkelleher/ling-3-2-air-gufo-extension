@@ -842,9 +842,18 @@ four independent integer chains (worse), 32-bit loads (≈ +0.7 %, inside noise)
 trace is unambiguous that the kernel retires 0.007 waves per cycle at ~1 % ALU utilisation, so it is
 stalled on memory — yet making the table hot changes nothing and widening the loads changes nothing.
 
-The consistent reading is that the *layout* is the problem, not the instruction mix: a Q4_K group's 32
-packed bytes sit at a stride that makes a warp's loads sparse, so no amount of per-lane unrolling
-produces coalesced traffic. llama.cpp's answer is exactly this — it ships `repack.cpp`, rewriting
+**Correction to an earlier entry in this log:** I wrote that the layout "is the problem". The 32-bit-load
+variant already read each group's 32 packed bytes as eight contiguous words and still measured neutral,
+so that claim is not supported by my own data and is withdrawn. What is *measured* is: 57 % of prefill,
+~1 % ALU utilisation, 0.007 waves/cycle, and neutrality of twelve code changes across instruction mix,
+occupancy, tiling, locality and load width. What is *not* known is where the stall actually is; the
+remaining candidates are the address arithmetic per load, the L2/TLB behaviour on a 4 GB table with
+random expert offsets (despite the forced-expert result), or a launch-shape effect. Settling it needs
+`TCC_*`/`TCP_*` cache counters and per-wave stall reasons from the same trace, not more code variants.
+
+The hypothesis that motivated a repack — that a stride makes a warp's loads sparse — was therefore
+tested in its cheapest form and came back neutral; a full repack should not be started until the cache
+counters say it would help. llama.cpp's answer is exactly this — it ships `repack.cpp`, rewriting
 weights into a lane-major layout at load time so each lane reads contiguous 16-byte vectors. Doing the
 same here is a **derived-artifact job** (which the revised objective explicitly allows): generate a
 repacked expert table with an in-repo script from the pinned weights, load that instead, and keep the
