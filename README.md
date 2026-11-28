@@ -60,6 +60,10 @@ at the bottom.
 | decode, tg128 | **19.85 tok/s** (39.8% of roofline, same bench run) | llama.cpp CPU: 12.52 tok/s |
 | prefill, 104-token prompt | 12.52 tok/s sequential, **16.13 tok/s chunked (1.29x)** | llama.cpp CPU prompt eval: 24.20 tok/s |
 | prefill, pp2048 | **30.7 tok/s** (median of 3 from `tools/bench_report.py --chunked-prefill 32`; 0.49 % of the 6,277 tok/s roofline) | llama.cpp prompt eval: 24.20 tok/s |
+
+`docs/performance.md` is the readable account behind these rows: how the two rooflines are derived,
+where the time goes by kernel, and the hypotheses that were closed by measurement (locality, dot4,
+tiling, load width, occupancy, and fewer bytes per token).
 | weight load | 2.1 s warm, 35.9 s cold | llama.cpp mmap: 1.58 s |
 
 Machine ceilings measured in-repo (`tools/bandwidth_probe.hip`,
