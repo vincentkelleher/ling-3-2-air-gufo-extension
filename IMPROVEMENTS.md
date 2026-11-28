@@ -818,6 +818,14 @@ instruction width (four-row tiling identical). The dependency chain per lane —
 nibble-extract, convert and multiply-add steps on one accumulator — leaves nothing to hide latency
 behind.
 
+A first attempt at that fix — four independent integer accumulators in place of the single chain —
+measured **29.56 tok/s against 29.78**, i.e. no gain (reverted): the compiler was already scheduling
+those multiplies, so the stall is on the *loads*, not on the accumulate chain. That narrows the
+remaining explanation to memory latency the compiler cannot hide here (byte-granular reads from a 4 GB
+expert table), even though forcing a single expert — which makes the table hot — also changed nothing,
+so the two facts together point at something subtler than caching: likely the address computation and
+narrow loads themselves.
+
 What would actually fix it, in one sentence for whoever picks this up: **give each lane independent
 accumulators and issue the loads ahead of use** (unroll the group loop into 4-8 independent partial
 sums, prefetch the next group's 32 packed bytes while the current one multiplies, and let the compiler
