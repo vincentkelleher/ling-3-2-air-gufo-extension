@@ -2,6 +2,7 @@
 """Compare restored and concurrent greedy responses with isolated cold servers."""
 from concurrent.futures import ThreadPoolExecutor
 from threading import Barrier
+import hashlib
 import re
 import argparse
 import json
@@ -16,12 +17,18 @@ parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--gufo', default='gufo')
 parser.add_argument('--model', required=True)
 parser.add_argument('--port', type=int, default=8147)
+parser.add_argument('--dump', default=None,
+                    help='write each completion to DIR, named by the prompt hash, '
+                         'so a spec-off run and a spec-on run can be diffed byte for byte')
 args = parser.parse_args()
 prefix = 'Here is one fact about the red fox. ' * 8
 original = prefix + 'Where does it live?'
 edited = prefix + 'What does it eat?'
 
+run_count = 0
+
 def run(prompts, require_restore=False, concurrent=False):
+    global run_count
     with tempfile.TemporaryDirectory() as directory:
         log = Path(directory, 'serve.log')
         with log.open('w') as output:
@@ -51,6 +58,11 @@ def run(prompts, require_restore=False, concurrent=False):
                     text = result['choices'][0]['text'].encode()
                     if not text:
                         raise AssertionError('empty completion')
+                    if args.dump:
+                        directory = Path(args.dump)
+                        directory.mkdir(parents=True, exist_ok=True)
+                        name = hashlib.sha256(prompt.encode()).hexdigest()[:16] + '.txt'
+                        (directory / name).write_bytes(text)
                     return text
             if concurrent:
                 with ThreadPoolExecutor(max_workers=len(prompts)) as pool:
@@ -102,6 +114,11 @@ def run(prompts, require_restore=False, concurrent=False):
                 proc.wait(timeout=15)
             except subprocess.TimeoutExpired:
                 proc.kill(); proc.wait()
+            if args.dump:
+                # Keep the server log beside the dumps: the runner's spec trace is
+                # the evidence that speculation ran for this run.
+                run_count += 1
+                (Path(args.dump) / f'serve-{run_count}.log').write_text(log.read_text())
 
 original_reference, = run([original])
 reference, = run([edited])
