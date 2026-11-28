@@ -907,3 +907,30 @@ Two things came out of it, both kept:
 Everything was reverted to the verified state: 19.64 tok/s decode, 29.8 prefill, goldens 1/4 with
 `arithmetic` exact, `ctest` 10/10.
 
+## Occupancy, closed for good (2026-11-27)
+
+Four attempts to raise occupancy on the quantised dots, and the device's own numbers, are now enough to
+close this lever:
+
+| attempt | cap | result |
+| --- | --- | --- |
+| 1 | `(128, 8)` on the four expert gathers | goldens 0/4 (token 0) |
+| 2 | `(128, 8)` on every GEMV/GEMM dot | prefill 46.3 / decode 37.5 tok/s, goldens 0/4 |
+| 3 | `(128, 4)` on the same set | goldens 0/4 |
+| 4 | `(128, 4)` GEMV + `(256, 2)` for the 256-thread GEMM | GPU core dump |
+
+The device reports **20 CUs, 196,608 registers/CU, 128 KB LDS/CU, 2048 threads/CU**. Four blocks of 128
+threads need 2,560 VGPRs/thread-equivalent... in plain terms: 512 threads per CU leaves 384 registers
+per thread available, so the resource budget is *not* the obstacle. Attempt 2 additionally explains the
+false speedup: `__launch_bounds__` also caps the block size, and `GemmDotRowKernel` is launched with
+`batch * 32` threads (up to 256), so a 128 cap makes those launches invalid, the kernels never run, and a
+degenerate stream decodes quickly.
+
+Both remaining explanations are outside what I can test here — a compiler/toolchain defect with launch
+bounds on this target, or a resource constraint the reported numbers do not capture — so the lever is
+closed until someone can reproduce it with `rocprof`/`roc-obj` on the compiled binary. The
+launch-error check (`81b7c21`) stays, because it is what turned "silently wrong" into "reported".
+
+Reverted; the engine is at 19.8 tok/s decode / 29.8 prefill, goldens 1/4 with `arithmetic` exact, and
+`ctest` 10/10.
+
