@@ -131,6 +131,22 @@ def main():
                   f"{100.0 * prefill / prefill_roofline:>7.2f}% of the "
                   f"{prefill_roofline:,.0f} tok/s prefill roofline "
                   f"({args.prefill_tokens} tokens)")
+    # tg128: the decode figure the contract names, measured separately from the
+    # short-context rows above.
+    tg_rates = []
+    for _ in range(args.runs):
+        rate, _, _ = measure(args.engine, args.model, args.prompt, 128, 0,
+                             args.context, args.chunked_prefill)
+        tg_rates.append(rate)
+    tg = statistics.median(tg_rates)
+    tg_roofline = roofline(args.roofline_model or args.model, args.bandwidth, 0,
+                           args.prefill_tokens)["roofline_tok_s"]
+    print(f"tg128  {tg:>8.2f} {tg_roofline:>9.1f} {100.0 * tg / tg_roofline:>9.1f}%  "
+          "128 generated tokens, depth 0")
+    # Batch: the runner serialises requests (one engine, one token at a time), so a
+    # batched measurement would report a queueing time rather than a batch rate.
+    print("batch  not reported: this runner serialises requests, so a batch size above "
+          "one measures queueing, not throughput")
     print("reference on the same box: llama.cpp CPU decode 12.52 tok/s, "
           "prompt eval 24.20 tok/s")
 

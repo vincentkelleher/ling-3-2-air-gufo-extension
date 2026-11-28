@@ -69,6 +69,7 @@ llama.cpp's CPU path on the same machine (25 %). Reproduce decode with the commi
 harness (medians of 3 runs):
 
     tools/bench_report.py --engine <forward_test> --model <first shard> \
+                          --chunked-prefill 32 \
         --depths 0 512 --steps 8 --runs 3
 
 Depth rows: 16.2-17.0 / 16.2-17.0 tok/s at depth 0 / 512. Medians of three runs move by up to
