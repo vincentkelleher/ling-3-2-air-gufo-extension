@@ -726,3 +726,21 @@ grouped — bucket the chunk's (row, expert) pairs, then one GEMM per expert buc
 large change, and it will alter accumulation order per row, so it needs the golden indices re-measured
 (which the revised contract allows).
 
+### Grouped MoE would not have paid: checked before implementing
+
+The plan was to bucket the chunk's (row, expert) pairs and run one GEMM per expert bucket, like
+llama.cpp. The arithmetic says it cannot pay here:
+
+- a 32-row chunk makes 32 x 8 = 256 selections over 512 experts, so the expected number of *distinct*
+  experts is `512 * (1 - (1 - 1/512)^256) = 202` — about **1.27 rows per expert**. Grouping would buy at
+  most ~27 % weight reuse on one term.
+- the measured cost is not weight traffic either: one per-row gather moves ~47 MB (0.2 ms at 237 GB/s)
+  and takes ~0.7 ms, i.e. the Q4_K int8 dot runs at ~30 % of peak. That is exactly what dot4 would fix,
+  and dot4 is unavailable for `gfx1151` in this toolchain (probe evidence).
+
+So prefill's largest term is compute-efficiency-bound in a way that neither grouping nor the available
+instruction set can improve, and prefill is therefore near its practical ceiling for this design at
+~30 tok/s. The one remaining lever with real headroom is a tiled attention/projection kernel that does
+more arithmetic per byte loaded by hand (register blocking), which is a rewrite rather than a tuning
+step.
+
