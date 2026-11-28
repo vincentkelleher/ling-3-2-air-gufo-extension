@@ -9,6 +9,14 @@
 // which is exact at temperature 0. Honouring temperature/top-k/top-p means threading
 // `sampling::SamplerState` through, and is the next step; the limitation is stated in
 // docs/quality.md rather than hidden.
+//
+// `DecodeStep` can return two tokens per step when MTP speculation is enabled with
+// `LING3_SPEC_DRAFTS=1`: it drafts one token with block 42, verifies it with one
+// chunked trunk pass, and re-feeds exactly the accepted prefix. The gate is a greedy
+// request (`can_use_unmodified_argmax`), a budget of at least two tokens, and a valid
+// trunk hidden for the draft to read. The default is off because the verifier runs
+// the trunk over the pair, which costs about one extra trunk pass per accepted token;
+// docs/quality.md carries the measured acceptance and rate.
 #pragma once
 
 #include <cstdint>
@@ -40,6 +48,16 @@ class Ling3RunnerState final : public TextRunnerState {
   [[nodiscard]] Engine& engine();
   [[nodiscard]] std::size_t position() const;
   void set_position(std::size_t position);
+  /// True while the engine's `m.h` holds the trunk's final hidden for the last step,
+  /// which is what the MTP head drafts from. A restore replaces the trunk state but
+  /// not that scratch, so an acquired state starts false and the first plain step
+  /// (or a prefill) sets it.
+  [[nodiscard]] bool hidden_valid() const;
+  void set_hidden_valid(bool value);
+  /// Serving trace: count one speculated step and report the per-request totals when
+  /// the next request acquires this slot (the host already logs its own summary).
+  void NoteSpeculation(bool accepted);
+  void ReportSpeculation();
   /// Image rows travel with the request as a prompt context (text.hpp), so the state
   /// keeps whatever the host last attached and the prefill step reads it from there.
   void set_context(std::shared_ptr<const TextPromptContext> context);
@@ -97,6 +115,13 @@ class Ling3Runner final : public TextModelRunner {
   [[nodiscard]] TextDecodeSelection SelectNext(
       TextRunnerState& state, sampling::SamplerState& sampler) const override;
   void Advance(TextRunnerState& state, TextRunnerToken token) const override;
+  /// Two selections when the speculation gate is open, otherwise the inherited
+  /// single-token step. The step holds the engine lock for the draft, the verify pass
+  /// and the re-feed, so the serving bank is selected once and no other operation can
+  /// interleave with the engine's one snapshot buffer.
+  [[nodiscard]] TextDecodeStep DecodeStep(
+      TextRunnerState& state, std::size_t max_tokens,
+      sampling::SamplerState& sampler) const override;
   [[nodiscard]] std::size_t CheckpointPosition(
       const TextRunnerState& state) const override;
   /// The host asks this before reusing a session's prefix. This runner can only continue a prompt
@@ -110,6 +135,9 @@ class Ling3Runner final : public TextModelRunner {
   static void SetEngineFactory(EngineFactory factory);
 
  private:
+  /// `Advance` without the engine lock; the decode step already holds it.
+  void AdvanceLocked(Ling3RunnerState& state, TextRunnerToken token) const;
+
   struct Impl;
   std::unique_ptr<Impl> impl_;
 };

@@ -9,6 +9,7 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <limits>
 #include <stdexcept>
@@ -61,6 +62,17 @@ class ReadySignal final : public cache::CompletionSignal {
 
 bool Trace() {
   static const bool enabled = std::getenv("LING3_RUNNER_TRACE") != nullptr;
+  return enabled;
+}
+
+/// Speculation is opt-in: a server started without LING3_SPEC_DRAFTS=1 decodes one
+/// token per step exactly as before. It is not on by default because the verifier
+/// costs a second trunk pass over the pair, which measured slower than plain decode.
+bool SpecDraftsEnabled() {
+  static const bool enabled = [] {
+    const char* value = std::getenv("LING3_SPEC_DRAFTS");
+    return value != nullptr && std::atoi(value) != 0;
+  }();
   return enabled;
 }
 
@@ -287,6 +299,9 @@ struct Ling3RunnerState::Impl {
   Ling3RunnerState::PositionSink* sink{nullptr};
   void* slot{nullptr};
   std::shared_ptr<const TextPromptContext> context;
+  bool hidden_valid{false};
+  std::size_t spec_drafts{0};
+  std::size_t spec_accepted{0};
 };
 
 Ling3RunnerState::Ling3RunnerState(Engine& engine, Ling3Config config)
@@ -306,6 +321,26 @@ std::unique_lock<std::mutex> Ling3RunnerState::LockEngine() {
 Engine& Ling3RunnerState::engine() { return *impl_->engine; }
 
 std::size_t Ling3RunnerState::position() const { return impl_->position; }
+
+bool Ling3RunnerState::hidden_valid() const { return impl_->hidden_valid; }
+
+void Ling3RunnerState::set_hidden_valid(bool value) { impl_->hidden_valid = value; }
+
+void Ling3RunnerState::NoteSpeculation(bool accepted) {
+  ++impl_->spec_drafts;
+  if (accepted) ++impl_->spec_accepted;
+}
+
+void Ling3RunnerState::ReportSpeculation() {
+  if (impl_->spec_drafts == 0) return;
+  if (Trace()) {
+    std::fprintf(stderr, "[runner] spec request drafts=%zu accepted=%zu (%zu%%)\n",
+                 impl_->spec_drafts, impl_->spec_accepted,
+                 100 * impl_->spec_accepted / impl_->spec_drafts);
+  }
+  impl_->spec_drafts = 0;
+  impl_->spec_accepted = 0;
+}
 
 void Ling3RunnerState::set_context(std::shared_ptr<const TextPromptContext> context) {
   impl_->context = std::move(context);
@@ -365,6 +400,9 @@ TextRunnerDescriptor Ling3Runner::Descriptor() const {
   descriptor.max_context = impl_->max_context;
   descriptor.capabilities.supports_vision = !impl_->vision_model_path.empty();
   descriptor.capabilities.incremental_prefill = false;
+  // Decode steps may publish two tokens: one MTP draft verified by the trunk when
+  // the gate in DecodeStep is open. The default is one token per step.
+  descriptor.capabilities.multi_token_decode = true;
 
 
   // One pass covers the chunk the engine's prefill actually batches (PrefillChunk's
@@ -511,7 +549,12 @@ void Ling3Runner::ReconcileComponentState(TextRunnerState& state,
                                          std::size_t position) const {
   // After the cache restores rows into a slot, the runner must believe it stands where the
   // checkpoint was taken; otherwise it prefills from the wrong place.
-  static_cast<Ling3RunnerState&>(state).set_position(position);
+  auto& runner_state = static_cast<Ling3RunnerState&>(state);
+  runner_state.ReportSpeculation();
+  // A restore carries the trunk state but not the scratch holding the last hidden, so
+  // the first step after an acquire is plain and re-establishes it.
+  runner_state.set_hidden_valid(false);
+  runner_state.set_position(position);
 }
 
 namespace {
@@ -711,6 +754,7 @@ TextPrefillStep Ling3Runner::Prefill(TextRunnerState& state,
     runner_state.set_position(end);
     step.consumed_tokens = consumed;
     step.decode_ready = end == prompt.size();
+    if (consumed > 0) runner_state.set_hidden_valid(true);
     return step;
   }
   std::string error;
@@ -725,6 +769,8 @@ TextPrefillStep Ling3Runner::Prefill(TextRunnerState& state,
   runner_state.set_position(end);
   step.consumed_tokens = ids.size();
   step.decode_ready = end == prompt.size();
+  // The chunked pass leaves the last row's normalized hidden in the head scratch.
+  if (!ids.empty()) runner_state.set_hidden_valid(true);
   return step;
 }
 
@@ -739,17 +785,86 @@ TextDecodeSelection Ling3Runner::SelectNext(TextRunnerState& state,
   return selection;
 }
 
+void Ling3Runner::AdvanceLocked(Ling3RunnerState& state, TextRunnerToken token) const {
+  std::string error;
+  if (!state.engine().ForwardToken(static_cast<std::int32_t>(token),
+                                   static_cast<std::uint32_t>(state.position()), &error)) {
+    throw std::runtime_error(error);
+  }
+  state.set_position(state.position() + 1);
+  state.set_hidden_valid(true);
+}
+
 void Ling3Runner::Advance(TextRunnerState& state, TextRunnerToken token) const {
   if (Trace()) {
     std::fprintf(stderr, "[runner] advance token %u\n", static_cast<unsigned>(token));
   }
   auto& runner_state = static_cast<Ling3RunnerState&>(state);
-  std::string error;
   auto lock = runner_state.LockEngine();
-  if (!runner_state.engine().ForwardToken(static_cast<std::int32_t>(token),
-                                          static_cast<std::uint32_t>(runner_state.position()),
-                                          &error)) throw std::runtime_error(error);
-  runner_state.set_position(runner_state.position() + 1);
+  AdvanceLocked(runner_state, token);
+}
+
+TextDecodeStep Ling3Runner::DecodeStep(TextRunnerState& state, std::size_t max_tokens,
+                                       sampling::SamplerState& sampler) const {
+  auto& runner_state = static_cast<Ling3RunnerState&>(state);
+  // Exact only where the output is the unmodified argmax. The plain step already
+  // ignores the sampler, so the gate cannot change served output; it only decides
+  // whether the second selection is attempted.
+  const bool speculate =
+      SpecDraftsEnabled() && max_tokens >= 2 && runner_state.hidden_valid() &&
+      sampler.config().can_use_unmodified_argmax();
+  if (!speculate) {
+    return TextModelRunner::DecodeStep(state, max_tokens, sampler);
+  }
+
+  auto lock = runner_state.LockEngine();
+  Engine& engine = runner_state.engine();
+  const auto position = static_cast<std::uint32_t>(runner_state.position());
+  const std::int32_t current = engine.Argmax();
+  std::string error;
+  // The engine owns one snapshot buffer: take the draft's checkpoint, drop it, then
+  // let VerifyDrafts take its own. Neither outlives this step.
+  engine.SnapshotState();
+  if (!engine.ForwardMtp(current, position, &error)) {
+    engine.RestoreState();
+    throw std::runtime_error(error);
+  }
+  const std::int32_t draft = engine.Argmax();
+  engine.RestoreState();
+  const std::int32_t pair[2] = {current, draft};
+  std::int32_t rows[2] = {0, 0};
+  if (!engine.VerifyDrafts(pair, 2, position, rows, &error)) {
+    engine.RestoreState();
+    throw std::runtime_error(error);
+  }
+  const bool accepted = rows[0] == draft;
+  engine.RestoreState();
+
+  TextDecodeStep step;
+  step.draft_rounds = 1;
+  step.draft_tokens = 1;
+  step.draft_accepted_tokens = accepted ? 1 : 0;
+  runner_state.NoteSpeculation(accepted);
+  if (Trace()) {
+    std::fprintf(stderr, "[runner] spec step draft=1 accepted=%d pos=%zu\n",
+                 accepted ? 1 : 0, runner_state.position());
+  }
+  const auto emit = [&](std::int32_t token) {
+    TextDecodeSelection selection;
+    selection.token = token;
+    const TextRunnerToken single = token;
+    selection.piece = Decode(std::span<const TextRunnerToken>(&single, 1));
+    step.selections.push_back(std::move(selection));
+  };
+  // Re-feed exactly the accepted prefix. The retained state then comes only from
+  // ForwardToken at consecutive positions, which is what the equivalence tests prove.
+  emit(current);
+  AdvanceLocked(runner_state, current);
+  if (accepted) {
+    emit(draft);
+    AdvanceLocked(runner_state, draft);
+  }
+  return step;
 }
 
 bool Ling3Runner::CanContinue(const TextRunnerState&, std::size_t prompt_tokens) const {
