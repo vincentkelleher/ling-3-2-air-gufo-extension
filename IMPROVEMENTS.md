@@ -784,6 +784,15 @@ So the gather is ~20-60x slower than compute, bandwidth or locality explain, and
 single expert changes nothing. The remaining candidates are inside the kernel itself — per-warp
 redundant work, an index computation that serialises, or a launch shape that leaves the device idle —
 and settling it needs an instruction-level trace of that kernel rather than more black-box timings.
+
+A fourth explanation was tested and also excluded: the gather calls the *narrow* `DotRowQ4KPre` (22 of
+32 lanes idle, 8 groups serial per lane) while a `DotRowQ4KPreWide` variant exists; switching the
+expert gather to the wide one measured **29.73-29.88 tok/s against 29.78**, i.e. identical, so lane
+occupancy is not it either and the change was reverted. Five hypotheses have now been excluded by
+measurement (compute, bandwidth, locality, occupancy, and integer-dot width), which means the cost sits
+somewhere none of these models captures — the remaining step is an instruction-level trace
+(`rocprofv3 --pmc` counters for that kernel: memory stalls, occupancy, wave count), not more
+throughput experiments.
 That is the single most valuable next investigation for `prefill-opt`: the term is 57 % of prefill, and
 its cost is currently unexplained.
 
