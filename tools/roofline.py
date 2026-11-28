@@ -17,6 +17,7 @@ this box (read 237 GB/s, copy 204 GB/s, write 198 GB/s, 8 GiB, 3 runs,
 
 import argparse
 import os
+import struct
 import sys
 
 DEFAULT_GGUF = os.path.expanduser(
@@ -31,6 +32,107 @@ BYTES_PER_WEIGHT = {
 }
 
 
+# Bytes per block and elements per block for the ggml types this model uses; the parser below
+# reads the tensor table directly so the bench needs nothing beyond the standard library.
+BLOCK = {
+    0: (4, 1),      # F32
+    1: (2, 1),      # F16
+    2: (18, 32),    # Q4_0
+    3: (20, 32),    # Q4_1
+    6: (22, 32),    # Q5_0
+    7: (24, 32),    # Q5_1
+    8: (34, 32),    # Q8_0
+    10: (84, 256),  # Q2_K
+    11: (110, 256), # Q3_K
+    12: (144, 256), # Q4_K
+    13: (176, 256), # Q5_K
+    14: (210, 256), # Q6_K
+    30: (2, 1),     # BF16
+}
+
+
+class Field:
+    """Minimal stand-in for gguf's ReaderField: only `contents()` is used."""
+
+    def __init__(self, value):
+        self.value = value
+
+    def contents(self):
+        return self.value
+
+
+class Reader:
+    def __init__(self, path):
+        f = open(path, "rb")
+        self._f = f
+        magic = f.read(4)
+        if magic != b"GGUF":
+            raise ValueError(f"{path}: not a GGUF file")
+        f.read(4)  # version
+        n_tensors = struct.unpack("<Q", f.read(8))[0]
+        n_kv = struct.unpack("<Q", f.read(8))[0]
+        self.fields = {}
+        for _ in range(n_kv):
+            key = self._string()
+            self.fields[key] = Field(self._value(struct.unpack("<I", f.read(4))[0]))
+        self.tensors = _Tensors()
+        for _ in range(n_tensors):
+            name = self._string()
+            n_dims = struct.unpack("<I", f.read(4))[0]
+            dims = [struct.unpack("<Q", f.read(8))[0] for _ in range(n_dims)]
+            tensor_type = struct.unpack("<I", f.read(4))[0]
+            self._f.read(8)  # offset
+            count = 1
+            for d in dims:
+                count *= d
+            per_block, elements = BLOCK.get(tensor_type, (4, 1))
+            n_bytes = count // elements * per_block
+            self.tensors.append(name, n_bytes, tensor_type)
+
+    def _string(self):
+        n = struct.unpack("<Q", self._f.read(8))[0]
+        return self._f.read(n).decode("utf-8", "replace")
+
+    def _value(self, kind):
+        fixed = {0: 1, 1: 1, 2: 2, 3: 2, 4: 4, 5: 4, 6: 4, 7: 1, 10: 8, 11: 8, 12: 8}
+        if kind == 8:
+            return self._string()
+        if kind == 9:
+            element = struct.unpack("<I", self._f.read(4))[0]
+            count = struct.unpack("<Q", self._f.read(8))[0]
+            return [self._value(element) for _ in range(count)]
+        if kind in fixed:
+            raw = self._f.read(fixed[kind])
+            if kind == 6:
+                return struct.unpack("<f", raw)[0]
+            if kind == 5:
+                return struct.unpack("<i", raw)[0]
+            if kind == 4:
+                return struct.unpack("<I", raw)[0]
+            if kind == 10:
+                return struct.unpack("<d", raw)[0]
+            if kind == 11:
+                return struct.unpack("<q", raw)[0]
+            if kind == 12:
+                return struct.unpack("<Q", raw)[0]
+            if kind == 7:
+                return bool(raw[0])
+            return int.from_bytes(raw, "little")
+        raise ValueError(f"unsupported GGUF value type {kind}")
+
+
+class _Tensors(list):
+    def append(self, name, n_bytes, tensor_type):
+        class T:
+            pass
+
+        tensor = T()
+        tensor.name = name
+        tensor.n_bytes = n_bytes
+        tensor.tensor_type = type("T", (), {"name": str(tensor_type)})()
+        super().append(tensor)
+
+
 def tensor_bytes(reader):
     """{name: (bytes, type)} for every tensor of the model."""
     out = {}
@@ -40,9 +142,7 @@ def tensor_bytes(reader):
 
 
 def load_all_shards(gguf_path):
-    """GgufReader over every shard of a split model, merged by name."""
-    from gguf import GGUFReader
-
+    """Every shard of a split model, merged by name, using only the standard library."""
     directory = os.path.dirname(gguf_path)
     first = os.path.basename(gguf_path)
     prefix, _, rest = first.partition("-00001-of-")
@@ -54,7 +154,7 @@ def load_all_shards(gguf_path):
     tensors = {}
     fields = {}
     for path in paths:
-        reader = GGUFReader(path)
+        reader = Reader(path)
         tensors.update(tensor_bytes(reader))
         fields.update(reader.fields)
     return tensors, fields
