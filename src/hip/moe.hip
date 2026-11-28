@@ -182,13 +182,16 @@ __global__ void RouterKernel(const float* logits, const float* bias, int n_exper
     row_ids[i] = best_ids[i];
   }
 
+  // The weights belong to this row's own selection: `ids` is the batch base pointer, so
+  // indexing it here gave every row after the first the weights of the chunk's first row
+  // (the selection itself already went to row_ids). Decode (rows == 1) is unaffected.
   float sum = 0.0f;
   for (int i = 0; i < top_k; ++i) {
-    sum += scores[ids[i]];
+    sum += scores[best_ids[i]];
   }
   const float inverse = sum > 0.0f ? 1.0f / sum : 0.0f;
   for (int i = 0; i < top_k; ++i) {
-    weights[i] = scores[ids[i]] * inverse * scale;
+    weights[i] = scores[best_ids[i]] * inverse * scale;
   }
 }
 

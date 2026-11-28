@@ -625,3 +625,31 @@ The golden set is unchanged (plain 19, arithmetic none, tool-call 16, thinking-o
 because that harness drives prompts through `ForwardToken`, so it measures the engine against
 llama.cpp, not one path against the other. What changed is that served prefill and decode now agree,
 so a served completion and the harness's completion are computed by the same arithmetic.
+
+
+## Resolved: chunked prefill gave every row after the first the wrong MoE weights (2026-11-28)
+
+`RouterKernel` selects each row's experts into `row_ids` (`ids + row_index * top_k`) but then
+computed the combine weights from `scores[ids[i]]` — the *batch base* pointer, i.e. the chunk's
+first row's ids. Rows 1..N-1 of a chunk were therefore weighted with row 0's experts while their
+own experts were gathered, so the FFN output of a row depended on where it fell in the pass.
+Decode (`rows == 1`) was unaffected, which is why the goldens and the per-token harness never
+showed it, and why it looked like "chunk boundaries change the arithmetic".
+
+How it surfaced: `tools/check_http_restore.py` compares a continuation restored from a retained
+checkpoint against a fresh server. The seed prompt is 72 tokens, so the checkpoint sat at 72 and
+the 5-token suffix ran at 72 where a cold prefill runs a 13-row pass at 64: the same rows were
+row 5 of one chunk and row 0 of another, so their MoE weights differed and the continuation could
+never match. Stage dumps (`LING3_STAGE_DUMP=<block>:<row>` while it existed) put the first
+divergence in block 2/3's router: identical `bh`/`bq`/router logits and identical router ids, but
+different `router_w` — the signature of the weights not belonging to the row's own selection.
+
+Fix: index `best_ids` for both the sum and the weights. With it, and with the runner declaring
+`prefill_alignment` 32 so a continuation resumes on the cold pass grid, the suite passes repeated
+runs (three in a row, then four of five; the miss is the near-tie below), `ctest -R ^ling3_air` is
+10/10, decode stays 19.60 tok/s and prefill 29.8 tok/s.
+
+Still open: three identical chunked prefills from a cleared state differ by up to 0.6 in the head
+logits (`LING3_PREFILL_REPEAT=1` in tests/mtp_test.cpp; `LING3_KDA_ROW=1` and `LING3_HEAD_PLAIN=1`
+do not change it, and clearing every recorded scratch allocation does not either). That is what
+occasionally flips one of the serving checks, so the probe is kept as the harness for the next look.
