@@ -861,3 +861,28 @@ original path as the fallback. The expected gain is set by the PMC number — a 
 utilisation with coalesced loads has room for an order of magnitude — and it is the only remaining route
 to the prefill target.
 
+
+## The next prefill change, spelled out (2026-11-27)
+
+The gather is invoked once per chunk row, so a 32-row chunk loads the same 8 experts' gate/up weights
+**32 times**. The kernel is latency-bound on those loads (PMC: 1 % ALU utilisation, 0.007 waves/cycle)
+and every instruction-level variant measured neutral, which points at the redundancy rather than the
+instruction mix.
+
+The change: give one warp `(expert_slot, output_row)` and loop it over the chunk's rows, loading the
+weight block once and dotting it against each row's activation (`m.bffnh + row * n_embd` is already
+row-indexed). Weight loads for gate/up drop by the chunk width (32x); the down projection still needs
+per-row activations but reuses the same weight block for all 32 rows as well.
+
+Scope and verification:
+- new kernel `GemvExpertsChunkKernel` beside the existing one, selected when the caller has a whole
+  chunk (the per-row path stays for decode and as the fallback);
+- the gate/up half can be wired first and measured alone, since it is two of the three matvecs;
+- `ctest` 10/10, then chunked-vs-per-token parity (the instrument that proved 966/966 rows identical),
+  then `tools/bench_report.py --chunked-prefill 32` for the number, and the goldens re-documented if the
+  accumulation order changes (it will: rows are summed in a different order per output row).
+
+Expected from the PMC numbers: the gather is 57 % of prefill and 32x of its load traffic is redundant;
+halving that term would put prefill near 40-45 tok/s and quartering it near 60 — still far from 2,000,
+but the first change in this stretch with an arithmetic reason to expect double-digit percent.
+
