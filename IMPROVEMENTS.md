@@ -796,3 +796,32 @@ throughput experiments.
 That is the single most valuable next investigation for `prefill-opt`: the term is 57 % of prefill, and
 its cost is currently unexplained.
 
+## The gather is latency-bound at ~1 % ALU utilisation (PMC evidence, 2026-11-27)
+
+`rocprofv3 --pmc SQ_WAVES GRBM_COUNT SQ_INSTS_VALU --output-format csv` over a chunked prefill, joined
+with the kernel-trace durations:
+
+| kernel | ms | waves | cycles | waves/cycle | VALU/wave |
+| --- | --- | --- | --- | --- | --- |
+| expert gather (prepared Q4_K) | 1863 | 36,413,440 | 5,420,799,697 | 0.007 | 5,179 |
+| chunk GEMM (`GemmDotRow`) | 942 | 149,085,440 | 2,751,712,706 | 0.054 | 991 |
+| router | 368 | 59,351,040 | 1,153,519,020 | 0.051 | 721 |
+
+The gather executes `36.4M waves x 5,179 VALU = 188 G vector-ALU ops` in 1.86 s, i.e. **~101 GOP/s
+against a device peak of order 10 TOP/s — about 1 % ALU utilisation**, with 0.007 waves retired per
+cycle. That is a latency-bound kernel: waves are stalled waiting, not computing.
+
+This is the diagnosis the previous five experiments were missing, and it explains each of them: it is
+not compute (1 % ALU), not bandwidth (7.9 MB per call would take 33 us, not 700), not locality
+(`LING3_FORCE_EXPERT` changes nothing), not occupancy (narrow vs wide dot identical), and not
+instruction width (four-row tiling identical). The dependency chain per lane — 32 sequential
+nibble-extract, convert and multiply-add steps on one accumulator — leaves nothing to hide latency
+behind.
+
+What would actually fix it, in one sentence for whoever picks this up: **give each lane independent
+accumulators and issue the loads ahead of use** (unroll the group loop into 4-8 independent partial
+sums, prefetch the next group's 32 packed bytes while the current one multiplies, and let the compiler
+emit `buffer_load_dword` rather than byte loads). That is a rewrite of `DotRowQ4KPreWide` with
+explicit unrolling, not another parameter change — and it is the single highest-value change left in
+the project, because this kernel is 57 % of prefill and runs at 1 % of the ALU.
+
