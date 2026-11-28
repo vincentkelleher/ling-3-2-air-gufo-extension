@@ -26,3 +26,20 @@ error. `tools/requantise_q4_0.py` is a dependency-free alternative for Q4_0 spec
 What is *not* done yet, and is the other half of the work: loading a derived tensor. The engine resolves
 weight pointers as offsets into the reader's mapped regions, so a derived buffer has to be registered
 like a region and resolved by `Impl::Dev` — a change to the loader, not to this tool.
+
+## Loading attempt: memory fault, reverted
+
+A first loader attempt (2026-11-27) mapped the derived buffers as host regions and had the weight
+mapper swap them in, declaring Q6_K. Without `LING3_DERIVED` the engine measured 19.63-19.64 tok/s as
+usual; with it, the first step raised `HSA_STATUS_ERROR_MEMORY_FAULT`. Two likely causes, both
+recorded before another attempt:
+
+1. `hipHostRegister` on a `malloc`'d buffer without page alignment — the shard path aligns the region
+   start down to a page for exactly this reason, and the derived path does not;
+2. consumers that assume the pinned tensor's size or row stride (the token embedding's row width is
+   computed from `bytes / ne[1]`, for instance), which a smaller tensor invalidates.
+
+So the size win is real — Q8_0 is 70.7 % of a token's traffic and Q6_K is 22.8 % smaller on those
+tensors, which would take 4.753 GB/token to ~3.98 GB and the memory ceiling from 49.9 to ~59.6 tok/s —
+but the loader has to be done properly: page-align the derived buffers, and audit every consumer of a
+substituted tensor's bytes before enabling it.

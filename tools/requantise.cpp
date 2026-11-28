@@ -49,9 +49,7 @@ bool ReadGguf(const char* path, std::vector<Tensor>* tensors, std::int64_t* data
     std::uint64_t n = 0;
     std::fread(&n, 8, 1, f);
     std::string s(n, '\0');
-    if (std::fread(s.data(), 1, n, f) != n) {
-      return false;
-    }
+    std::fread(s.data(), 1, n, f);
     return s;
   };
   std::function<void(std::uint32_t)> skip;
