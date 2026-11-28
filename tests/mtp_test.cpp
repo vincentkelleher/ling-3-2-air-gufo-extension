@@ -96,9 +96,11 @@ int main(int argc, char** argv) {
   }
 
   // Chunked prefill must be a function of the state and the tokens: the router gives each
-  // row the weights of its own expert selection, so a pass may not depend on where its rows
-  // fall in a chunk. Three identical prefills from a cleared state must agree bit for bit.
-  // Runs with LING3_PREFILL_REPEAT=1 (the goldens and the serving suite cover the rest).
+  // row the weights of its own expert selection and writes them to that row's slots, so a
+  // pass may not depend on where its rows fall in a chunk or on which block ran last. Three
+  // identical prefills must agree bit for bit.
+  //
+  // LING3_PREFILL_REPEAT=1 runs it (the goldens and the serving suite cover the rest).
   if (std::getenv("LING3_PREFILL_REPEAT") != nullptr) {
     std::string text;
     for (int i = 0; i < 8; ++i) text += "Here is one fact about the red fox. ";
@@ -106,9 +108,9 @@ int main(int argc, char** argv) {
     const auto encoded = tokenizer->Encode(text, /*parse_special=*/true);
     std::vector<std::int32_t> prompt(encoded.begin(), encoded.end());
     std::vector<float> logits(engine->VocabSize());
-    std::uint64_t first = 0;
-    std::size_t differing = 0;
     std::vector<float> reference;
+    std::uint64_t reference_hash = 0;
+    std::size_t differing = 0;
     for (int run = 0; run < 3; ++run) {
       if (!engine->ClearServingState() ||
           !engine->PrefillChunk(prompt.data(), 32, 0, -1, &error) ||
@@ -126,12 +128,13 @@ int main(int argc, char** argv) {
         hash = (hash ^ static_cast<std::uint64_t>(bytes[i])) * 1099511628211ull;
       }
       float worst = 0.0f;
-      for (std::size_t i = 0; i < logits.size() && !reference.empty(); ++i)
+      for (std::size_t i = 0; i < logits.size() && !reference.empty(); ++i) {
         worst = std::max(worst, std::fabs(logits[i] - reference[i]));
+      }
       if (run == 0) {
-        first = hash;
         reference = logits;
-      } else if (hash != first) {
+        reference_hash = hash;
+      } else if (hash != reference_hash) {
         ++differing;
       }
       std::printf("     chunked prefill repeat %d: %zu tokens, logits %016llx, worst %.3g\n",

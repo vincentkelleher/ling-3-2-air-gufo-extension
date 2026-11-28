@@ -627,29 +627,47 @@ llama.cpp, not one path against the other. What changed is that served prefill a
 so a served completion and the harness's completion are computed by the same arithmetic.
 
 
-## Resolved: chunked prefill gave every row after the first the wrong MoE weights (2026-11-28)
+## Resolved: the chunked router mis-routed both the weights it read and the slots it wrote (2026-11-28)
 
-`RouterKernel` selects each row's experts into `row_ids` (`ids + row_index * top_k`) but then
-computed the combine weights from `scores[ids[i]]` — the *batch base* pointer, i.e. the chunk's
-first row's ids. Rows 1..N-1 of a chunk were therefore weighted with row 0's experts while their
-own experts were gathered, so the FFN output of a row depended on where it fell in the pass.
-Decode (`rows == 1`) was unaffected, which is why the goldens and the per-token harness never
-showed it, and why it looked like "chunk boundaries change the arithmetic".
+`RouterKernel` has two batch base pointers in scope, `ids` and `weights`, and both were used
+where the per-row versions (`row_ids`, `row_weights`) were meant:
 
-How it surfaced: `tools/check_http_restore.py` compares a continuation restored from a retained
-checkpoint against a fresh server. The seed prompt is 72 tokens, so the checkpoint sat at 72 and
-the 5-token suffix ran at 72 where a cold prefill runs a 13-row pass at 64: the same rows were
-row 5 of one chunk and row 0 of another, so their MoE weights differed and the continuation could
-never match. Stage dumps (`LING3_STAGE_DUMP=<block>:<row>` while it existed) put the first
-divergence in block 2/3's router: identical `bh`/`bq`/router logits and identical router ids, but
-different `router_w` — the signature of the weights not belonging to the row's own selection.
+* `weights[i] = scores[ids[i]] * inverse * scale` — the weights came from the *chunk's first
+  row's* experts (rows after the first were weighted with someone else's selection), and
+* `weights[i] = ...` — every row's weights were written into the *first* row's slots, so rows
+  1..N-1 were combined with whatever was there (zero in a fresh process) and the first slot held
+  whichever block happened to run last.
 
-Fix: index `best_ids` for both the sum and the weights. With it, and with the runner declaring
-`prefill_alignment` 32 so a continuation resumes on the cold pass grid, the suite passes repeated
-runs (three in a row, then four of five; the miss is the near-tie below), `ctest -R ^ling3_air` is
-10/10, decode stays 19.60 tok/s and prefill 29.8 tok/s.
+Decode (`rows == 1`) is unaffected, since there `row_ids == ids` and `row_weights == weights` —
+which is why the goldens (driven through `ForwardToken`) and the per-token harness never showed
+it, and why it read as "chunk boundaries change the arithmetic". In a chunked prefill the FFN of
+every row but the first was effectively scaled by zero, and the first row's scale depended on
+block scheduling, so the result was neither correct nor reproducible: two identical prefills in
+one process differed by up to 0.6 in the head logits, and the serving suite's two continuation
+checks alternated.
 
-Still open: three identical chunked prefills from a cleared state differ by up to 0.6 in the head
-logits (`LING3_PREFILL_REPEAT=1` in tests/mtp_test.cpp; `LING3_KDA_ROW=1` and `LING3_HEAD_PLAIN=1`
-do not change it, and clearing every recorded scratch allocation does not either). That is what
-occasionally flips one of the serving checks, so the probe is kept as the harness for the next look.
+How it was localised, all with a temporary `LING3_STAGE_DUMP=<block>:<row>` in `PrefillChunk`
+(removed) plus a temporary `LING3_BLOCK_SCAN`/`LING3_STAGE_SCAN` in `tests/mtp_test.cpp`
+(the reproducible part stayed as `LING3_PREFILL_REPEAT=1`):
+
+* two identical prefills with `ClearServingState` *and* every recorded scratch allocation
+  zeroed still differed, from block 2 (the first MoE block) row 0 on — so the difference was not
+  leftover memory, and serializing every kernel and copy (`AMD_SERIALIZE_KERNEL=3
+  AMD_SERIALIZE_COPY=3`, `HIP_LAUNCH_BLOCKING=1`) did not remove it — so it was not launch
+  ordering;
+* a digest of *all* registered weight memory was identical before and after a pass — the mapped
+  weights are not written;
+* block 2 row 0: `bx_in`, `bh`, `bq`, `kchg_q`, `kchg_gate`, `kchg_out`, `bgated`, `battn`,
+  `bx_attn`, `bffnh`, the router logits, the router **ids** and the bias were all bit-identical
+  between the two passes, but `router_w` differed by up to 0.36 — and neither pass's weights
+  matched the weights recomputed on the host from the dumped logits/bias/ids;
+* `m.brouter_w` rows 1..31 read as zero after a pass of 32 rows, i.e. only the first row's slots
+  had ever been written.
+
+Fix: index `best_ids` for the sum and the weights, and write them to `row_weights`.
+
+Verification (same tree): three identical chunked prefills give one logits hash
+(`LING3_PREFILL_REPEAT=1`, `ok prefills whose logits differ 0`); `tools/check_http_restore.py`
+prints all three OK lines on five consecutive runs; `ctest -R ^ling3_air` is 10/10; decode
+19.63-19.64 tok/s and prefill 29.5 tok/s (the documented 19.6 / 29.8, within the ambient drift the
+benchmark notes already record).

@@ -182,16 +182,20 @@ __global__ void RouterKernel(const float* logits, const float* bias, int n_exper
     row_ids[i] = best_ids[i];
   }
 
-  // The weights belong to this row's own selection: `ids` is the batch base pointer, so
-  // indexing it here gave every row after the first the weights of the chunk's first row
-  // (the selection itself already went to row_ids). Decode (rows == 1) is unaffected.
+  // The weights belong to this row's own selection and to this row's own slots: `ids` and
+  // `weights` are the batch base pointers, so indexing them here weighted every row with the
+  // chunk's first row's experts and wrote every row's weights into the first row's slots
+  // (the selection already went to `row_ids`, which is why the gathered experts were right
+  // and the combine was not). Rows after the first were then combined with zero weights, and
+  // which row won the first slot depended on block scheduling. Decode (rows == 1) is
+  // unaffected: there `row_ids == ids` and `row_weights == weights`.
   float sum = 0.0f;
   for (int i = 0; i < top_k; ++i) {
     sum += scores[best_ids[i]];
   }
   const float inverse = sum > 0.0f ? 1.0f / sum : 0.0f;
   for (int i = 0; i < top_k; ++i) {
-    weights[i] = scores[best_ids[i]] * inverse * scale;
+    row_weights[i] = scores[best_ids[i]] * inverse * scale;
   }
 }
 
