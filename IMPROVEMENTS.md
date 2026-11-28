@@ -879,3 +879,31 @@ same expert in one warp, amortising the activation and giving the scheduler four
 which is what the four-row tiling tried on the Q8_0 prepared dot and measured neutral) or a different
 dispatch shape altogether. It is not a dedupe problem, and I should not have written that it was.
 
+## Occupancy via launch bounds: crashed, and it produced a false speedup (2026-11-27)
+
+The PMC trace says the quantised dots retire 0.007 waves per cycle at ~1 % ALU utilisation, and
+occupancy is the classic latency-hiding lever, so I capped register use with `__launch_bounds__(128, 8)`:
+
+| variant | prefill | decode | goldens |
+| --- | --- | --- | --- |
+| baseline | 29.8 | 19.63 | 1/4 (arithmetic exact) |
+| cap on the four expert-gather kernels | 33.7 | 21.8 | **0/4 — token 0** |
+| cap on the gather + all GEMV/GEMM dots | **46.3** | **37.5** | **0/4 — token 0** |
+| cap on one gather kernel only | 32.6 | — | **0/4** |
+| single-token smoke test with that one cap | — | — | **GPU core dump** |
+
+So the 46 / 37.5 numbers were a *broken model*, not a speedup: with a cap applied the launch faults or
+silently does not run, the buffers keep stale values, and a degenerate stream decodes faster. The
+sweep of cap values (6/10/12/14 all ≈33.7) measured the same broken path.
+
+Two things came out of it, both kept:
+
+- **a launch-error check** after each decode step (`hipGetLastError`), so a kernel that fails to launch
+  is reported instead of silently returning stale output — this class of bug had been invisible until
+  the goldens caught the token-0 stream;
+- the conclusion that `__launch_bounds__` on these kernels is unsafe as applied, and needs to be
+  revisited with the resource limits (VGPR/LDS per block) checked per kernel rather than forced.
+
+Everything was reverted to the verified state: 19.64 tok/s decode, 29.8 prefill, goldens 1/4 with
+`arithmetic` exact, `ctest` 10/10.
+

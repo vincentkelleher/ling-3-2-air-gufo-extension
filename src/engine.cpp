@@ -1113,6 +1113,14 @@ bool Engine::ForwardFromEmbedded(std::uint32_t position, std::string* error) {
   hip::LaunchArgmax(m.logits, c.n_vocab, m.argmax, stream);
   dump_at("/work/logits_%u.bin", m.logits, c.n_vocab, position);
 
+  // A kernel that never ran leaves the buffers stale and the output silently wrong; these runs were
+  // the first to show it (an unachievable launch-bounds config failed without any error surfacing).
+  if (const hipError_t launch = hipGetLastError(); launch != hipSuccess) {
+    if (error != nullptr) {
+      *error = std::string("engine: kernel launch failed: ") + hipGetErrorString(launch);
+    }
+    return false;
+  }
   const hipError_t status = hipStreamSynchronize(stream);
   if (profile) {
     // Attention spans marks 0->1; everything else in the layer (norm, residual, FFN
