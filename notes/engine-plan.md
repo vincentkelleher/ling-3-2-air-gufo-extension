@@ -1062,3 +1062,41 @@ Two things this changes:
 Still missing for criterion 3: `TextModelRunner` (so `gufo serve llm` works with
 caching, streaming and sessions), tool dialect registration, vision and MTP in the
 served path.
+
+## MTP speculation wired into serving, opt-in and measured (2026-11-28)
+
+`VerifyDrafts` was proved before it was used, and the proof found two defects: it called
+`PrefillChunk` with `stop_after_block = n_layer - 1`, which returns after the last block's
+attention and before its FFN, so every verified row's head read a hidden state the token
+path never produces; and its per-row head used `LaunchGemv` while the token path uses the
+prepared (activation-quantised) GEMV. Both are fixed (full pass, one `RunOutputHead`
+shared by the token, chunked and verification paths), and `tests/mtp_test.cpp` now checks
+matrix rows 1-2: one chunked pass over `{current, draft}` returns the same argmaxes as two
+`ForwardToken`s, restoring and re-feeding the accepted prefix reproduces plain greedy with
+logits delta 0 and an identical 43-layer digest, and 32 speculative steps match plain
+greedy token for token.
+
+The serving step (`Ling3Runner::DecodeStep`) is host-visible multi-token decode
+(`capabilities.multi_token_decode = true`), K=1. It holds the engine lock for the whole
+step, snapshots before the MTP draft, restores, lets `VerifyDrafts` snapshot for itself,
+restores again, then re-feeds exactly the accepted prefix with `ForwardToken`; a
+per-state `hidden_valid` flag makes the first step after a restore plain because `m.h` is
+not in the serving checkpoint. The gate is `LING3_SPEC_DRAFTS=1`
+(`can_use_unmodified_argmax()` && budget >= 2 && hidden valid). `LING3_SPEC_DRAFTS`
+defaults off because the measurement is a regression:
+
+| measurement | value |
+| --- | --- |
+| acceptance, three 64-token greedy prompts | 3/61, 1/62, 4/59 = 8/182 (4.4 %) |
+| decode with speculation on | 7.10-7.33 tok/s |
+| decode with speculation off (x3) | 19.84-19.85 tok/s |
+| acceptance, restore-suite 12-token prompts | 12/77 (15.6 %, per request 0-42.9 %) |
+
+The old 58 % (18/31) figure does not reproduce: `LING3_MTP=1` in `tests/forward_test.cpp`
+measures 0-2 matches in 23-30 on the same prompts even when block 42's cache accumulates
+across steps, so the low acceptance is the MTP head at HEAD rather than the step's
+rollback of block 42's cache. Spec-off and spec-on completions are byte-identical through
+restore, continuation and two concurrent banks (`tools/check_http_restore.py --dump`;
+`diff -r -x 'serve-*.log'` empty on two runs each way). Exactness is done; making
+speculation pay needs better draft acceptance or a cheaper verifier, neither of which is
+in this change.

@@ -110,6 +110,12 @@ exactly the unassisted decode cost — plus the draft block (~4 %). Speculative
 decoding needs the verifier to consume K tokens in **one** pass and produce K+1
 distributions, which is the same M dimension the prefill work needs.
 
+Measured outcome (2026-11-28): the batched verifier exists and is exact, but K=1
+speculation in the serving path measured **slower** — 7.1-7.3 tok/s against 19.8-19.9
+without it — because acceptance of the MTP head at HEAD is only 4.4-15.6 %, so the
+verifier's extra trunk pass is not paid back. See `docs/quality.md` and
+`notes/engine-plan.md`.
+
 So the order is now unambiguous:
 
 1. **Batched forward** (M tokens per pass) — `LaunchGemm` is tested for F32/Q8_0
@@ -339,7 +345,9 @@ tokens (M in the hundreds). Until then the default stays per-token.
 Added `Engine::SnapshotState`/`RestoreState` (device copies of every KDA conv +
 delta state and every MLA cache) and `VerifyDrafts` (chunked pass that returns the
 greedy argmax at each position, preceded by a snapshot so a rejected prefix can be
-rewound). Both compile; `VerifyDrafts` is **unverified** and currently unused.
+rewound). Both compile; `VerifyDrafts` was **unverified** and unused at the time. It was
+later proved against two `ForwardToken`s in `tests/mtp_test.cpp`, which found it stopped
+before the last block's FFN and ran a different head; both are fixed (2026-11-28).
 
 The speculative loop built on them in `tests/forward_test.cpp` measured 2.54 tok/s
 with **0 drafts accepted** and produced a sequence that is not the plain greedy one,

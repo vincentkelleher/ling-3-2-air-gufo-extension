@@ -4,7 +4,7 @@ A Gufo extension for **Ling 3.2 Air** — a 128B-parameter hybrid MoE
 (`bailing_moe_v3_vl`) served from the `bartowski/Ling-3.2-air-GGUF` Q4_K_M
 quantization on AMD Strix Halo.
 
-Status: **experimental — the text engine runs, serves no HTTP yet, and is not
+Status: **experimental — the text engine runs and serves HTTP, and is not
 token-identical to llama.cpp.** Details and numbers below; the honest summary is
 at the bottom.
 
@@ -24,24 +24,30 @@ at the bottom.
   pre-tokenizer regex and NFC normalization — byte-exact against the reference
   tokenizer on 184 cases (9,807 tokens) — and a chat renderer byte-identical to
   the model's own Jinja template on 18 cases.
-- **Text engine on the GPU**: all 43 blocks (35 KDA + 7 MLA + MTP block parsed
-  but unused), MoE routing and expert gather, LM head, greedy sampler. Weights
+- **Text engine on the GPU**: all 43 blocks (35 KDA + 7 MLA + the MTP block, used
+  only for opt-in speculation), MoE routing and expert gather, LM head, greedy sampler. Weights
   are registered zero-copy from the reader's mapping, so an 80 GiB model loads in
   ~2 s warm.
 - **Usable from the CLI**: `gufo prompt`, `gufo chat` and `gufo bench` run the
-  model (chunked prefill 16.8 tok/s, decode 16.9 tok/s on this box). The HTTP
-  server still needs the runner below.
+  model (chunked prefill 16.8 tok/s, decode 16.9 tok/s on this box). The same
+  runner serves HTTP through Gufo's component cache and continuation path.
 - **Coherent output**: `The capital of France is` continues with the same
   sentence as llama.cpp; the two agree for 53 characters before a near-tie
   (0.048 logit margin) sends them apart, and 1 of 4 pinned cases is
   token-identical end to end.
-- **MTP block runs and is measured**: block 42 is readable (its Q4_0 storage has a
-  dot, validated against real rows), and `Engine::ForwardMtp` drafts from the base
-  model's final hidden state: **18 of 31 drafts (58 %)** match what the trunk then
-  produces. Speculative decoding is deliberately not wired into the serving path —
-  at 58 % acceptance and a batched verifier only 1.29x cheaper per token, the modeled
-  gain is ~1.15x, which does not justify the equality risk. See
-  [docs/quality.md](docs/quality.md).
+- **MTP speculative decoding in the serving path, opt-in**: block 42 drafts one
+  token from the base model's final hidden state, one chunked pass verifies
+  `{current, draft}`, and the runner re-feeds exactly the accepted prefix. Output is
+  unchanged: spec-off and spec-on completions are byte-identical through cache
+  restore, a two-turn continuation and two concurrent banks
+  (`tools/check_http_restore.py --dump`), and a 32-step speculative loop reproduces
+  plain greedy token for token with logits delta 0 (`tests/mtp_test.cpp`). It is
+  **off unless the server starts with `LING3_SPEC_DRAFTS=1`** because it measured
+  slower: acceptance at HEAD is 8/182 drafts (4.4 %) over three 64-token greedy
+  requests (3/61, 1/62, 4/59), and decode is **7.1-7.3 tok/s against 19.8-19.9**
+  without it. Greedy only (temperature 0, no penalty, constraint or reasoning
+  budget), K=1. `usage.draft_tokens` / `usage.draft_tokens_accepted` report the work
+  and the server log carries `acceptance_pct`. See [docs/quality.md](docs/quality.md).
 - **Image input works at the engine level and through `gufo prompt --image`**: the
   mmproj tower (27 ViT blocks, vision M-RoPE, 2x2 merge, projector) encodes a 768x768
   image into 576 rows of 2560, and `Engine::ForwardEmbedding` feeds those rows into the
@@ -112,11 +118,6 @@ buy about 1.3x.
   task, same meaning, different wording. The integer per-group dots already match
   llama.cpp's dot products (`tests/dot_vs_gufo_test.cpp`), so the residual is
   elsewhere.
-- **MTP drafted but not accepted**: the block runs and its drafts are usually
-  right (7 of 9), and a chunked verifier plus state snapshot/restore now exist
-  (`VerifyDrafts`, `SnapshotState`, `RestoreState`), but the accept loop's position
-  bookkeeping is unfinished — the first attempt accepted nothing, and the correct
-  discipline is written down in `notes/prefill-design.md`.
 - **No sampler beyond greedy**, no reasoning markers, no tool-call dialect.
 
 ## Quality
@@ -124,8 +125,8 @@ buy about 1.3x.
 [docs/quality.md](docs/quality.md) is the quality report: what is proven against
 Gufo's reference and llama.cpp, the per-stage numerical differences, the golden-set
 result (1 of 4 cases token-identical, the rest one token apart at a 0.048 logit
-margin), the verified vision tower with its parity numbers, MTP acceptance, and the
-known gaps — no HTTP serving, MTP not wired.
+margin), the verified vision tower with its parity numbers, the opt-in MTP
+speculation and its measured acceptance and cost, and the known gaps.
 
 ## Layout
 
@@ -168,10 +169,11 @@ llama.cpp with the commands behind every row.
 
 The extension loads Ling 3.2 Air and generates coherent text on the GPU, with
 every operator checked against a reference and every stage of the forward checked
-against numpy. It is **not yet a serving extension**: no runner, no cache, no
-HTTP, MTP not wired — and it is slower than llama.cpp's CPU path on the same
-machine, at 14 % of the memory-bandwidth roofline. Those are the next pieces of
-work, in that order.
+against numpy. It serves HTTP through Gufo's component cache, continuation and
+streaming path, and runs 1.6x llama.cpp's CPU path on the same machine at 39.9 %
+of the memory-bandwidth roofline. It is still not token-identical to llama.cpp,
+and MTP speculation is opt-in because it measured slower than plain decode
+(7.1-7.3 tok/s against 19.8-19.9).
 
 ## Licenses
 

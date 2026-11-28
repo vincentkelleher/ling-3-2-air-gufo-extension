@@ -88,26 +88,28 @@ limit either: 1 024 blocks over 24 windows reaches 464 GB/s. Nine variants and t
 later the gap is real (the pattern supports 90-460 GB/s, the kernel sustains ~39 GB/s) and its
 cause is unidentified without a profiler, which this environment does not provide.
 
-### Snapshot restore is inexact, which bounds two claims
+### Snapshot restore is exact under the per-probe checkpoint rule
 
-`SnapshotState`/`RestoreState` round-trips imperfectly: plain greedy re-run after a restore
-diverges from the uninterrupted run at token 5 (reproduced by `tests/mtp_test.cpp`, which
-registers the check regardless of MTP). The state itself is exact — a per-layer digest shows
-**0 of 43 layers differ** across snapshot → token → restore, and a full 8-token greedy run
-after a rewind reproduces the reference **token for token with logits delta 0** (the checkpoint
-must sit before the last prompt token, so a rewind feeds it exactly once) — so the engine's state restore and its decoding are both
-exact. What does not yet pass is the end-to-end equality harness, which shares the engine's
-single snapshot buffer between probes (`VerifyDrafts` snapshots internally as well), so its
-round-trip can return to a checkpoint taken by an earlier probe. Consequences:
+`SnapshotState`/`RestoreState` round-trip the trunk state (KDA conv + delta, the MLA
+caches) exactly. The engine owns one snapshot buffer, so each probe must take its
+checkpoint immediately before use and, when the checkpoint sits before the last prompt
+token, feed that token again after restoring because the snapshot does not carry the
+logits. Under that rule a per-layer digest shows **0 of 43 layers differ** across
+snapshot → token → restore, an 8-token greedy run after a rewind reproduces the
+reference **token for token with logits delta 0**, and the speculative step shape
+reproduces plain greedy over 32 tokens with logits delta 0 (`tests/mtp_test.cpp`). The
+earlier "diverges at token 5" observation was probes sharing that one buffer; it was a
+harness defect, not an inexact restore.
 
-- MTP speculative decoding **does** reproduce plain autogressive output exactly (8/8 tokens,
-  logits delta 0) once each section owns its checkpoint; `tests/mtp_test.cpp` asserts it;
-- cache restore is **not** byte-for-byte identical to an uninterrupted run, so the
-  continuation timings (TTFT 27,431 ms → 92 ms) are real but byte-exact restore equality is
-  not established.
-
-`notes/prefill-design.md` records the covered buffers, the buffers still to check and the
-byte-level diff that would localise it.
+The 8/8 equivalence (`9196682`, 2026-11-27) predates the chunked-router fixes
+(`063801c`, `7215325`) but is decode-side and unaffected by them: the proof feeds the
+prompt one token at a time and verifies sequentially, so it never enters the `rows > 1`
+chunk path those fixes changed. `VerifyDrafts` itself was unproven until it was checked
+against two `ForwardToken`s; that check found it stopped after the last block's
+attention (so its rows came from a hidden state the token path never produces) and ran
+the head through a different GEMV than the token path. Both are fixed by running the
+full pass and sharing one output-head implementation, and its per-row argmaxes now match
+the token path exactly.
 
 ### Single-token forward and first-token agreement
 
@@ -162,12 +164,44 @@ computed in double precision.
 - Both are expected of any independent implementation, and both are why this report
   states a margin rather than a claim of bit equality.
 
+### MTP speculation is wired but opt-in (2026-11-28)
+
+`DecodeStep` returns two selections when all of these hold: the server was started with
+`LING3_SPEC_DRAFTS=1`, the request is an unmodified argmax (temperature 0, no penalty,
+constraint or reasoning budget), the token budget is at least two, and the trunk's final
+hidden is valid. It drafts one token with block 42, verifies `{current, draft}` in one
+chunked trunk pass, restores, and re-feeds exactly the accepted prefix with
+`ForwardToken`, so the retained state comes only from the token path.
+`draft_tokens`, `draft_tokens_accepted`, `draft_rounds` and `acceptance_pct` come from the
+host's normal generation metrics; the runner adds `[runner] spec step ...` under
+`LING3_RUNNER_TRACE`. Speculation is off by default because it measured slower.
+
+Measured (Q4_K_M, greedy, one request at a time, 2026-11-28):
+
+| prompt (`max_tokens` 64) | drafts | accepted | acceptance | decode |
+| --- | --- | --- | --- | --- |
+| `The capital of France is` | 61 | 3 | 4.9 % | 7.17 tok/s |
+| `Here is one fact about the red fox. Where does it live?` | 62 | 1 | 1.6 % | 7.10 tok/s |
+| `Question: What is 17 times 23?` | 59 | 4 | 6.8 % | 7.33 tok/s |
+| speculation off (engine path, x3) | — | — | — | 19.84-19.85 tok/s |
+
+The engine-level `LING3_MTP=1` probe, which lets block 42's cache accumulate across steps
+instead of restoring it with the trunk, measures 0-2 matches in 23-30 on the same prompts,
+so the low acceptance is the MTP head at HEAD, not the per-step rollback. At K=1 the
+verifier costs about one extra trunk pass per accepted token, so the design's ~1.8x
+modeled loss is the floor, not the estimate. The older **58 % (18/31)** row does not
+reproduce at HEAD and the 1.15x model built on it is void.
+
+Enable with `LING3_SPEC_DRAFTS=1` in the server environment; leave it unset (or 0) for
+plain decode. `tools/check_http_restore.py --dump DIR` writes every completion by prompt
+hash plus each server log, which is how spec-off/spec-on byte identity is checked.
+
 ## 6. Known gaps
 
 | gap | status |
 | --- | --- |
 | HTTP serving, cache, streaming | **works** — `gufo serve llm` answers, streams, and acts on cancellation (`tools/check_http_restore.py`, which also requires a successful private restore in the log so a cold fallback cannot pass). Continuation restores a prefix from the component cache and resumes on the pass grid a cold prefill uses: the runner declares `prefill_alignment` 32 and the adapter retains the aligned checkpoint below a prompt whose length is not a pass multiple, so the continued suffix runs the same chunk widths as a fresh server. The restored continuation then matches a fresh server byte for byte and `tools/check_http_restore.py` prints all three OK lines on five consecutive runs (2026-11-28). Getting there also needed two chunked-router fixes in `RouterKernel`: the weights were *read* through the batch base pointer (every row after the first was weighted with the chunk's first row's experts) and *written* through it as well (every row's weights went into the first row's slots, so rows 1..N-1 were combined with zero weights and the first slot held whichever block ran last). With both fixed the chunked prefill is bit-reproducible: three identical passes give one logits hash (`LING3_PREFILL_REPEAT=1` in tests/mtp_test.cpp) and the serving suite passed five consecutive runs (see notes/correctness-investigation.md). One private checkpoint is 154,697,732 bytes at context 4096. Session isolation is verified with two concurrent requests on `--sessions 2`: traces show two resident banks on a single shared engine, both matching their own cold runs, with engine operations serialized (an isolation result, not a throughput claim). An earlier build reported a 502 MB capture and a one-session limit; both are superseded |
-| MTP speculative decoding | block runs, **58 % acceptance measured (18/31)**; not wired into serving because the modeled gain at 58 % with a 1.29x-cheaper verifier is ~1.15x |
+| MTP speculative decoding | **wired, opt-in behind `LING3_SPEC_DRAFTS=1` (default off); slower than plain decode** — K=1, greedy only. `VerifyDrafts` matches two `ForwardToken`s row for row, and the serving step reproduces plain greedy over 32 tokens with logits delta 0 (`tests/mtp_test.cpp`). Measured at HEAD: 8/182 drafts accepted (4.4 %) over three 64-token greedy requests (3/61, 1/62, 4/59), decode **7.10-7.33 tok/s** against 19.84-19.85 with speculation off (~2.7x slower); the restore suite's shorter 12-token prompts accepted 12/77 (15.6 %, per request 0-42.9 %). Spec-off and spec-on completions are byte-identical through restore, a two-turn continuation and two concurrent banks (`tools/check_http_restore.py --dump`, empty diffs). The older **58 % (18/31)** figure does not reproduce at HEAD: `LING3_MTP=1` in `tests/forward_test.cpp` measures 0-2 of 23-30 on the same prompts, so the 1.15x model is void and the measured cost is at least the modeled ~1.8x. |
 | Vision (mmproj) | **implemented and verified** at the engine level (numpy reference 3.2e-06, llama.cpp parity 0.04 %) and through `gufo prompt --image`: on the red-circle/blue-square/"ling" test image the CLI answers "A large red circle is centered on a light background with a smaller blue square inside it" (`--think off`), and names the "ling" text with thinking on. The first CLI run exposed a stride bug — `GenerateWithImages` walked the 2560-wide projected rows by the 576-row count, so the conditioning was lost — now fixed in `src/drivers.cpp` and guarded by a rows/markers/width check |
 | Token-for-token equality | **not met**; one-token deviation at a 0.048 margin, documented above |
 | Roofline gates | decode **32-34 %** of 49.9 tok/s (16.2-17.0 tok/s at depth 0); prefill **0.37-0.38 %** of 6,277 tok/s (**23.4-23.8 tok/s** at pp2048, 32-token chunks); decode at depth 2048 is 15.72 tok/s (31.5 %) — both gates still far off |
