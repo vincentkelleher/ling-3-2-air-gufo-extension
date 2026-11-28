@@ -758,3 +758,14 @@ for this target), a smaller expert table (a different artifact), or a redesigned
 asynchronous loads and register-blocked tiles held across many more rows than a warp — a rewrite whose
 per-step gains are unproven and whose cost is measured in days.
 
+### Prepared Q8_0 chunk GEMM: crashed, reverted
+
+`GemmDotRowKernel<kQ8_0>` re-quantises each row's activation inside the projection, so the plan was to
+quantise once per row into a 32-row scratch (32 x 8192 int8 + 32 x 256 scales) and reuse it, mirroring
+what the K-quant GEMM already does. It compiled but faulted on the first chunked prefill (GPU core
+dump), most likely because the input's stride is not `cols` for every call site and the scratch copy
+read past the tile. Reverted; prefill stays at 29.8 tok/s.
+
+Lesson recorded for the next attempt: `LaunchGemm` takes both `cols` and an input stride, and the two
+differ for at least one caller, so a prepared copy must use the stride and bound the read by it.
+
