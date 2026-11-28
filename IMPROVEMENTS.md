@@ -715,9 +715,11 @@ the profile). `RouterKernel` is now row-indexed — one block per row — and a 
 | per-row routing | 27.9 | 19.85 |
 | batched routing (row-indexed kernel) | **29.8** | 19.63 |
 
-Prefill is +6.7 %, decode −1.1 %. The decode cost is intrinsic to the change rather than to the
-pointer indirection (branching on `rows == 1` did not recover it), and it was accepted because the
-prefill target is the one with headroom: 29.8 tok/s now, and the trade is recorded rather than hidden.
+Prefill is +6.7 %, decode −1.1 %. The decode cost turned out **not** to be the change: branching on
+`rows == 1` and then giving the single-row case its own template instantiation (identical code to
+before) both left decode at 19.63, so the 1.1 % is ambient drift between measurement sessions rather
+than a code effect — recorded because it is exactly the kind of number that gets mistaken for a
+regression later. It was accepted because the prefill target is the one with headroom: 29.8 tok/s now, and the trade is recorded rather than hidden.
 `ctest` 10/10 and the golden indices are unchanged (plain 19 / arithmetic none / tool-call 16 /
 thinking-on 2).
 

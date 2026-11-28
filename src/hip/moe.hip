@@ -82,6 +82,7 @@ __global__ void MulKernel(float* out, const float* a, const float* b, int count)
 
 /// Routing runs on one thread: 512 scores, a handful of groups. Making the
 /// order explicit keeps tie-breaking identical to the reference.
+template <bool BATCHED>
 __global__ void RouterKernel(const float* logits, const float* bias, int n_expert,
                             int n_group, int group_used, int top_k, float scale,
                             int* ids, float* weights, int rows, int logits_stride) {
@@ -96,13 +97,16 @@ __global__ void RouterKernel(const float* logits, const float* bias, int n_exper
   if (row_index >= rows) {
     return;
   }
-  // A single row (decode) keeps the plain pointers; only a chunk pays for the indirection.
-  const bool single = rows == 1;
-  const float* row_logits =
-      single ? logits : logits + static_cast<std::size_t>(row_index) * logits_stride;
-  int* row_ids = single ? ids : ids + static_cast<std::size_t>(row_index) * top_k;
-  float* row_weights =
-      single ? weights : weights + static_cast<std::size_t>(row_index) * top_k;
+  // The single-row (decode) instantiation has no row indirection at all, so its code is what it
+  // was before chunk batching existed.
+  const float* row_logits = logits;
+  int* row_ids = ids;
+  float* row_weights = weights;
+  if constexpr (BATCHED) {
+    row_logits += static_cast<std::size_t>(row_index) * logits_stride;
+    row_ids += static_cast<std::size_t>(row_index) * top_k;
+    row_weights += static_cast<std::size_t>(row_index) * top_k;
+  }
   for (int e = threadIdx.x; e < n_expert; e += blockDim.x) {
     scores[e] =
         1.0f / (1.0f + expf(-(row_logits[e] + (bias == nullptr ? 0.0f : bias[e]))));
@@ -195,11 +199,18 @@ void LaunchRouterSelect(const float* logits, const float* bias,
                         std::size_t group_used, std::size_t top_k, float scale,
                         std::int32_t* ids, float* weights, std::size_t rows,
                         std::size_t logits_stride, hipStream_t stream) {
-  RouterKernel<<<static_cast<int>(rows), kThreads, 0, stream>>>(
-      logits, bias, static_cast<int>(n_expert), static_cast<int>(n_group),
-      static_cast<int>(group_used), static_cast<int>(top_k), scale,
-      reinterpret_cast<int*>(ids), weights, static_cast<int>(rows),
-      static_cast<int>(logits_stride));
+  if (rows > 1) {
+    RouterKernel<true><<<static_cast<int>(rows), kThreads, 0, stream>>>(
+        logits, bias, static_cast<int>(n_expert), static_cast<int>(n_group),
+        static_cast<int>(group_used), static_cast<int>(top_k), scale,
+        reinterpret_cast<int*>(ids), weights, static_cast<int>(rows),
+        static_cast<int>(logits_stride));
+  } else {
+    RouterKernel<false><<<1, kThreads, 0, stream>>>(
+        logits, bias, static_cast<int>(n_expert), static_cast<int>(n_group),
+        static_cast<int>(group_used), static_cast<int>(top_k), scale,
+        reinterpret_cast<int*>(ids), weights, 1, static_cast<int>(logits_stride));
+  }
 }
 
 void LaunchFfn(const void* gate, StorageType gate_type, const void* up,
