@@ -833,3 +833,22 @@ emit `buffer_load_dword` rather than byte loads). That is a rewrite of `DotRowQ4
 explicit unrolling, not another parameter change — and it is the single highest-value change left in
 the project, because this kernel is 57 % of prefill and runs at 1 % of the ALU.
 
+
+### What seven failed variants inside this kernel imply
+
+Attempts on the gather's dot, all measured, all neutral or worse: narrow vs wide work split (identical),
+four independent integer chains (worse), 32-bit loads (≈ +0.7 %, inside noise), four-row-per-warp tiling
+(identical), forced single expert (identical), plus the earlier dot4 and 4-byte Q8_0 variants. The PMC
+trace is unambiguous that the kernel retires 0.007 waves per cycle at ~1 % ALU utilisation, so it is
+stalled on memory — yet making the table hot changes nothing and widening the loads changes nothing.
+
+The consistent reading is that the *layout* is the problem, not the instruction mix: a Q4_K group's 32
+packed bytes sit at a stride that makes a warp's loads sparse, so no amount of per-lane unrolling
+produces coalesced traffic. llama.cpp's answer is exactly this — it ships `repack.cpp`, rewriting
+weights into a lane-major layout at load time so each lane reads contiguous 16-byte vectors. Doing the
+same here is a **derived-artifact job** (which the revised objective explicitly allows): generate a
+repacked expert table with an in-repo script from the pinned weights, load that instead, and keep the
+original path as the fallback. The expected gain is set by the PMC number — a kernel at 1 % ALU
+utilisation with coalesced loads has room for an order of magnitude — and it is the only remaining route
+to the prefill target.
+
