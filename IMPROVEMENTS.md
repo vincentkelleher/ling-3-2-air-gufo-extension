@@ -659,3 +659,21 @@ roughly 500 small kernels per token that is ~70 us per launch. Reaching the 2,00
 far fewer, far larger kernels — a different design, not more hoisting. That is the honest position for
 `prefill-opt`: each admissible increment is single-digit percent while the target is 70x away.
 
+### SiLU folded into the conv kernel: slower, reverted
+
+Removing three launches per layer by folding SiLU into `Conv1dStepKernel` measured **19.73 tok/s
+decode against 19.85** and **27.7 against 27.9** for prefill: the in-kernel `expf` serialises the store
+path and costs more than the launch it saves. Reverted.
+
+That is the sixth measured micro-attempt this session whose result was neutral or negative, alongside
+dot4 (unavailable), locality (excluded at 4 %), Q6_K prepared experts (no gain), 4-byte loads (worse),
+and the `LaunchFfn` prepared routing (crashed). The four that did land — the prepared Q8_0 activation
+path (+17.5 % decode), batched KDA (+8 %), batched output-gate stage (+1 %), head and router routing —
+all share one property: they removed *redundant work*, and none merely rearranged it.
+
+The engine is therefore at a plateau for this design: decode 19.85 tok/s (39.8 % of a 49.9 ceiling) and
+prefill 27.9 tok/s. Both targets now sit behind a redesign rather than a tuning step: decode would need
+fewer bytes per token (dot4 is unavailable for this target, locality is excluded), and prefill needs
+far fewer, far larger kernels — a tiled attention stage and fused per-token stages — because it is
+dispatch- and latency-bound, not bandwidth-bound.
+
