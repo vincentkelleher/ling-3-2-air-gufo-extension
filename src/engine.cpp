@@ -998,7 +998,7 @@ bool Engine::ForwardFromEmbedded(std::uint32_t position, std::string* error) {
                               static_cast<const float*>(dev(layer.exp_probs_b)),
                               c.n_expert, c.n_group, c.n_group_used,
                               c.n_expert_used, c.expert_weights_scale, m.moe_ids,
-                              m.moe_weights, stream);
+                              m.moe_weights, 1, c.n_expert, stream);
       if ((il == 2 || il == 40) && std::getenv("LING3_ROUTER_TRACE") != nullptr) {
         // Print from the call site: the file dumps in this engine have needed a staging
         // fix or a stream synchronise before telling the truth.
@@ -1629,19 +1629,22 @@ bool Engine::PrefillChunk(const std::int32_t* tokens, std::size_t count,
       hip::LaunchGemm(dev(layer.gate_inp), Storage(layer.gate_inp.type), c.n_expert, n_embd,
                       m.bffnh, M, n_embd, m.moe_logits_batch,
                       static_cast<std::size_t>(c.n_expert), stream);
+      // One routing launch for the whole chunk (one block per row); the gather stays per row.
+      hip::LaunchRouterSelect(m.moe_logits_batch,
+                              static_cast<const float*>(dev(layer.exp_probs_b)),
+                              c.n_expert, c.n_group, c.n_group_used, c.n_expert_used,
+                              c.expert_weights_scale, m.brouter_ids, m.brouter_w,
+                              static_cast<std::size_t>(M), c.n_expert, stream);
       for (int i = 0; i < M; ++i) {
         const std::size_t row = static_cast<std::size_t>(i) * n_embd;
-        const float* logits_row = m.moe_logits_batch + static_cast<std::size_t>(i) * c.n_expert;
-        hip::LaunchRouterSelect(logits_row,
-                                static_cast<const float*>(dev(layer.exp_probs_b)),
-                                c.n_expert, c.n_group, c.n_group_used, c.n_expert_used,
-                                c.expert_weights_scale, m.moe_ids, m.moe_weights, stream);
+        const std::size_t slot = static_cast<std::size_t>(i) * c.n_expert_used;
         hip::LaunchMoeGather(dev(layer.gate_exps), Storage(layer.gate_exps.type),
                              dev(layer.up_exps), Storage(layer.up_exps.type),
                              dev(layer.down_exps), Storage(layer.down_exps.type), n_embd,
-                             c.n_ff_exp, m.bffnh + row, m.moe_ids, m.moe_weights,
-                             c.n_expert_used, m.bx + row, m.expert_gate, m.expert_up,
-                             m.expert_down, m.moe_q8, m.moe_scale, m.moe_sums, stream);
+                             c.n_ff_exp, m.bffnh + row, m.brouter_ids + slot,
+                             m.brouter_w + slot, c.n_expert_used, m.bx + row,
+                             m.expert_gate, m.expert_up, m.expert_down, m.moe_q8,
+                             m.moe_scale, m.moe_sums, stream);
       }
       hip::LaunchGemm(dev(layer.gate_shexp), Storage(layer.gate_shexp.type),
                       c.n_ff_shexp, n_embd, m.bffnh, M, n_embd, m.bffa, c.n_ff_shexp,
@@ -1809,7 +1812,8 @@ bool Engine::ForwardMtp(std::int32_t token, std::uint32_t position,
   hip::LaunchRouterSelect(m.moe_logits,
                           static_cast<const float*>(dev(layer.exp_probs_b)),
                           c.n_expert, c.n_group, c.n_group_used, c.n_expert_used,
-                          c.expert_weights_scale, m.moe_ids, m.moe_weights, stream);
+                          c.expert_weights_scale, m.moe_ids, m.moe_weights, 1,
+                          c.n_expert, stream);
   hip::LaunchMoeGather(dev(layer.gate_exps), Storage(layer.gate_exps.type),
                        dev(layer.up_exps), Storage(layer.up_exps.type),
                        dev(layer.down_exps), Storage(layer.down_exps.type), n_embd,

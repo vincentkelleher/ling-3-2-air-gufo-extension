@@ -19,7 +19,8 @@ namespace gufo::ext::ling3_air::hip {
 void LaunchRouterSelect(const float* logits, const float* bias,
                         std::size_t n_expert, std::size_t n_group,
                         std::size_t group_used, std::size_t top_k, float scale,
-                        std::int32_t* ids, float* weights, hipStream_t stream);
+                        std::int32_t* ids, float* weights, std::size_t rows,
+                        std::size_t logits_stride, hipStream_t stream);
 
 /// Turns per-token expert selections into per-expert token lists (the schedule
 /// grouped MoE needs): `counts[expert]` and `tokens[offset[expert] .. ]` hold the

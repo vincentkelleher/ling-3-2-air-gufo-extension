@@ -705,3 +705,24 @@ That also explains why batching the KDA stages only bought 9 %: they were ~10 % 
 bulk. The next prefill change should be grouped MoE, and the expected gain from the profile is
 substantial (a 2-4x reduction in the dominant term, i.e. prefill roughly doubling).
 
+## Prefill +6.7 %: the router is batched (adopted 2026-11-27)
+
+The chunked path routed each row separately (5,640 single-threaded `RouterKernel` launches, 295 ms in
+the profile). `RouterKernel` is now row-indexed — one block per row — and a chunk issues one launch:
+
+| variant | pp2420 tok/s | decode tok/s |
+| --- | --- | --- |
+| per-row routing | 27.9 | 19.85 |
+| batched routing (row-indexed kernel) | **29.8** | 19.63 |
+
+Prefill is +6.7 %, decode −1.1 %. The decode cost is intrinsic to the change rather than to the
+pointer indirection (branching on `rows == 1` did not recover it), and it was accepted because the
+prefill target is the one with headroom: 29.8 tok/s now, and the trade is recorded rather than hidden.
+`ctest` 10/10 and the golden indices are unchanged (plain 19 / arithmetic none / tool-call 16 /
+thinking-on 2).
+
+Next, per the same profile: the routed-MoE gather is still per row and is 57 % of prefill. Making it
+grouped — bucket the chunk's (row, expert) pairs, then one GEMM per expert bucket — is the remaining
+large change, and it will alter accumulation order per row, so it needs the golden indices re-measured
+(which the revised contract allows).
+

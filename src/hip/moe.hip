@@ -84,19 +84,29 @@ __global__ void MulKernel(float* out, const float* a, const float* b, int count)
 /// order explicit keeps tie-breaking identical to the reference.
 __global__ void RouterKernel(const float* logits, const float* bias, int n_expert,
                             int n_group, int group_used, int top_k, float scale,
-                            int* ids, float* weights) {
+                            int* ids, float* weights, int rows, int logits_stride) {
   __shared__ float scores[kMaxExperts];
   // The reference selects on sigmoid(logit) + bias but weights with the unbiased
   // sigmoid (llama-graph.cpp: selection_probs = probs + exp_probs_b, weights come
   // from probs). Folding the bias into the sigmoid changes every expert weight.
   __shared__ float unbiased[kMaxExperts];
   __shared__ unsigned char used[kMaxExperts];
-  if (blockIdx.x != 0) {
+  // One block per row, so a whole chunk is routed in one launch.
+  const int row_index = blockIdx.x;
+  if (row_index >= rows) {
     return;
   }
+  // A single row (decode) keeps the plain pointers; only a chunk pays for the indirection.
+  const bool single = rows == 1;
+  const float* row_logits =
+      single ? logits : logits + static_cast<std::size_t>(row_index) * logits_stride;
+  int* row_ids = single ? ids : ids + static_cast<std::size_t>(row_index) * top_k;
+  float* row_weights =
+      single ? weights : weights + static_cast<std::size_t>(row_index) * top_k;
   for (int e = threadIdx.x; e < n_expert; e += blockDim.x) {
-    scores[e] = 1.0f / (1.0f + expf(-(logits[e] + (bias == nullptr ? 0.0f : bias[e]))));
-    unbiased[e] = 1.0f / (1.0f + expf(-logits[e]));
+    scores[e] =
+        1.0f / (1.0f + expf(-(row_logits[e] + (bias == nullptr ? 0.0f : bias[e]))));
+    unbiased[e] = 1.0f / (1.0f + expf(-row_logits[e]));
   }
   __syncthreads();
   if (threadIdx.x != 0) {
@@ -165,7 +175,7 @@ __global__ void RouterKernel(const float* logits, const float* bias, int n_exper
     best_ids[position] = e;
   }
   for (int i = 0; i < top_k; ++i) {
-    ids[i] = best_ids[i];
+    row_ids[i] = best_ids[i];
   }
 
   float sum = 0.0f;
@@ -183,11 +193,13 @@ __global__ void RouterKernel(const float* logits, const float* bias, int n_exper
 void LaunchRouterSelect(const float* logits, const float* bias,
                         std::size_t n_expert, std::size_t n_group,
                         std::size_t group_used, std::size_t top_k, float scale,
-                        std::int32_t* ids, float* weights, hipStream_t stream) {
-  RouterKernel<<<1, kThreads, 0, stream>>>(
+                        std::int32_t* ids, float* weights, std::size_t rows,
+                        std::size_t logits_stride, hipStream_t stream) {
+  RouterKernel<<<static_cast<int>(rows), kThreads, 0, stream>>>(
       logits, bias, static_cast<int>(n_expert), static_cast<int>(n_group),
       static_cast<int>(group_used), static_cast<int>(top_k), scale,
-      reinterpret_cast<int*>(ids), weights);
+      reinterpret_cast<int*>(ids), weights, static_cast<int>(rows),
+      static_cast<int>(logits_stride));
 }
 
 void LaunchFfn(const void* gate, StorageType gate_type, const void* up,
