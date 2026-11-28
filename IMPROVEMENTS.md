@@ -677,3 +677,31 @@ fewer bytes per token (dot4 is unavailable for this target, locality is excluded
 far fewer, far larger kernels — a tiled attention stage and fused per-token stages — because it is
 dispatch- and latency-bound, not bandwidth-bound.
 
+## Prefill profile: the routed MoE is 57 % (measured 2026-11-27)
+
+rocprofv3 on a chunked prefill of a 120-token prompt, aggregating kernel time by symbol:
+
+| kernel | time | dispatches |
+| --- | --- | --- |
+| expert GEMV (prepared) | 1,887 ms | 2,679 |
+| `GemmDotRow` (chunk projections) | 988 ms | 6,426 |
+| expert GEMV (variants) | 401 + 353 + 46 ms | 9,729 + 282 + 423 |
+| `RouterKernel` | 295 ms | 5,640 |
+| `DeltaRuleChunkKernel` (batched) | 281 ms | 175 |
+| `AbsorbQKernel` / `ValueAbsorb` | 74 ms | 1,974 |
+| `QuantizeActivations*` | 21+ ms | 5,640 |
+| everything else | remainder | |
+
+Total kernel time 4,758 ms for ~4.4 s wall. Two conclusions that redirect `prefill-opt`:
+
+1. **The routed MoE is ~57 % of prefill**, and the chunked path still calls its gather once per *row*
+   (2,679 calls of ~700 us). This is the single largest cost and the one batch that is not batched.
+   The fix is a grouped-MoE kernel: bucket the chunk's (row, expert) pairs by expert, then run one
+   GEMM per bucket — which is what llama.cpp does and this engine does not.
+2. The per-row `RouterKernel` (5,640 calls, 295 ms) goes with it: routing a whole chunk is one
+   projection plus a batched top-k, not 32 of each.
+
+That also explains why batching the KDA stages only bought 9 %: they were ~10 % of the time, not the
+bulk. The next prefill change should be grouped MoE, and the expected gain from the profile is
+substantial (a 2-4x reduction in the dominant term, i.e. prefill roughly doubling).
+
