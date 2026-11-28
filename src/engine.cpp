@@ -1735,6 +1735,13 @@ bool Engine::PrefillChunk(const std::int32_t* tokens, std::size_t count,
                     m.h, m.logits, stream);
   }
   hip::LaunchArgmax(m.logits, c.n_vocab, m.argmax, stream);
+  if (const hipError_t launch = hipGetLastError(); launch != hipSuccess) {
+    if (error != nullptr) {
+      *error = std::string("engine: chunked prefill launch failed: ") +
+               hipGetErrorString(launch);
+    }
+    return false;
+  }
   const hipError_t status = hipStreamSynchronize(stream);
 
   if (status != hipSuccess) {

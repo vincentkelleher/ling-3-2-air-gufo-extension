@@ -11,6 +11,7 @@
 #include <cstdio>
 #include <cstring>
 #include <limits>
+#include <stdexcept>
 #include <map>
 #include <mutex>
 #include <vector>
@@ -165,6 +166,20 @@ class Ling3ComponentAdapter final : public cache::Adapter,
   void OnPosition(void* slot, std::size_t position) override {
     const std::lock_guard<std::mutex> lock(mutex_);
     positions_[static_cast<cache::Slot*>(slot)] = position;
+  }
+  /// A pass ending at `boundary` leaves the whole private state there, so a
+  /// checkpoint can be retained at any pass end. The host asks before reserving an
+  /// aligned prompt target; refusing it would cost every continuation of a prompt
+  /// whose length is not a pass multiple. Only sizing uses the answer.
+  [[nodiscard]] std::vector<cache::ComponentPosition> PrefillCheckpointPositions(
+      const cache::Slot&, cache::Rows boundary) const override {
+    if (boundary == 0 || boundary > context_) {
+      throw std::invalid_argument("checkpoint boundary outside the context");
+    }
+    cache::ComponentPosition position;
+    position.id = component_.id;
+    position.valid_rows = boundary;
+    return {position};
   }
   /// One pass covers at most `kPassTokens` rows, so the plan is the ascending
   /// boundaries those passes end on, finishing exactly at `end`.
@@ -355,6 +370,11 @@ TextRunnerDescriptor Ling3Runner::Descriptor() const {
   // One pass covers the chunk the engine's prefill actually batches (PrefillChunk's
   // width); it is not split across layer groups, and one decoder is stepped at a time.
   descriptor.scheduling.pass_tokens = 32;
+  // A restored frontier continues the prompt exactly only from a pass boundary: the
+  // chunked kernels accumulate per pass, so a checkpoint taken inside a pass would be
+  // continued with different chunk widths than a cold prefill uses. The cache may
+  // still continue an unchanged retry at the complete prompt.
+  descriptor.capabilities.prefill_alignment = 32;
   descriptor.scheduling.max_layer_groups = 1;
   descriptor.scheduling.max_yield_decode_width = 1;
   return descriptor;
