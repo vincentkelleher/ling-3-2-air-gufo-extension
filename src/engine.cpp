@@ -1086,31 +1086,7 @@ bool Engine::ForwardFromEmbedded(std::uint32_t position, std::string* error) {
   report("final", c.n_layer);
   hip::LaunchRmsNorm(m.x, static_cast<const float*>(dev(weights.output_norm)), m.h, 1,
                      n_embd, eps, stream);
-  // The prepared path quantises the activation to Q8; llama.cpp dequantises the weight and
-  // keeps the activation in f32. LING3_HEAD_PLAIN forces the reference-shaped computation so
-  // the cost of that approximation can be measured instead of assumed.
-  const StorageType head_type = Storage(weights.output.type);
-  const bool head_q8 = head_type == hip::kQ8_0;
-  const bool head_prepared =
-      (head_type == hip::kQ4K || head_type == hip::kQ6K || head_q8) &&
-      std::getenv("LING3_HEAD_PLAIN") == nullptr;
-  if (head_prepared) {
-    // Q8_0 weights carry one scale per 32 values, so their prepared dot needs the 32-value
-    // activation quantiser; the K-quants use the 256-value one.
-    if (head_q8) {
-      hip::LaunchQuantizeActivations32(m.h, n_embd, m.act_values, m.act_scales32, stream);
-      hip::LaunchGemvPrepared(dev(weights.output), head_type, c.n_vocab, n_embd,
-                              m.act_values, m.act_scales32, m.logits, stream);
-    } else {
-      hip::LaunchQuantizeActivations(m.h, n_embd, m.act_values, m.act_scales, stream);
-      hip::LaunchGemvPrepared(dev(weights.output), head_type, c.n_vocab, n_embd,
-                              m.act_values, m.act_scales, m.logits, stream);
-    }
-  } else {
-    hip::LaunchGemv(dev(weights.output), Storage(weights.output.type), c.n_vocab,
-                    n_embd, m.h, m.logits, stream);
-  }
-  hip::LaunchArgmax(m.logits, c.n_vocab, m.argmax, stream);
+  RunOutputHead();
   dump_at("/work/logits_%u.bin", m.logits, c.n_vocab, position);
 
   // A kernel that never ran leaves the buffers stale and the output silently wrong; these runs were
@@ -1191,6 +1167,40 @@ bool Engine::ForwardFromEmbedded(std::uint32_t position, std::string* error) {
     return false;
   }
   return true;
+}
+
+void Engine::RunOutputHead() {
+  Impl& m = *impl_;
+  const Ling3Config& c = m.config;
+  const auto& weights = m.weights;
+  const std::size_t n_embd = c.n_embd;
+  hipStream_t stream = m.queue;
+  auto dev = [&m](const Tensor& tensor) { return m.Dev(tensor); };
+  // The prepared path quantises the activation to Q8; llama.cpp dequantises the weight and
+  // keeps the activation in f32. LING3_HEAD_PLAIN forces the reference-shaped computation so
+  // the cost of that approximation can be measured instead of assumed.
+  const StorageType head_type = Storage(weights.output.type);
+  const bool head_q8 = head_type == hip::kQ8_0;
+  const bool head_prepared =
+      (head_type == hip::kQ4K || head_type == hip::kQ6K || head_q8) &&
+      std::getenv("LING3_HEAD_PLAIN") == nullptr;
+  if (head_prepared) {
+    // Q8_0 weights carry one scale per 32 values, so their prepared dot needs the 32-value
+    // activation quantiser; the K-quants use the 256-value one.
+    if (head_q8) {
+      hip::LaunchQuantizeActivations32(m.h, n_embd, m.act_values, m.act_scales32, stream);
+      hip::LaunchGemvPrepared(dev(weights.output), head_type, c.n_vocab, n_embd,
+                              m.act_values, m.act_scales32, m.logits, stream);
+    } else {
+      hip::LaunchQuantizeActivations(m.h, n_embd, m.act_values, m.act_scales, stream);
+      hip::LaunchGemvPrepared(dev(weights.output), head_type, c.n_vocab, n_embd,
+                              m.act_values, m.act_scales, m.logits, stream);
+    }
+  } else {
+    hip::LaunchGemv(dev(weights.output), Storage(weights.output.type), c.n_vocab, n_embd,
+                    m.h, m.logits, stream);
+  }
+  hip::LaunchArgmax(m.logits, c.n_vocab, m.argmax, stream);
 }
 
 const float* Engine::SnapshotData() const { return impl_->snapshot; }
@@ -1378,23 +1388,23 @@ bool Engine::VerifyDrafts(const std::int32_t* tokens, std::size_t count,
     return false;
   }
   SnapshotState();
-  // Stop after the last trunk block: the chunk buffer then holds each row's final
-  // hidden state, which the head turns into per-row logits.
-  if (!PrefillChunk(tokens, count, start_position,
-                    static_cast<std::int32_t>(m.config.n_layer) - 1, error)) {
+  // The full trunk pass, not a stop after the last block's attention: the output
+  // head reads the residual after that block's FFN, so the chunk buffer then holds
+  // each row's final hidden state. The per-row head is RunOutputHead, the same
+  // kernels the token path uses, so a verify row's logits are not merely close to
+  // the token path's but identical.
+  if (!PrefillChunk(tokens, count, start_position, -1, error)) {
     return false;
   }
-  hip::LaunchGemm(m.Dev(m.weights.output), Storage(m.weights.output.type),
-                  m.config.n_vocab, n_embd, m.bx, count, n_embd, m.blogits,
-                  m.config.n_vocab, m.queue);
   for (std::size_t row = 0; row < count; ++row) {
     hip::LaunchRmsNorm(m.bx + row * n_embd,
                        static_cast<const float*>(m.Dev(m.weights.output_norm)), m.h, 1,
                        n_embd, m.config.rms_eps, m.queue);
-    hip::LaunchGemv(m.Dev(m.weights.output), Storage(m.weights.output.type),
-                    m.config.n_vocab, n_embd, m.h, m.logits, m.queue);
-    hip::LaunchArgmax(m.logits, m.config.n_vocab, m.argmax, m.queue);
-    hipStreamSynchronize(m.queue);
+    RunOutputHead();
+    if (hipStreamSynchronize(m.queue) != hipSuccess) {
+      if (error != nullptr) *error = "engine: verification head failed";
+      return false;
+    }
     std::int32_t value = -1;
     hipMemcpy(&value, m.argmax, sizeof(value), hipMemcpyDeviceToHost);
     argmax_per_row[row] = value;
@@ -1710,31 +1720,7 @@ bool Engine::PrefillChunk(const std::int32_t* tokens, std::size_t count,
   const std::size_t last = static_cast<std::size_t>(M - 1) * n_embd;
   hip::LaunchRmsNorm(m.bx + last, static_cast<const float*>(dev(weights.output_norm)),
                      m.h, 1, n_embd, eps, stream);
-  // The prepared path quantises the activation to Q8; llama.cpp dequantises the weight and
-  // keeps the activation in f32. LING3_HEAD_PLAIN forces the reference-shaped computation so
-  // the cost of that approximation can be measured instead of assumed.
-  const StorageType head_type = Storage(weights.output.type);
-  const bool head_q8 = head_type == hip::kQ8_0;
-  const bool head_prepared =
-      (head_type == hip::kQ4K || head_type == hip::kQ6K || head_q8) &&
-      std::getenv("LING3_HEAD_PLAIN") == nullptr;
-  if (head_prepared) {
-    // Q8_0 weights carry one scale per 32 values, so their prepared dot needs the 32-value
-    // activation quantiser; the K-quants use the 256-value one.
-    if (head_q8) {
-      hip::LaunchQuantizeActivations32(m.h, n_embd, m.act_values, m.act_scales32, stream);
-      hip::LaunchGemvPrepared(dev(weights.output), head_type, c.n_vocab, n_embd,
-                              m.act_values, m.act_scales32, m.logits, stream);
-    } else {
-      hip::LaunchQuantizeActivations(m.h, n_embd, m.act_values, m.act_scales, stream);
-      hip::LaunchGemvPrepared(dev(weights.output), head_type, c.n_vocab, n_embd,
-                              m.act_values, m.act_scales, m.logits, stream);
-    }
-  } else {
-    hip::LaunchGemv(dev(weights.output), Storage(weights.output.type), c.n_vocab, n_embd,
-                    m.h, m.logits, stream);
-  }
-  hip::LaunchArgmax(m.logits, c.n_vocab, m.argmax, stream);
+  RunOutputHead();
   if (const hipError_t launch = hipGetLastError(); launch != hipSuccess) {
     if (error != nullptr) {
       *error = std::string("engine: chunked prefill launch failed: ") +

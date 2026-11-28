@@ -71,7 +71,9 @@ class Engine {
   /// Speculative verification: runs `count` tokens from `start_position` in one
   /// chunked pass and reports the greedy argmax at every position. The trunk
   /// state is snapshotted first, so the caller can accept a prefix and rewind with
-  /// RestoreState if it rejects any draft.
+  /// RestoreState if it rejects any draft. The pass is the full trunk: the head
+  /// reads the last block's residual, so stopping inside that block would verify
+  /// against a hidden state the token path never produces.
   [[nodiscard]] bool VerifyDrafts(const std::int32_t* tokens, std::size_t count,
                                   std::uint32_t start_position,
                                   std::int32_t* argmax_per_row, std::string* error);
@@ -121,6 +123,12 @@ class Engine {
  private:
   /// The shared trunk step: assumes `m.x` already holds this step's embedding.
   [[nodiscard]] bool ForwardFromEmbedded(std::uint32_t position, std::string* error);
+
+  /// Runs the output head on the normalized hidden already in `m.h`: writes
+  /// `m.logits` and `m.argmax`. Shared by the token, chunked and verification
+  /// paths so their logits are computed by the same kernels in the same order
+  /// (the prepared head quantises the activation; the token path uses it).
+  void RunOutputHead();
 
   Engine() = default;
   struct Impl;

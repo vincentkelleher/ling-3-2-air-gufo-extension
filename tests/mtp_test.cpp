@@ -54,6 +54,33 @@ bool Greedy(Model& engine, std::uint32_t start, int steps, std::vector<std::int3
   return true;
 }
 
+/// One speculative step in the serving shape: draft with the MTP head, verify
+/// {current, draft} in one chunked pass, accept only an exact greedy match, undo both
+/// passes and re-feed exactly what was accepted. The engine owns one snapshot buffer,
+/// so the draft's checkpoint is dropped before VerifyDrafts takes its own; no
+/// checkpoint is left live across a call.
+bool SpeculativeStep(Model& engine, std::uint32_t position, std::int32_t current,
+                     std::int32_t* draft, bool* accepted, std::string* error) {
+  engine.SnapshotState();
+  if (!engine.ForwardMtp(current, position, error)) {
+    engine.RestoreState();
+    return false;
+  }
+  *draft = engine.Argmax();
+  engine.RestoreState();
+  const std::int32_t pair[2] = {current, *draft};
+  std::int32_t rows[2] = {0, 0};
+  if (!engine.VerifyDrafts(pair, 2, position, rows, error)) {
+    engine.RestoreState();
+    return false;
+  }
+  *accepted = rows[0] == *draft;
+  engine.RestoreState();
+  if (!engine.ForwardToken(current, position, error)) return false;
+  if (*accepted && !engine.ForwardToken(*draft, position + 1, error)) return false;
+  return true;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -165,6 +192,14 @@ int main(int argc, char** argv) {
   // The checkpoint every probe returns to, and the re-warm that makes it usable: the
   // snapshot does not carry the logits, so the last prompt token is fed again after it.
   engine->SnapshotState();
+  // The same state in a serving checkpoint, which the equivalence checks below
+  // restore instead of the shared snapshot buffer. Restoring it and feeding the last
+  // prompt token warms `m.h` without a checkpoint outliving a step.
+  std::vector<std::byte> pre_last(Model::ServingBytes(config, options.max_context));
+  if (!engine->SaveServingState(pre_last)) {
+    std::fprintf(stderr, "frontier checkpoint failed\n");
+    return 1;
+  }
   if (!engine->ForwardToken(static_cast<std::int32_t>(prompt.back()),
                             static_cast<std::uint32_t>(prompt.size() - 1), &error)) {
     std::fprintf(stderr, "first token: %s\n", error.c_str());
@@ -173,6 +208,12 @@ int main(int argc, char** argv) {
   const auto rewind = [&]() {
     engine->RestoreState();
     return engine->ForwardToken(last_prompt, last_position, &error);
+  };
+  // The state the reference decode starts from, rebuilt through a serving checkpoint so
+  // it does not depend on the snapshot buffer, plus the re-feed that makes m.h valid.
+  const auto to_frontier = [&]() {
+    return engine->LoadServingState(pre_last) &&
+           engine->ForwardToken(last_prompt, last_position, &error);
   };
 
   std::vector<std::int32_t> reference;
@@ -398,6 +439,193 @@ int main(int argc, char** argv) {
     std::printf("     drafts %zu, accepted %zu (%.0f %%), %.2f s for %d tokens\n", drafted,
                 accepted, drafted == 0 ? 0.0 : 100.0 * static_cast<double>(accepted) / drafted,
                 seconds, steps);
+  }
+
+  // 4. VerifyDrafts equivalence (design §7 row 1). One chunked pass over
+  // {current, draft} must return the same argmaxes as two ForwardToken calls; undoing
+  // the pass and re-feeding exactly the accepted prefix must reproduce the next four
+  // greedy tokens with logits delta 0 and an identical state digest.
+  {
+    if (!to_frontier()) {
+      std::fprintf(stderr, "frontier: %s\n", error.c_str());
+      return 1;
+    }
+    std::vector<std::int32_t> plain;
+    std::vector<std::vector<float>> plain_logits;
+    if (!Greedy(*engine, start, 5, &plain, &plain_logits, &error)) {
+      std::fprintf(stderr, "%s\n", error.c_str());
+      return 1;
+    }
+    const std::vector<double> digest5 = engine->DebugStateDigest();
+    if (!Greedy(*engine, start + 5, 1, &plain, &plain_logits, &error)) {
+      std::fprintf(stderr, "%s\n", error.c_str());
+      return 1;
+    }
+    const std::vector<double> digest6 = engine->DebugStateDigest();
+    if (!to_frontier()) {
+      std::fprintf(stderr, "frontier: %s\n", error.c_str());
+      return 1;
+    }
+    const std::int32_t first = engine->Argmax();
+    Check(first == plain[0], "VerifyDrafts frontier token (delta)",
+          static_cast<double>(first == plain[0] ? 0 : 1), 0.0);
+    // Draft, then drop the draft's writes: the MTP head advances block 42's cache,
+    // and VerifyDrafts takes its own checkpoint at entry.
+    engine->SnapshotState();
+    if (!engine->ForwardMtp(first, start, &error)) {
+      std::fprintf(stderr, "mtp: %s\n", error.c_str());
+      return 1;
+    }
+    const std::int32_t draft = engine->Argmax();
+    engine->RestoreState();
+    const std::int32_t pair[2] = {first, draft};
+    std::int32_t rows[2] = {0, 0};
+    if (!engine->VerifyDrafts(pair, 2, start, rows, &error)) {
+      std::fprintf(stderr, "verify: %s\n", error.c_str());
+      return 1;
+    }
+    engine->RestoreState();
+    // The same two tokens through the token path, from the restored frontier: both
+    // verify rows must equal the token path's argmaxes, including the row after a
+    // draft that is rejected.
+    if (!engine->ForwardToken(first, start, &error)) {
+      std::fprintf(stderr, "%s\n", error.c_str());
+      return 1;
+    }
+    const std::int32_t sequential0 = engine->Argmax();
+    if (!engine->ForwardToken(draft, start + 1, &error)) {
+      std::fprintf(stderr, "%s\n", error.c_str());
+      return 1;
+    }
+    const std::int32_t sequential1 = engine->Argmax();
+    const std::size_t row_mismatches = static_cast<std::size_t>(rows[0] != sequential0) +
+                                       static_cast<std::size_t>(rows[1] != sequential1);
+    Check(row_mismatches == 0, "VerifyDrafts rows vs ForwardToken",
+          static_cast<double>(row_mismatches), 0.0);
+    Check(sequential0 == plain[1], "sequential row0 vs greedy reference (delta)",
+          static_cast<double>(sequential0 == plain[1] ? 0 : 1), 0.0);
+    // Undo the pass and the sequential feed, then re-feed exactly what was accepted:
+    // the serving step's re-commit discipline.
+    engine->RestoreState();
+    const bool accepted = rows[0] == draft;
+    if (!engine->ForwardToken(first, start, &error)) {
+      std::fprintf(stderr, "%s\n", error.c_str());
+      return 1;
+    }
+    std::uint32_t position = start + 1;
+    if (accepted) {
+      if (!engine->ForwardToken(draft, position, &error)) {
+        std::fprintf(stderr, "%s\n", error.c_str());
+        return 1;
+      }
+      ++position;
+    }
+    std::vector<std::int32_t> refed;
+    std::vector<std::vector<float>> refed_logits;
+    if (!Greedy(*engine, position, 4, &refed, &refed_logits, &error)) {
+      std::fprintf(stderr, "%s\n", error.c_str());
+      return 1;
+    }
+    const std::size_t base = 1 + static_cast<std::size_t>(accepted);
+    std::size_t token_mismatches = 0;
+    for (std::size_t i = 0; i < refed.size(); ++i) {
+      if (refed[i] != plain[base + i]) ++token_mismatches;
+    }
+    double worst = 0.0;
+    for (std::size_t i = 0; i < refed_logits.size(); ++i) {
+      for (std::size_t j = 0; j < refed_logits[i].size(); ++j) {
+        worst = std::max(worst, std::fabs(static_cast<double>(refed_logits[i][j]) -
+                                          plain_logits[base + i][j]));
+      }
+    }
+    Check(token_mismatches == 0, "re-feed tokens vs greedy reference",
+          static_cast<double>(token_mismatches), 0.0);
+    Check(worst == 0.0, "re-feed logits vs greedy (max delta)", worst, 0.0);
+    const std::vector<double>& expected_digest = accepted ? digest6 : digest5;
+    const std::vector<double> refed_digest = engine->DebugStateDigest();
+    std::size_t digest_mismatches = 0;
+    for (std::size_t i = 0; i < refed_digest.size(); ++i) {
+      if (refed_digest[i] != expected_digest[i]) ++digest_mismatches;
+    }
+    Check(digest_mismatches == 0, "re-feed state digest differs",
+          static_cast<double>(digest_mismatches), 0.0);
+    std::printf("     verify: draft %d, accepted %d; %zu layers digest\n", draft,
+                accepted ? 1 : 0, refed_digest.size());
+  }
+
+  // 5. Loop equivalence (design §7 row 2): the serving step shape over 32 tokens from
+  // the same frontier must equal plain greedy token for token, with logits delta 0.
+  {
+    if (!to_frontier()) {
+      std::fprintf(stderr, "frontier: %s\n", error.c_str());
+      return 1;
+    }
+    std::vector<std::int32_t> plain;
+    std::vector<std::vector<float>> plain_logits;
+    if (!Greedy(*engine, start, 32, &plain, &plain_logits, &error)) {
+      std::fprintf(stderr, "%s\n", error.c_str());
+      return 1;
+    }
+    if (!to_frontier()) {
+      std::fprintf(stderr, "frontier: %s\n", error.c_str());
+      return 1;
+    }
+    const auto started = std::chrono::steady_clock::now();
+    std::int32_t current = engine->Argmax();
+    std::uint32_t position = start;
+    std::vector<std::int32_t> got;
+    std::size_t drafts = 0;
+    std::size_t accepted = 0;
+    std::size_t logit_mismatches = 0;
+    double worst = 0.0;
+    std::vector<float> row(engine->VocabSize());
+    while (got.size() < plain.size()) {
+      if (plain.size() - got.size() >= 2) {
+        std::int32_t draft = 0;
+        bool took = false;
+        if (!SpeculativeStep(*engine, position, current, &draft, &took, &error)) {
+          std::fprintf(stderr, "%s\n", error.c_str());
+          return 1;
+        }
+        ++drafts;
+        got.push_back(current);
+        ++position;
+        if (took) {
+          got.push_back(draft);
+          ++position;
+          ++accepted;
+        }
+      } else {
+        got.push_back(current);
+        if (!engine->ForwardToken(current, position, &error)) {
+          std::fprintf(stderr, "%s\n", error.c_str());
+          return 1;
+        }
+        ++position;
+      }
+      engine->ReadLogits(row.data());
+      const auto& expected = plain_logits[got.size() - 1];
+      for (std::size_t j = 0; j < row.size(); ++j) {
+        const double delta = std::fabs(static_cast<double>(row[j]) - expected[j]);
+        if (delta != 0.0) ++logit_mismatches;
+        worst = std::max(worst, delta);
+      }
+      current = engine->Argmax();
+    }
+    const double seconds =
+        std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count();
+    std::size_t token_mismatches = 0;
+    for (std::size_t i = 0; i < got.size(); ++i) {
+      if (got[i] != plain[i]) ++token_mismatches;
+    }
+    Check(token_mismatches == 0, "speculative loop tokens",
+          static_cast<double>(token_mismatches), 0.0);
+    Check(logit_mismatches == 0, "speculative loop logits (mismatches)",
+          static_cast<double>(logit_mismatches), 0.0);
+    Check(worst == 0.0, "speculative loop logits (max delta)", worst, 0.0);
+    std::printf("     loop: %zu drafts, %zu accepted (%.0f %%), %.2f s for 32 tokens\n",
+                drafts, accepted,
+                drafts == 0 ? 0.0 : 100.0 * static_cast<double>(accepted) / drafts, seconds);
   }
 
   std::printf("mtp: %d failures\n", Failures);
