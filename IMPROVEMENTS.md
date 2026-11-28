@@ -769,3 +769,21 @@ read past the tile. Reverted; prefill stays at 29.8 tok/s.
 Lesson recorded for the next attempt: `LaunchGemm` takes both `cols` and an input stride, and the two
 differ for at least one caller, so a prepared copy must use the stride and bound the read by it.
 
+### The expert gather costs ~20x more than any model predicts (open question)
+
+Three explanations for the gather's cost have now been tested and excluded, so it is worth stating as a
+question rather than a plateau:
+
+| hypothesis | test | result |
+| --- | --- | --- |
+| compute-bound on the int8 dot | arithmetic: 15.7M MACs per call | ~12 us predicted, ~700 us measured |
+| bandwidth-bound on the expert weights | 7.9 MB per call at 237 GB/s | ~33 us predicted |
+| locality / TLB across a 4 GB expert table | `LING3_FORCE_EXPERT=0` on a chunked prefill | **29.78 tok/s with and without** — no effect |
+
+So the gather is ~20-60x slower than compute, bandwidth or locality explain, and pinning every row to a
+single expert changes nothing. The remaining candidates are inside the kernel itself — per-warp
+redundant work, an index computation that serialises, or a launch shape that leaves the device idle —
+and settling it needs an instruction-level trace of that kernel rather than more black-box timings.
+That is the single most valuable next investigation for `prefill-opt`: the term is 57 % of prefill, and
+its cost is currently unexplained.
+
