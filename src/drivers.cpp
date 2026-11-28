@@ -280,6 +280,14 @@ bool GenerateWithImages(Loaded& model, const std::vector<text::TokenId>& prompt,
   if (prompt.empty()) {
     return true;
   }
+  // ForwardEmbedding reads n_embd floats per row. A stride that disagrees with the
+  // row data silently shifts every embedding after the first, so check it here.
+  if (rows.size() != markers.size() * row_width) {
+    if (error != nullptr) {
+      *error = "image rows do not match the marker count and row width";
+    }
+    return false;
+  }
   const auto prefill_start = Clock::now();
   std::size_t row = 0;
   std::size_t marker_index = 0;
@@ -384,7 +392,8 @@ int RunPromptLike(const TextPromptOptions& options, const core::GgufReader& read
       return 1;
     }
     ok = GenerateWithImages(
-        model, ids, markers, image_rows, rows_per_image, options.sampling,
+        model, ids, markers, image_rows,
+        static_cast<std::uint32_t>(model.config.n_embd), options.sampling,
         options.max_tokens,
         [](text::TokenId, const std::string& piece) { std::fputs(piece.c_str(), stdout); },
         &result, &error);
