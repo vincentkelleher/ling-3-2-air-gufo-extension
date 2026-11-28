@@ -43,3 +43,23 @@ So the size win is real — Q8_0 is 70.7 % of a token's traffic and Q6_K is 22.8
 tensors, which would take 4.753 GB/token to ~3.98 GB and the memory ceiling from 49.9 to ~59.6 tok/s —
 but the loader has to be done properly: page-align the derived buffers, and audit every consumer of a
 substituted tensor's bytes before enabling it.
+
+## Measured: fewer bytes makes decode slower here (2026-11-27)
+
+With the loader wired (token embedding excluded), a Q6_K substitution of every Q8_0 projection and the
+LM head was measured end to end:
+
+| build | decode, 32 steps |
+| --- | --- |
+| pinned weights (Q8_0 + Q4_K/Q6_K) | **19.63 tok/s** |
+| Q8_0 tensors substituted with Q6_K (-22.8 % bytes on those, -16 % on a token) | **4.93 tok/s** |
+
+Four times slower with 16 % fewer bytes. That is consistent with the rest of this session's evidence:
+at 39 % of the 49.9 tok/s roofline the engine is **not bandwidth-bound**, so removing bytes buys
+nothing, while Q6_K's 6-bit unpacking and 16 sub-block scales per 256 values cost real compute in a
+path that is already latency-exposed. Bytes/token is therefore *not* a lever until the quantised dots
+are efficient; the 60 tok/s target cannot be reached by re-quantising, only by making the kernels
+faster (or by a different machine).
+
+The loader changes were reverted; the tooling stays, and this is the measurement that closes the
+`lane-decode-bytes` question.
