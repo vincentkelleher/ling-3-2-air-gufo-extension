@@ -862,27 +862,20 @@ utilisation with coalesced loads has room for an order of magnitude — and it i
 to the prefill target.
 
 
-## The next prefill change, spelled out (2026-11-27)
+## Withdrawn: the "32x weight reuse" idea for the gather (2026-11-27)
 
-The gather is invoked once per chunk row, so a 32-row chunk loads the same 8 experts' gate/up weights
-**32 times**. The kernel is latency-bound on those loads (PMC: 1 % ALU utilisation, 0.007 waves/cycle)
-and every instruction-level variant measured neutral, which points at the redundancy rather than the
-instruction mix.
+I wrote here that the gather re-reads the same experts' weights 32 times per chunk and that a multi-row
+kernel would cut that by 32x. The arithmetic does not support it, and the entry is withdrawn:
 
-The change: give one warp `(expert_slot, output_row)` and loop it over the chunk's rows, loading the
-weight block once and dotting it against each row's activation (`m.bffnh + row * n_embd` is already
-row-indexed). Weight loads for gate/up drop by the chunk width (32x); the down projection still needs
-per-row activations but reuses the same weight block for all 32 rows as well.
+- rows select *different* experts, so a warp that owns `(expert_slot, output_row)` faces different
+  weights for every row — there is nothing to reuse;
+- and the traffic is not the problem anyway: 8 experts x 3 matrices is ~47 MB per row, ~114 GB for a
+  2,420-row prompt, which at 237 GB/s is **0.48 s of an 81 s run — 0.6 %**. The gather takes 57 % of the
+  time while moving almost nothing.
 
-Scope and verification:
-- new kernel `GemvExpertsChunkKernel` beside the existing one, selected when the caller has a whole
-  chunk (the per-row path stays for decode and as the fallback);
-- the gate/up half can be wired first and measured alone, since it is two of the three matvecs;
-- `ctest` 10/10, then chunked-vs-per-token parity (the instrument that proved 966/966 rows identical),
-  then `tools/bench_report.py --chunked-prefill 32` for the number, and the goldens re-documented if the
-  accumulation order changes (it will: rows are summed in a different order per output row).
-
-Expected from the PMC numbers: the gather is 57 % of prefill and 32x of its load traffic is redundant;
-halving that term would put prefill near 40-45 tok/s and quartering it near 60 — still far from 2,000,
-but the first change in this stretch with an arithmetic reason to expect double-digit percent.
+So the gather is latency-exposed at its shape: one warp per 2,560-element row performs 80 multiply-adds
+per lane and then waits. What would help is *more independent work per warp* (several output rows of the
+same expert in one warp, amortising the activation and giving the scheduler four independent chains —
+which is what the four-row tiling tried on the Q8_0 prepared dot and measured neutral) or a different
+dispatch shape altogether. It is not a dedupe problem, and I should not have written that it was.
 
