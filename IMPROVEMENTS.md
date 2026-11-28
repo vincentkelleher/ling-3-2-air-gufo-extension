@@ -934,3 +934,25 @@ launch-error check (`81b7c21`) stays, because it is what turned "silently wrong"
 Reverted; the engine is at 19.8 tok/s decode / 29.8 prefill, goldens 1/4 with `arithmetic` exact, and
 `ctest` 10/10.
 
+
+## 2026-11-28
+
+### Router per-row weights: prefill A/B, no material cost (kept)
+
+`7215325` made each prefill row's MoE combine weights land in its own slots (the second
+half of the chunked-router correctness fix). Its first reading was 29.52-29.55 tok/s
+pp2420 against the documented 29.8, so the pre-fix kernel was benched back to back in
+one session with the same harness
+(`LING3_PROMPT_FILE=pp2048.txt LING3_PREFILL_CHUNK=1 ling3_air_forward_test <model> 1`,
+full model load per run):
+
+| tree | run 1 | run 2 |
+| --- | --- | --- |
+| HEAD `7215325` (writes `row_weights`) | 29.52 | 29.51 |
+| `063801c` (wrote the batch base `weights`) | 29.78 | 29.80 |
+
+HEAD is **0.9 % lower** (29.515 vs 29.79 tok/s), below the 2 % threshold and inside the
+~5 % ambient drift recorded above; the four runs are themselves tight, so the honest
+reading is "no more than ~1 %, possibly systematic". Either way it is not material next
+to the correctness fix, and decode cannot change (`rows == 1` makes
+`row_weights == weights`). Kept; the small difference is recorded as ambient.

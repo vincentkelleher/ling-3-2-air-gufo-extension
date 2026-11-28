@@ -200,22 +200,36 @@ answers: "there's a large red circle, and inside it, centered, is a blue square.
 the upper-left corner, there's small text" — where llama.cpp says "a large, solid red
 circle". Both are correct; ours names the square and the text too.
 
-## CLI image flag: open question (2026-11-27)
+## CLI image flag: resolved (2026-11-28)
 
-`gufo prompt --image` does not reach the driver's image handling, while
-`tests/image_forward_test.cpp` proves the same helpers work. Facts collected:
+`gufo prompt --image` reaches the vision tower and the completion describes the image.
+With the module installed from this tree and the red-circle/blue-square/"ling" fixture:
 
-- `gufo prompt --help` lists `--image`; the CLI stores it in `options.image_paths`
-  (verified in Gufo's `src/cli/prompt/prompt.cpp`), and it accepts a nonexistent path
-  without complaint, so parsing happens.
-- The driver entry `RunLing3Prompt` calls `RunPromptLike`, and a temporary
-  `fprintf(stderr, ...)` at the top of `RunPromptLike` never printed, even though the
-  freshly installed module contains that string and `gufo diagnose` reports that exact
-  `.so` path as loaded.
-- The plain prompt path through the same function prints its own timing line, so the
-  driver is being called.
+    gufo prompt --model <first shard> --mmproj <mmproj> --image test_image.png \
+      --prompt "Describe this image in one sentence." --max-tokens 60 --temperature 0 \
+      --think off --no-display-prompt
 
-The next step for whoever picks this up: run the same probe inside `RunLing3Prompt` and
-`RunLing3Chat` separately, and check whether `gufo extension install` is loading a
-different module than `diagnose` reports (for example a build-cache copy inside
-`/work/ext-build`). Until then the flag is documented as unverified.
+    encoded 1 image(s), 576 rows each
+    A large red circle is centered on a light background with a smaller blue square inside it.
+    prefill 19.81 tok/s, decode 18.45 tok/s (606 prompt, 18 generated)
+
+With thinking on (`--max-tokens 100`) it describes the same image and adds the "ling"
+text in the upper-left corner.
+
+The 2026-11-27 note above blamed a driver entry whose probe never printed. That is not
+reproducible now: a fresh `gufo extension install` from the same tree prints the driver's
+image line and runs the tower. `gufo extension install` rebuilds the module from the
+workspace copy, so the earlier probe most likely described a stale module; that run's
+install state was not kept, so the exact cause of the silence is not provable from here.
+
+There was a real bug behind the flag, and it was ours: `RunPromptLike` called
+`GenerateWithImages` with `rows_per_image` (576) as the row stride, while each projected
+row is `n_embd` (2560) floats and `ForwardEmbedding` copies that many. Every marker
+after position zero read an overlapping slice of the wrong row, so the image condition
+was lost and the greedy answer for the test image was "mostly white/blank". The driver
+now passes `config.n_embd`, and `GenerateWithImages` refuses input whose size is not
+`markers * row_width`, so this class of mistake returns an error instead of a plausible
+sentence.
+
+Verification: the transcript above, plain `gufo prompt` still runs, and
+`ctest -R '^ling3_air'` passes 10/10 (2026-11-28).
