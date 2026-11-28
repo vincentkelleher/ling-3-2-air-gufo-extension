@@ -746,3 +746,15 @@ instruction set can improve, and prefill is therefore near its practical ceiling
 more arithmetic per byte loaded by hand (register blocking), which is a rewrite rather than a tuning
 step.
 
+### Four-row-per-warp tiling of the prepared Q8_0 dot: no change, reverted
+
+Loading the activation block once per four output rows and interleaving the four integer dot chains —
+the standard fix for a dependency-stall-bound dot — measured **19.65 tok/s decode and 29.83 prefill**,
+i.e. identical to the one-row kernel. The dot's ~30 % of peak is therefore memory-latency, not
+instruction scheduling, and no amount of in-kernel tiling addresses it.
+
+That closes the tuning space this session could reach: every remaining idea either needs dot4 (absent
+for this target), a smaller expert table (a different artifact), or a redesigned kernel with explicit
+asynchronous loads and register-blocked tiles held across many more rows than a warp — a rewrite whose
+per-step gains are unproven and whose cost is measured in days.
+
